@@ -47,8 +47,8 @@ jobs:
       - name: Note about branch-specific builds
         run: |
           echo "::notice::repository_dispatch triggers the default branch (main)"
-          echo "::notice::To trigger combinedENV branch, you have two options:"
-          echo "::notice::1. Merge main→combinedENV to sync the changes"
+          echo "::notice::To trigger <new branch>, you have two options:"
+          echo "::notice::1. Merge main → <new branch> to sync the changes"
           echo "::notice::2. Manually trigger: https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions"
 
       - name: Workflow summary
@@ -69,20 +69,20 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📝 Note: Triggering combinedENV Branch" >> $GITHUB_STEP_SUMMARY
+          echo "### 📝 Note: Triggering <new branch>" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "GitHub's \`repository_dispatch\` only triggers workflows on the **default branch** (main)." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**To rebuild combinedENV branch, choose one option:**" >> $GITHUB_STEP_SUMMARY
+          echo "**To rebuild <new branch>, choose one option:**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **Merge main → combinedENV:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. **Merge main → <new branch> >> $GITHUB_STEP_SUMMARY
           echo "   \`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "   cd pangeo-notebook-veda-image" >> $GITHUB_STEP_SUMMARY
-          echo "   git checkout combinedENV" >> $GITHUB_STEP_SUMMARY
+          echo "   git checkout <new branch> >> $GITHUB_STEP_SUMMARY
           echo "   git merge main" >> $GITHUB_STEP_SUMMARY
           echo "   git push" >> $GITHUB_STEP_SUMMARY
           echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "2. **Manual trigger:** Push an empty commit to combinedENV to trigger rebuild" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Manual trigger:** Push an empty commit to <new branch> trigger rebuild" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "3. **Make combinedENV the default branch** (if it should always be built)" >> $GITHUB_STEP_SUMMARY
+          echo "3. **Make <new branch> default branch** (if it should always be built)" >> $GITHUB_STEP_SUMMARY

@@ -181,19 +181,24 @@ process_sentinel2 /data/sentinel2 -p all -event 202512_Flood_WA
 
 **Sentinel-2:**
 - L1C or L2A data in `.zip` format
-- Download using `download_sentinel2.py` script or from [Copernicus Open Access Hub](https://scihub.copernicus.eu/)
+- Download using `download_sentinel2` command or from [Copernicus Open Access Hub](https://scihub.copernicus.eu/)
 
 ### Downloading Sentinel-2 Data
 
+Use the `download_sentinel2` command to download Sentinel-2 imagery from Copernicus:
+
 ```bash
 # Download by tile and date
-python sentinel/download_sentinel2.py /output/dir -tile T36SYD -date 2023-01-16
+download_sentinel2 /output/dir -tile T36SYD -date 20230116
 
 # Download by point coordinates
-python sentinel/download_sentinel2.py /output/dir -point 35.5 33.9 -date 2023-01-16
+download_sentinel2 /output/dir -point 35.5 33.9 -date 20230116
 
 # Download by polygon
-python sentinel/download_sentinel2.py /output/dir -polygon /path/to/polygon.geojson -date 2023-01-16
+download_sentinel2 /output/dir -polygon /path/to/polygon.shp -date 20230116
+
+# Download date range
+download_sentinel2 /output/dir -tile T36SYD -date 20230116 20230120
 ```
 
 ## Output

@@ -9,6 +9,7 @@ Usage:
     Command line:
         process_landsat89 <input_dir> [options]
         process_sentinel2 <input_dir> [options]
+        download_sentinel2 <output_dir> [options]
 
     Or import functions in your code:
         from landsat import genTrueColor, genNdvi, etc.

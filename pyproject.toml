@@ -31,6 +31,7 @@ dependencies = [
 [project.scripts]
 process_landsat89 = "landsat.cli:process_landsat89_cli"
 process_sentinel2 = "sentinel.cli:process_sentinel2_cli"
+download_sentinel2 = "sentinel.cli:download_sentinel2_cli"
 
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"

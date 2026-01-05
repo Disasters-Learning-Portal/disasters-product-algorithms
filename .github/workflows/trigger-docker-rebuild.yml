@@ -8,7 +8,7 @@ on:
       - '**.md'
       - 'docs/**'
       - 'notebooks/**'
-      - '.github/**'
+      - '.github/DOCKER_REBUILD_SETUP.md'
 
 jobs:
   trigger-rebuild:

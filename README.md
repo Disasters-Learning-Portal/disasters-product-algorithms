@@ -232,6 +232,42 @@ disasters-product-algorithms/
 └── shared_utils/         # Shared utilities (COG, GDAL, geotools)
 ```
 
+## Docker Integration
+
+This package is automatically integrated into the [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) Docker image for use on VEDA JupyterHub instances.
+
+### Automatic Rebuilds
+
+When code is pushed to the `main` branch of this repository, the Docker image is automatically rebuilt to include the latest changes. This is accomplished through a GitHub Actions workflow that triggers the pangeo-notebook-veda-image build pipeline.
+
+**Monitor build status:**
+- [pangeo-notebook-veda-image Actions](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions)
+
+### Using in JupyterHub
+
+The package is pre-installed in VEDA JupyterHub environments. All CLI commands and Python APIs are available without additional installation:
+
+```bash
+# CLI commands available in terminal
+process_landsat89 --help
+process_sentinel2 --help
+download_sentinel2 --help
+```
+
+```python
+# Python APIs available in notebooks
+from landsat import genTrueColor, genNdvi
+from sentinel import gen_true_color, gen_ndvi
+from shared_utils import convert_to_cog, rename_with_event
+```
+
+### Docker Image Details
+
+- **Base Image:** `pangeo/pangeo-notebook:2025.08.14`
+- **Registry:** Docker Hub (`disasters-jupyterhub-docker-image`)
+- **Installation:** Installed from GitHub via pip during build
+- **Documentation:** See [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) for deployment details
+
 ## Author
 
 Kaylee Sharp (February 2025)

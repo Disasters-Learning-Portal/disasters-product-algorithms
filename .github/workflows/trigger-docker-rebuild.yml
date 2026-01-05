@@ -1,0 +1,39 @@
+name: Trigger Docker Image Rebuild
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'notebooks/**'
+      - '.github/**'
+
+jobs:
+  trigger-rebuild:
+    name: Notify pangeo-notebook-veda-image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger pangeo-notebook-veda-image rebuild
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.PANGEO_REBUILD_TOKEN }}" \
+            https://api.github.com/repos/Disasters-Learning-Portal/pangeo-notebook-veda-image/dispatches \
+            -d '{"event_type":"algorithm-updated","client_payload":{"sha":"${{ github.sha }}","ref":"${{ github.ref }}","repository":"${{ github.repository }}"}}'
+
+      - name: Workflow summary
+        run: |
+          echo "### ✅ Docker Image Rebuild Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Successfully triggered rebuild of pangeo-notebook-veda-image Docker image." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Monitor the build progress at:" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions" >> $GITHUB_STEP_SUMMARY

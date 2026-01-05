@@ -1,0 +1,16 @@
+# =============================================================================
+# IMPORTANT: All dependencies should be pre-installed via conda
+# =============================================================================
+# For best compatibility, install ALL dependencies via conda BEFORE pip installing this package:
+#   conda install -c conda-forge gdal rasterio rio-cogeo geopandas pyproj numpy scipy pillow lxml requests boto3
+#
+# This package only installs the Python scripts and CLI entry points.
+# All libraries should already be present in your conda/JupyterHub environment.
+#
+# Why? Many packages (gdal, boto3, numpy) have specific version requirements
+# in conda environments. Installing via pip can cause dependency conflicts.
+# =============================================================================
+
+# Minimal pip dependencies (only if not already in your environment)
+Pillow
+lxml

@@ -11,7 +11,9 @@ import glob
 import os
 import time
 import argparse
+from pathlib import Path
 from sentinel.sentinel2_functions import *
+from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 
 then = datetime.now()
 
@@ -19,7 +21,7 @@ parser=argparse.ArgumentParser(
         description='''This script unzips and processes Sentinel-2 L2A data\
                      and produces true color, natural color, color infrared\
                      NDWI, MNDWI, NDVI, NBR, or Water Extent.''',
-        usage='process_sentinel2.py input [-h] [-p [P ...]] [-we_nstd [WE_NSTD ...]] [-date [DATE ...]] [-tile [TILE ...]] [-merge] [-mask] [-force] [-unzip_only]')
+        usage='process_sentinel2.py input [-h] [-p [P ...]] [-we_nstd [WE_NSTD ...]] [-date [DATE ...]] [-tile [TILE ...]] [-merge] [-mask] [-force] [-unzip_only] [-tif_only] [-nodata NODATA] [-compression COMPRESSION] [-compression_level LEVEL] [-event EVENT]')
 parser.add_argument('input', nargs=1, help= 'Path to directory containing the .zip files (e.g.\
                     /data/esops/eventData/2023/TurkeyEarthquake/sentinel2).')
 parser.add_argument('-p', nargs='*', default=['true'], help='List of products to produce (all = everything, true = true color,\
@@ -36,6 +38,11 @@ parser.add_argument('-mask', default=False, action='store_true', help='Generate 
                     preserved as well).')
 parser.add_argument('-force', default=False, action="store_true", help='Force overwrite existing products.')
 parser.add_argument('-unzip_only', default=False, action="store_true", help='Just unzip all .zip files. Do not process.')
+parser.add_argument('-tif_only', default=False, action="store_true", help='Skip COG conversion and keep regular GeoTIFF format (COG is default).')
+parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
+parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
+parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
+parser.add_argument('-event', type=str, default=None, help='Event name for filename prefix (e.g., 202512_Flood_WA). Adds formatted date suffix.')
 args=parser.parse_args()
 
 print('\nInput:', args.input[0])
@@ -232,15 +239,30 @@ else:
         if not os.path.isdir(prod_dir):
             os.mkdir(prod_dir)
         prod_name = os.path.join(prod_dir, f'{sat}_cloudMask_{date}_{time}_{tile}.tif')
-        check = glob.glob(prod_name)
 
-        # produce cloud mask
-        if len(check) == 0 or args.force:
-          print('\n* Producing Cloud Mask')
-          cloudMask = gen_cloudMask(ddir, prod_name, level)
+        # Check if final output file already exists
+        final_name = get_final_filename(prod_name, args.event, args.tif_only)
+        if os.path.exists(final_name) and not args.force:
+            print(f'\n* Cloud Mask already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+            cloudMask = final_name
         else:
-          cloudMask = prod_name
-          print('\n* Cloud Mask already produced. Use -force in your command to overwrite.')
+            # produce cloud mask
+            print('\n* Producing Cloud Mask')
+            cloudMask = gen_cloudMask(ddir, prod_name, level)
+
+            # Convert to COG (default) and optionally rename with event
+            if not args.tif_only:
+                cog_path = convert_to_cog(
+                    prod_name,
+                    nodata=args.nodata,
+                    compression=args.compression,
+                    compression_level=args.compression_level
+                )
+                if args.event and not args.merge:
+                    rename_with_event(cog_path, args.event)
+            elif args.event and not args.merge:
+                # Rename TIF without COG conversion
+                rename_with_event(prod_name, args.event)
     else:
        cloudMask = None
 
@@ -252,14 +274,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_trueColor_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
 
-      # produce true color image
-      if len(check) == 0 or args.force:
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* True color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce true color image
         print('\n* Processing true color')
         gen_true_color(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* True color already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     nat_variants = ['nat', 'natural', 'naturalcolor']
     if next((True for p in products if p.lower() in nat_variants), False):
@@ -269,14 +306,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_naturalColor_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
 
-      # produce natural color image
-      if len(check) == 0 or args.force:
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* Natural color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce natural color image
         print('\n* Processing natural color')
         gen_natural_color(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* Natural color already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     swir_variants = ['swir', 'shortwaveir', 'shortwaveinfrared']
     if next((True for p in products if p.lower() in swir_variants), False):
@@ -286,14 +338,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_shortwaveInfrared_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
 
-      # produce SWIR image
-      if len(check) == 0 or args.force:
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* Short wave infrared already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce SWIR image
         print('\n* Porcessing short wave infrared')
         gen_swir(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* Short wave infrared already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     cir_variants = ['cir', 'colorir', 'colorinfrared']
     if next((True for p in products if p.lower() in cir_variants), False):
@@ -303,14 +370,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_colorInfrared_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
 
-      # produce color infrared image
-      if len(check) == 0 or args.force:
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* Color infrared already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce color infrared image
         print('\n* Processing color infrared')
         gen_color_infrared(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* Color infrared already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     if next((True for p in products if p.lower() == 'ndwi'), False):
       # check for NDWI
@@ -319,14 +401,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDWI_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
-      
-      # produce NDWI image
-      if len(check) == 0 or args.force:
+
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* NDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce NDWI image
         print('\n* Processing NDWI')
         gen_ndwi(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* NDWI already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     if next((True for p in products if p.lower() == 'mndwi'), False):
       # check for mNDWI image
@@ -335,14 +432,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_MNDWI_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
-      
-      # produce mNDWI image
-      if len(check) == 0 or args.force:
+
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* MNDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce mNDWI image
         print('\n* Processing MNDWI')
         gen_mndwi(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* MNDWI already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     if next((True for p in products if p.lower() == 'ndvi'), False):
       # check for NDVI
@@ -351,14 +463,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDVI_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
-      
-      # produce for NDVI image
-      if len(check) == 0 or args.force:
+
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* NDVI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce for NDVI image
         print('\n* Processing NDVI')
         gen_ndvi(ddir, prod_name, level, cloudMask, ray)
-      else:
-        print('\n* NDVI already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
     
     if next((True for p in products if p.lower() == 'nbr'), False):
       # check for NBR image
@@ -367,14 +494,29 @@ else:
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       prod_name = os.path.join(prod_dir, f'{sat}_{level}_NBR_{date}_{time}_{tile}.tif')
-      check = glob.glob(prod_name)
-      
-      # produce NBR image
-      if len(check) == 0 or args.force:
+
+      # Check if final output file already exists
+      final_name = get_final_filename(prod_name, args.event, args.tif_only)
+      if os.path.exists(final_name) and not args.force:
+        print(f'\n* NBR already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+      else:
+        # produce NBR image
         print('\n* Processing NBR')
         gen_nbr(ddir, prod_name, level, cloudMask)
-      else:
-        print('\n* NBR already processed. Use -force in your command to overwrite.')
+
+        # Convert to COG (default) and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                prod_name,
+                nodata=args.nodata,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event and not args.merge:
+                rename_with_event(cog_path, args.event)
+        elif args.event and not args.merge:
+            # Rename TIF without COG conversion
+            rename_with_event(prod_name, args.event)
 
     # update permissions
     print(f'\nProgress: {i+1}/{num_dirs}')
@@ -409,13 +551,29 @@ else:
           # format output filename
           nstd_str = str(nstd).replace('.', '_')
           prod_name = os.path.join(prod_dir, f'{sat}_waterExtent_NSTD_{nstd_str}_{date}.tif')
-          check = glob.glob(prod_name)
-          if len(check) == 0 or args.force:
+
+          # Check if final output file already exists
+          final_name = get_final_filename(prod_name, args.event, args.tif_only)
+          if os.path.exists(final_name) and not args.force:
+            print(f'\n* Water Extent already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+          else:
             # produce water extent
             print(f'\n* Processing Water Extent (NSTD: {nstd})')
             gen_water_extent(date_dir, float(nstd), prod_name, cloudMask)
-          else:
-            print('\n* Water Extent already processed. Use -force in your command to overwrite.')
+
+            # Convert to COG (default) and optionally rename with event
+            if not args.tif_only:
+                cog_path = convert_to_cog(
+                    prod_name,
+                    nodata=args.nodata,
+                    compression=args.compression,
+                    compression_level=args.compression_level
+                )
+                if args.event:
+                    rename_with_event(cog_path, args.event)
+            elif args.event:
+                # Rename TIF without COG conversion
+                rename_with_event(prod_name, args.event)
 
   if args.merge:
      print('\n')

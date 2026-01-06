@@ -75,14 +75,14 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**To rebuild <new branch>, choose one option:**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **Merge main → <new branch> >> $GITHUB_STEP_SUMMARY
+          echo "1. **Merge main → <new branch>:**" >> $GITHUB_STEP_SUMMARY
           echo "   \`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "   cd pangeo-notebook-veda-image" >> $GITHUB_STEP_SUMMARY
-          echo "   git checkout <new branch> >> $GITHUB_STEP_SUMMARY
+          echo "   git checkout <new branch>" >> $GITHUB_STEP_SUMMARY
           echo "   git merge main" >> $GITHUB_STEP_SUMMARY
           echo "   git push" >> $GITHUB_STEP_SUMMARY
           echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "2. **Manual trigger:** Push an empty commit to <new branch> trigger rebuild" >> $GITHUB_STEP_SUMMARY
+          echo "2. **Manual trigger:** Push an empty commit to <new branch> to trigger rebuild" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "3. **Make <new branch> default branch** (if it should always be built)" >> $GITHUB_STEP_SUMMARY
+          echo "3. **Make <new branch> the default branch** (if it should always be built)" >> $GITHUB_STEP_SUMMARY

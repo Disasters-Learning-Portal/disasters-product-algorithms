@@ -268,6 +268,74 @@ from shared_utils import convert_to_cog, rename_with_event
 - **Installation:** Installed from GitHub via pip during build
 - **Documentation:** See [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) for deployment details
 
+## Development in JupyterHub
+
+If you want to modify and test the package code within a JupyterHub environment (where the package is pre-installed via Docker), you need to ensure your local edits are used instead of the pre-installed version.
+
+### Option 1: Install in Editable Mode (Recommended)
+
+After cloning the repo in JupyterHub, install it in editable mode:
+
+```bash
+# Clone the repository
+cd ~
+git clone https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+cd disasters-product-algorithms
+
+# Uninstall the pre-installed version
+pip uninstall -y disasters-product-algorithms
+
+# Install your local copy in editable mode
+pip install -e .
+```
+
+**What `-e` does:**
+- Creates a symlink to your local directory instead of copying files
+- Any changes you make are immediately reflected when you run the CLI commands
+- No need to reinstall after each edit
+
+Now when you run `process_landsat89` or `process_sentinel2`, they'll use your edited code!
+
+### Option 2: Run Scripts Directly (Quick Testing)
+
+If you just want to test changes without reinstalling:
+
+```bash
+cd ~/disasters-product-algorithms
+
+# Run the scripts directly with python
+python landsat/process_landsat89.py /path/to/data -p true ndvi
+python sentinel/process_sentinel2.py /path/to/data -p true ndvi
+```
+
+This bypasses the CLI entry points entirely and runs your local code directly.
+
+### Option 3: Modify PYTHONPATH (Temporary)
+
+Add your local directory to Python's path for the current session:
+
+```bash
+cd ~/disasters-product-algorithms
+export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+# Now Python will check your local directory first
+python -c "from landsat import process_landsat89; print(process_landsat89.__file__)"
+```
+
+### Verification
+
+To verify which version is being used:
+
+```bash
+# Check where the CLI command points
+which process_landsat89
+
+# Check where Python imports from
+python -c "import landsat; print(landsat.__file__)"
+```
+
+**Editable mode (Option 1) is best** because it preserves the CLI commands while using your edited code - exactly what you need for development!
+
 ## Author
 
 Kaylee Sharp (February 2025)

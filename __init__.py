@@ -21,7 +21,7 @@ __version__ = "0.1.0"
 
 # Make submodules available
 from disasters_product_algorithms import landsat
-from disasters_product_algorithms import sentinel
+from disasters_product_algorithms import sentinel2
 from disasters_product_algorithms import shared_utils
 
-__all__ = ['landsat', 'sentinel', 'shared_utils']
+__all__ = ['landsat', 'sentinel2', 'shared_utils']

@@ -134,7 +134,7 @@ Import and use functions in your code:
 from landsat import genTrueColor, genNdvi, gen_water_extent, ls_merge
 
 # Sentinel functions
-from sentinel import gen_true_color, gen_ndvi, gen_water_extent, s2_merge
+from sentinel2 import gen_true_color, gen_ndvi, gen_water_extent, s2_merge
 
 # Shared utilities
 from shared_utils import convert_to_cog, rename_with_event
@@ -228,7 +228,7 @@ Processed products are saved to an `output/` directory within the input director
 ```
 disasters-product-algorithms/
 ├── landsat/              # Landsat 8/9 processing
-├── sentinel/             # Sentinel-2 processing
+├── sentinel2/            # Sentinel-2 processing
 └── shared_utils/         # Shared utilities (COG, GDAL, geotools)
 ```
 
@@ -257,7 +257,7 @@ download_sentinel2 --help
 ```python
 # Python APIs available in notebooks
 from landsat import genTrueColor, genNdvi
-from sentinel import gen_true_color, gen_ndvi
+from sentinel2 import gen_true_color, gen_ndvi
 from shared_utils import convert_to_cog, rename_with_event
 ```
 
@@ -305,7 +305,7 @@ cd ~/disasters-product-algorithms
 
 # Run the scripts directly with python
 python landsat/process_landsat89.py /path/to/data -p true ndvi
-python sentinel/process_sentinel2.py /path/to/data -p true ndvi
+python sentinel2/process_sentinel2.py /path/to/data -p true ndvi
 ```
 
 This bypasses the CLI entry points entirely and runs your local code directly.

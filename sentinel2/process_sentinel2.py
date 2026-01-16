@@ -48,6 +48,11 @@ args=parser.parse_args()
 print('\nInput:', args.input[0])
 input_dir = args.input[0]
 
+# Create input directory if it doesn't exist
+if not os.path.exists(input_dir):
+    print(f'Creating input directory: {input_dir}')
+    os.makedirs(input_dir, exist_ok=True)
+
 if not args.unzip_only:
   if 'all' in args.p:
     products = ['true', 'nat', 'swir', 'colorIR', 'ndwi', 'mndwi', 'ndvi', 'nbr', 'we']

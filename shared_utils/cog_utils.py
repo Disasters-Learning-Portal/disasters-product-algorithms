@@ -35,10 +35,10 @@ def set_nodata_value(dtype: str) -> Union[int, float]:
     elif dtype_str == 'int32':
         return -9999
     elif 'float' in dtype_str:
-        return -9999
+        return -9999.0
     else:
         # Default fallback
-        return -9999
+        return -9999.0
 
 
 def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> bool:
@@ -79,6 +79,55 @@ def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> bool:
         return True
 
 
+def determine_resampling_method(src_path: str) -> str:
+    """
+    Auto-detect appropriate resampling method based on data characteristics.
+
+    Args:
+        src_path: Path to source raster file
+
+    Returns:
+        Resampling method string: 'cubic', 'bilinear', or 'nearest'
+
+    Logic:
+        - 3-band data (RGB imagery) → cubic
+        - Single-band continuous data → bilinear
+        - Single-band categorical data → nearest
+    """
+    try:
+        with rasterio.open(src_path) as src:
+            # 3-band imagery (RGB products)
+            if src.count == 3:
+                return 'cubic'
+
+            # Single-band data - determine if categorical or continuous
+            elif src.count == 1:
+                dtype = str(src.dtypes[0]).lower()
+                nodata = src.nodata
+                filename = os.path.basename(src_path).lower()
+
+                # Heuristics for categorical data
+                # Check filename for categorical indicators
+                categorical_keywords = ['mask', 'extent', 'classification', 'scl', 'qa']
+                if any(keyword in filename for keyword in categorical_keywords):
+                    return 'nearest'
+
+                # Check nodata value (999 and 255 common for categorical)
+                if nodata in [999, 255] and dtype in ['uint8', 'uint16', 'int8']:
+                    return 'nearest'
+
+                # Default to bilinear for continuous single-band data
+                return 'bilinear'
+
+            # Multi-band but not 3 (rare case)
+            return 'bilinear'
+
+    except Exception as e:
+        print(f"  Warning: Could not determine resampling method: {e}")
+        print("  Defaulting to bilinear resampling")
+        return 'bilinear'
+
+
 def get_compression_profile(compression: str = 'ZSTD', compression_level: int = 22) -> dict:
     """
     Get compression profile for COG creation.
@@ -107,18 +156,20 @@ def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
     nodata: Optional[Union[int, float]] = None,
+    dst_crs: Optional[str] = 'EPSG:4326',
     compression: str = 'ZSTD',
     compression_level: int = 22,
     overview_levels: int = 5,
     quiet: bool = False
 ) -> str:
     """
-    Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format.
+    Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format with optional reprojection.
 
     Args:
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
         nodata: No-data value (if None, auto-detects from file or data type)
+        dst_crs: Target CRS (default: 'EPSG:4326', None to preserve native CRS)
         compression: Compression type (default: ZSTD)
         compression_level: Compression level (default: 22 for ZSTD)
         overview_levels: Number of overview levels (default: 5, minimum)
@@ -128,6 +179,7 @@ def convert_to_cog(
         Path to created COG file
 
     Based on disasters-aws-conversion/scripts/update_nodata_cog.py
+    Enhanced with reprojection support (two-step: warp → COG)
     """
     if not os.path.exists(input_tif):
         raise FileNotFoundError(f"Input file not found: {input_tif}")
@@ -140,10 +192,14 @@ def convert_to_cog(
     else:
         temp_output = output_cog
 
-    # Read input file metadata
+    # Read input file metadata and check if reprojection is needed
+    warped_file = None
+    input_for_cog = input_tif
+
     with rasterio.open(input_tif) as src:
         dtype = src.dtypes[0]
         existing_nodata = src.nodata
+        src_crs = src.crs
 
         # Determine no-data value
         if nodata is None:
@@ -160,16 +216,70 @@ def convert_to_cog(
             if not validate_nodata_for_dtype(nodata, dtype):
                 print(f"  Warning: No-data value {nodata} may be invalid for {dtype}")
 
+        # Check if reprojection is needed
+        needs_reprojection = (dst_crs is not None and
+                             src_crs is not None and
+                             str(src_crs).upper() != dst_crs.upper())
+
         if not quiet:
             print(f"  Data type: {dtype}")
             print(f"  No-data value: {nodata}")
+            print(f"  Source CRS: {src_crs}")
+            if dst_crs:
+                print(f"  Target CRS: {dst_crs}")
+                if needs_reprojection:
+                    print(f"  Reprojection: Required")
+                else:
+                    print(f"  Reprojection: Not needed (already in target CRS)")
             print(f"  Compression: {compression} (level {compression_level})")
             print(f"  Overview levels: {overview_levels}")
 
-    # Build rio cogeo create command
+    # Step 1: Reproject if needed (warp to dst_crs)
+    if needs_reprojection:
+        warped_file = input_tif + '.warped.tmp.tif'
+
+        # Auto-detect appropriate resampling method
+        resampling_method = determine_resampling_method(input_tif)
+
+        if not quiet:
+            print(f"  Resampling method: {resampling_method} (auto-detected)")
+            print(f"  Warping to {dst_crs}...")
+
+        # Build rio warp command
+        warp_cmd = [
+            'rio', 'warp', input_tif, warped_file,
+            '--dst-crs', dst_crs,
+            '--resampling', resampling_method
+        ]
+
+        # Add nodata to warp command
+        if nodata is not None:
+            warp_cmd.extend(['--src-nodata', str(nodata)])
+            warp_cmd.extend(['--dst-nodata', str(nodata)])
+
+        try:
+            result = subprocess.run(
+                warp_cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            if not quiet and result.stdout:
+                print(f"  {result.stdout.strip()}")
+
+            # Use warped file as input for COG conversion
+            input_for_cog = warped_file
+
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Error warping to {dst_crs}: {e.stderr}"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
+    # Step 2: Build rio cogeo create command (using warped file if reprojected)
     cmd = [
         'rio', 'cogeo', 'create',
-        input_tif,
+        input_for_cog,  # Use warped file if reprojection occurred
         temp_output,
         '--cog-profile', compression.lower(),
         '--overview-level', str(overview_levels),
@@ -211,6 +321,10 @@ def convert_to_cog(
                 os.remove(output_cog)
             os.rename(temp_output, output_cog)
 
+        # Clean up warped temp file if it was created
+        if warped_file and os.path.exists(warped_file):
+            os.remove(warped_file)
+
         if not quiet:
             print(f"  ✓ COG created: {os.path.basename(output_cog)}")
 
@@ -219,13 +333,17 @@ def convert_to_cog(
     except subprocess.CalledProcessError as e:
         error_msg = f"Error creating COG: {e.stderr}"
         print(error_msg)
-        # Clean up temp file if it exists
+        # Clean up temp files if they exist
         if os.path.exists(temp_output):
             os.remove(temp_output)
+        if warped_file and os.path.exists(warped_file):
+            os.remove(warped_file)
         raise RuntimeError(error_msg)
     except Exception as e:
         if os.path.exists(temp_output):
             os.remove(temp_output)
+        if warped_file and os.path.exists(warped_file):
+            os.remove(warped_file)
         raise
 
 

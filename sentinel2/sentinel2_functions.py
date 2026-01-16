@@ -327,10 +327,6 @@ def gen_true_color(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating true color geotiff')
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
-
   # apply cloud mask
   if mask:
     print('\t* Applying cloud mask')
@@ -371,10 +367,6 @@ def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating natural color geotiff')
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
-
   # apply cloud mask
   if mask:
     print('\t* Applying cloud mask')
@@ -412,10 +404,6 @@ def gen_swir(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating short wave infrared geotiff')
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
-
   # apply cloud mask
   if mask:
     print('\t* Applying cloud mask')
@@ -452,10 +440,6 @@ def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
   # write color infrared image to file
   print('\t* Generating color infrared geotiff')
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
-
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
 
   # apply cloud mask
   if mask:
@@ -507,10 +491,6 @@ def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating NDWI geotiff')
   result = dump_geotiff_float(outname, ndwi, projref, in_geo)
 
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
-
   # apply cloud mask
   if mask:
     print('\t* Applying cloud mask')
@@ -560,10 +540,6 @@ def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   # write mNDWI image to file
   print('\t* Generating MNDWI geotiff')
   result = dump_geotiff_float(outname, mndwi, projref, in_geo)
-  
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   # apply cloud mask
   if mask:
@@ -615,10 +591,6 @@ def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating NDVI geotiff')
   result = dump_geotiff_float(outname, ndvi, projref, in_geo)
 
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
-
   # apply cloud mask
   if mask:
     print('\t* Applying cloud mask')
@@ -663,10 +635,6 @@ def gen_nbr(safe, outname, level, mask=None):
   # write NBR image to file
   print('\t* Generating NBR geotiff')
   result = dump_geotiff_float(outname, nbr, projref, in_geo)
-
-  # update no data value in metadata
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd) 
 
   # apply cloud mask
   if mask:

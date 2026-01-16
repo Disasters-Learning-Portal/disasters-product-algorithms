@@ -8,8 +8,8 @@ Date:        February 2025
 
 """
 
-import glob                    
-import os                                         
+import glob
+import os
 import numpy as np
 from osgeo import gdal, osr
 from PIL import Image, ImageEnhance
@@ -299,7 +299,7 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(img)
   out_ds = None
 
-  cmd = f"python /usr/local/anaconda3/bin/gdal_edit.py -a_nodata 0 {outname}"
+  cmd = f"python {GDAL_EDIT_PATH} -a_nodata 0 {outname}"
   os.system(cmd)
 
   if mask:
@@ -421,8 +421,6 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -546,8 +544,6 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -670,9 +666,6 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 0 {outname}"
-  os.system(cmd) 
-
   if mask:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
@@ -758,8 +751,6 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
   
 
-  cmd = f"python gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -845,8 +836,6 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(ndwi)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -931,8 +920,6 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(mndwi)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -1038,8 +1025,6 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(evi)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')
@@ -1122,8 +1107,6 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(nbr)
   out_ds = None
 
-  cmd = f"python gdal_edit.py -a_nodata 999 {outname}"
-  os.system(cmd)
 
   if mask:
     print('\t* Applying cloud mask')

@@ -52,8 +52,12 @@ if __name__ == "__main__":
     parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
     parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
     parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
+    parser.add_argument('-dst_crs', type=str, default='EPSG:4326', help='Target CRS for COG output (default: EPSG:4326, use "native" to preserve original CRS).')
     parser.add_argument('-event', type=str, default=None, help='Event name for filename prefix (e.g., 202512_Flood_WA). Adds formatted date suffix.')
     args=parser.parse_args()
+
+    # Handle dst_crs argument (convert "native" to None)
+    dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
 
     print('\nInput:', args.input[0])
     input_dir = args.input[0]
@@ -273,6 +277,7 @@ if __name__ == "__main__":
                         cog_path = convert_to_cog(
                             prod_name,
                             nodata=args.nodata,
+                            dst_crs=dst_crs_value,
                             compression=args.compression,
                             compression_level=args.compression_level
                         )
@@ -308,6 +313,7 @@ if __name__ == "__main__":
                             cog_path = convert_to_cog(
                                 prod_name,
                                 nodata=args.nodata,
+                                dst_crs=dst_crs_value,
                                 compression=args.compression,
                                 compression_level=args.compression_level
                             )
@@ -693,6 +699,7 @@ if __name__ == "__main__":
                     cog_path = convert_to_cog(
                         merged_file,
                         nodata=args.nodata,
+                        dst_crs=dst_crs_value,
                         compression=args.compression,
                         compression_level=args.compression_level
                     )
@@ -724,6 +731,7 @@ if __name__ == "__main__":
                     cog_path = convert_to_cog(
                         merged_file,
                         nodata=args.nodata,
+                        dst_crs=dst_crs_value,
                         compression=args.compression,
                         compression_level=args.compression_level
                     )

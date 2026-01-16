@@ -12,7 +12,7 @@ import os
 import time
 import argparse
 from pathlib import Path
-from sentinel.sentinel2_functions import *
+from sentinel2.sentinel2_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 
 then = datetime.now()

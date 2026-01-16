@@ -299,9 +299,6 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(img)
   out_ds = None
 
-  cmd = f"python {GDAL_EDIT_PATH} -a_nodata 0 {outname}"
-  os.system(cmd)
-
   if mask:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)

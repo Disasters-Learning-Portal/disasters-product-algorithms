@@ -264,6 +264,7 @@ else:
                 cog_path = convert_to_cog(
                     prod_name,
                     nodata=args.nodata,
+                    dst_crs=dst_crs_value,
                     compression=args.compression,
                     compression_level=args.compression_level
                 )
@@ -583,6 +584,7 @@ else:
                 cog_path = convert_to_cog(
                     prod_name,
                     nodata=args.nodata,
+                    dst_crs=dst_crs_value,
                     compression=args.compression,
                     compression_level=args.compression_level
                 )
@@ -602,11 +604,40 @@ else:
         # to mask the merged product below
         print('Merging:', cm_dir)
         dirs_to_merge.remove(cm_dir)
-        s2_merge(cm_dir, mask=False)
+        merged_file = s2_merge(cm_dir, mask=False)
+
+        # Convert merged file to COG and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                merged_file,
+                nodata=args.nodata,
+                dst_crs=dst_crs_value,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event:
+                rename_with_event(cog_path, args.event)
+        elif args.event:
+            rename_with_event(merged_file, args.event)
+
      for prod_dir in dirs_to_merge:
         # merge products of the same date
         print('Merging:', prod_dir)
-        s2_merge(prod_dir, args.mask)
+        merged_file = s2_merge(prod_dir, args.mask)
+
+        # Convert merged file to COG and optionally rename with event
+        if not args.tif_only:
+            cog_path = convert_to_cog(
+                merged_file,
+                nodata=args.nodata,
+                dst_crs=dst_crs_value,
+                compression=args.compression,
+                compression_level=args.compression_level
+            )
+            if args.event:
+                rename_with_event(cog_path, args.event)
+        elif args.event:
+            rename_with_event(merged_file, args.event)
 
   print("\nCompleted Sentinel-2 processing and product generation\n")
 

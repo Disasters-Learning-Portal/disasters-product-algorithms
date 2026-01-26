@@ -235,6 +235,8 @@ if __name__ == "__main__":
 
                             nodata=args.nodata,
 
+                            dst_crs=dst_crs_value,
+
                             compression=args.compression,
 
                             compression_level=args.compression_level
@@ -350,6 +352,8 @@ if __name__ == "__main__":
 
                             nodata=args.nodata,
 
+                            dst_crs=dst_crs_value,
+
                             compression=args.compression,
 
                             compression_level=args.compression_level
@@ -393,6 +397,8 @@ if __name__ == "__main__":
 
                             nodata=args.nodata,
 
+                            dst_crs=dst_crs_value,
+
                             compression=args.compression,
 
                             compression_level=args.compression_level
@@ -434,6 +440,8 @@ if __name__ == "__main__":
                             prod_name,
 
                             nodata=args.nodata,
+
+                            dst_crs=dst_crs_value,
 
                             compression=args.compression,
 
@@ -477,6 +485,8 @@ if __name__ == "__main__":
 
                             nodata=args.nodata,
 
+                            dst_crs=dst_crs_value,
+
                             compression=args.compression,
 
                             compression_level=args.compression_level
@@ -518,6 +528,8 @@ if __name__ == "__main__":
                             prod_name,
 
                             nodata=args.nodata,
+
+                            dst_crs=dst_crs_value,
 
                             compression=args.compression,
 
@@ -561,6 +573,8 @@ if __name__ == "__main__":
 
                             nodata=args.nodata,
 
+                            dst_crs=dst_crs_value,
+
                             compression=args.compression,
 
                             compression_level=args.compression_level
@@ -602,6 +616,8 @@ if __name__ == "__main__":
                             prod_name,
 
                             nodata=args.nodata,
+
+                            dst_crs=dst_crs_value,
 
                             compression=args.compression,
 
@@ -666,6 +682,8 @@ if __name__ == "__main__":
                                 prod_name,
 
                                 nodata=args.nodata,
+
+                                dst_crs=dst_crs_value,
 
                                 compression=args.compression,
 

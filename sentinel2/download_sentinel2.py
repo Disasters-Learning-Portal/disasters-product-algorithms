@@ -1,8 +1,8 @@
 """
-download_sentinel2.py
+download_sentinel2v2.py
 
-Name:           Kaylee Sharp
-Date:           October 2024
+Name:           Aaron Serre and Kaylee Sharp
+Date:           October 2024, updated January 2026
 """
 
 import requests
@@ -11,27 +11,39 @@ import geopandas
 import argparse
 from datetime import datetime
 from datetime import timedelta
+import gc
 
 parser=argparse.ArgumentParser(
         description='''This script downloads Sentinel-2 from the Copernicus OData API by list of tile IDs, polygon shapefile, or a single point.''',
-        usage='process_sentinel2.py output [-h] [-date [DATE ...]] [-tile [TILE ...]] [-polygon [/PATH/TO/FILE.SHP]] [-point [LON LAT]]')
-parser.add_argument('output', nargs=1, help= 'Path to directory to download the .zip files (e.g.\
-                    /data/esops/eventData/2023/TurkeyEarthquake/sentinel2).')
-parser.add_argument('-date', nargs='*', default=False, help='Date (e.g. 20230116) or start/end dates (e.g. 20230116 20230120). \
-                    Default is last 10 days.')
-parser.add_argument('-tile', nargs ='*', default=False, help='List of tile IDs (e.g. 17RLN 17RLP 17RLQ) or path to .txt file\
-                   where each tile ID is on a new line.')
-parser.add_argument('-polygon', nargs=1, default=False, help='Absolute path to shapefile containing one polygon in WGS84 (4326). The .shx file must \
-                    must also be in the same directory as the .shp file.')
-parser.add_argument('-point', nargs=2, default=False, help='Longitude and latitude of single point (e.g. -86.6 34.5).')
+        usage='process_sentinel2v2.py output [-h] [-date [DATE ...]] [-tile [TILE ...]] [-polygon [/PATH/TO/FILE.SHP]] [-point [LON LAT]] [-u USER] [-p PASS] [-y]')
+
+parser.add_argument('output', nargs=1, help= 'Path to directory to download the .zip files.')
+parser.add_argument('-date', nargs='*', default=False, help='Date (e.g. 20230116) or start/end dates.')
+parser.add_argument('-tile', nargs ='*', default=False, help='List of tile IDs or path to .txt file.')
+parser.add_argument('-polygon', nargs=1, default=False, help='Absolute path to shapefile.')
+parser.add_argument('-point', nargs=2, default=False, help='Longitude and latitude of single point.')
 parser.add_argument('-level', nargs=1, default='2', help='Processing level (1 = L1C, 2 = L2A).')
-parser.add_argument('-limit', nargs=1, default='50', help='Limit number of search results returned from API. Default is 50.')
+parser.add_argument('-limit', nargs=1, default='50', help='Limit number of search results.')
+
+# --- NEW ARGUMENTS FOR SUBPROCESS USE ---
+parser.add_argument('-u', '--user', nargs=1, help='Copernicus Username (email).')
+parser.add_argument('-p', '--password', nargs=1, help='Copernicus Password.')
+parser.add_argument('-y', '--yes', action='store_true', help='Skip confirmation prompt.')
+
 args=parser.parse_args()
 
 
 ###########INPUTS###########
-cop_user = input('Copernicus Username (email): ')
-cop_pass = input('Copernicus Password: ')
+
+# Logic to handle credentials via arguments (subprocess) or manual input
+if args.user and args.password:
+    cop_user = args.user[0]
+    cop_pass = args.password[0]
+    print("Credentials received via arguments.")
+else:
+    # Manual fallback for interactive use
+    cop_user = input('Copernicus Username (email): ')
+    cop_pass = input('Copernicus Password: ')
 
 # parse user arguments
 out_dir = args.output[0]
@@ -95,11 +107,8 @@ elif (args.polygon):
     try:
         aoi_poly= geopandas.read_file(args.polygon[0])['geometry'].iloc[0]
     except:
-        print('ERROR: Invalid polygon. Ensure the following:')
-        print('\t* Inputted path is absolute path to .shp file, NOT a directory.')
-        print('\t* The .shx file is in the same directory as the .shp file.')
-        print('\t* The shapefile contains a single polygon (not line or point).')
-        print('\t* The polygon is in WGS84 (EPSG:4326)')
+        print('ERROR: Invalid polygon.')
+        quit()
 elif (args.point):
     # format lat/lon point
     lon = args.point[0]
@@ -109,7 +118,6 @@ elif (args.point):
 ############################
 
 def get_keycloak(username: str, password: str):
-    # get keycloack token from Copernicus
     data = {
         "client_id": "cdse-public",
         "username": username,
@@ -123,13 +131,10 @@ def get_keycloak(username: str, password: str):
         )
         r.raise_for_status()
     except Exception as e:
-        raise Exception(
-            f"Keycloak token creation failed. Reponse from the server was: {r.json()}"
-        )
+        raise Exception(f"Keycloak token creation failed: {r.json()}")
     return (r.json()["access_token"], r.json()["refresh_token"])
 
 def get_refresh(refresh):
-    # refresh token
     data = {
         "client_id": "cdse-public",
         "refresh_token": refresh,
@@ -142,12 +147,10 @@ def get_refresh(refresh):
         )
         r.raise_for_status()
     except Exception as e:
-        raise Exception(
-            f"Keycloak token creation failed. Reponse from the server was: {r.json()}"
-        )
+        raise Exception(f"Refresh failed: {r.json()}")
     return (r.json()["access_token"], r.json()["refresh_token"])
 
-# create base url for searching
+# Search Logic
 collection_url = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2'"
 prod_filter = f" and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq '{level}')"
 date_filter = f" and ContentDate/Start gt {start_date}T00:00:00.000Z and ContentDate/Start lt {end_date}T23:59:59.999Z"
@@ -156,115 +159,72 @@ prods_to_download = []
 
 if args.tile:
     for tile in tile_ids:
-        if tile[0] == 'T':
-            tile = tile[1:]
-        # format search based on tile ID
+        if tile[0] == 'T': tile = tile[1:]
         tile_search = base_url + f" and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'tileId' and att/OData.CSC.StringAttribute/Value eq '{tile}')&$top={limit}"
         json=requests.get(tile_search).json()
-        if not json['value']:
-            print('No images found for tile: ', tile)
-        else:
-            # compile all products to download
+        if json.get('value'):
             for result in json['value']:
-                safe_name = result['Name']
-                id = result['Id']
-                length =  result['ContentLength']
-                prods_to_download.append((id, safe_name, length))
+                prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
 
 elif args.polygon:
-    # format search based on polygon geometry
     aoi_str = str(aoi_poly)
     poly_search = base_url + f" and OData.CSC.Intersects(area=geography'SRID=4326;{aoi_str}')&$top={limit}"
     json = requests.get(poly_search).json()
-    if not json['value']:
-        print('No images found intersecting polygon.')
-    else:
-        # compile all products to download
+    if json.get('value'):
         for result in json['value']:
-            safe_name = result['Name']
-            id = result['Id']
-            length = result['ContentLength']
-            prods_to_download.append((id, safe_name, length))
+            prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
 
 elif args.point:
-    # format search based on lat/lon coordinate
     point_search = base_url + f" and OData.CSC.Intersects(area=geography'SRID=4326;POINT({lon} {lat})')&$top={limit}"
     json = requests.get(point_search).json()
-    if not json['value']:
-        print('No images found intersecting point.')
-    else:
-        # compile all products to download
+    if json.get('value'):
         for result in json['value']:
-            safe_name = result['Name']
-            id = result['Id']
-            length = result['ContentLength']
-            prods_to_download.append((id, safe_name, length))
+            prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
 
-# display number of products and estimate time to download
 num_of_prods = len(prods_to_download)
-est_time = num_of_prods*2
-hours = est_time // 60
-remaining_minutes = est_time % 60
 print('\nNumber of products to download: ', num_of_prods)
-print(f'Estimated download time: {hours} hr {remaining_minutes} min')
 
-# confirm download
-confirm = input('Confirm download (y/n): ').strip().lower()
-if confirm == 'n':
-    print('Goodbye!')
-    quit()
+# Handle confirmation for Subprocess (using the -y flag)
+if args.yes:
+    print('Confirmation skipped (-y provided).')
+else:
+    confirm = input('Confirm download (y/n): ').strip().lower()
+    if confirm == 'n':
+        print('Goodbye!')
+        quit()
 
 # set up requests session and tokens
 session = requests.Session()
-keycloak_token, refresh_token = get_keycloak(cop_user,cop_pass)
+keycloak_token, refresh_token = get_keycloak(cop_user, cop_pass)
 session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
 
 print('\n')
-for i,prod in enumerate(prods_to_download):
-    # create output filename
+for i, prod in enumerate(prods_to_download):
     id, safe_name, length = prod
     outname = os.path.join(out_dir, safe_name+'.zip')
 
-    # check for filename and correct size
-    if os.path.isfile(outname):
-        if os.path.getsize(outname) == length:
-            print(f'{safe_name} already downloaded!', f'\t{i+1}/{num_of_prods}')
-            continue
-        else:
-            # file did not download completely
-            print('Downloading: ', safe_name, f'\t{i+1}/{num_of_prods}')
-    else:
-        # new download
-        print('Downloading: ', safe_name, f'\t{i+1}/{num_of_prods}')
+    if os.path.isfile(outname) and os.path.getsize(outname) == length:
+        print(f'{safe_name} already exists!', f'\t{i+1}/{num_of_prods}')
+        continue
     
+    print('Downloading: ', safe_name, f'\t{i+1}/{num_of_prods}')
     then = datetime.now()
     try:
-        # request product
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
-        response = session.get(url, allow_redirects=True)
+        response = session.get(url, allow_redirects=True, stream=True)
 
-        # write product to file
         with open(outname, "wb") as file:
             for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    file.write(chunk)
-        file.close()
+                if chunk: file.write(chunk)
 
-        # compute download time
-        now = datetime.now()
-        print('\t* Download Time (s): ', (now-then).total_seconds())
-
-        # create new session and refresh token
-        # while not necessary each time, I chose to refresh to
-        # guarantee the session/token doesn't expire
-        session = requests.Session()
-        keycloak_token,refresh_token = get_refresh(refresh_token)
+        print('\t* Download Time (s): ', (datetime.now()-then).total_seconds())
+        
+        # Refresh for next item
+        keycloak_token, refresh_token = get_refresh(refresh_token)
         session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
-    except:
-        print('\t* Server Error')
+    except Exception as e:
+        print(f'\t* Error downloading {safe_name}: {e}')
 
-# update permissions
 print('\nDownload complete!')
-cmd = f'chmod -R -f ug+rwx {out_dir}'
-os.system(cmd)
+os.system(f'chmod -R -f ug+rwx {out_dir}')
     

@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 from sentinel2.sentinel2_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
+from tqdm import tqdm
 
 then = datetime.now()
 
@@ -214,8 +215,8 @@ else:
       os.mkdir(out_dir)
 
   print('\nNumber of directories to process:', num_dirs)
-  for i,ddir in enumerate(data_dirs):
-    print('\nWorking on:', os.path.basename(ddir))
+  for i,ddir in enumerate(tqdm(data_dirs, desc="Processing scenes", unit="scene")):
+    print(f'\nWorking on: {os.path.basename(ddir)}')
 
     # parse filename for metadata
     ddir_parts = os.path.basename(ddir).split('_')

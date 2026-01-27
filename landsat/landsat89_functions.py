@@ -29,6 +29,7 @@ from shapely.geometry import box
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
+from tqdm import tqdm
 
 def unzip_landsat(files_to_unzip, unpacked_dir):
     print(f'\nNumber of .tar / .zip files: {len(files_to_unzip)}')

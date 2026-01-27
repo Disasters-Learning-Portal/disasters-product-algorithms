@@ -27,6 +27,7 @@ from shapely.geometry import box
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
+from tqdm import tqdm
 
 def dump_geotiff(data_array, crs, trans, nodata_val, outfile):
     # write geotiff with inputted CRS, transform, and no data value

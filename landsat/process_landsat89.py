@@ -18,6 +18,7 @@ from pathlib import Path
 from lxml import etree
 from landsat.landsat89_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
+from tqdm import tqdm
 
 if __name__ == "__main__":
     then = datetime.now()
@@ -156,8 +157,8 @@ if __name__ == "__main__":
         if not os.path.isdir(out_dir):
             os.mkdir(out_dir)
 
-        for i,ddir in enumerate(sorted(data_dirs)):
-            print('\nWorking on:', os.path.basename(ddir))
+        for i,ddir in enumerate(tqdm(sorted(data_dirs), desc="Processing scenes", unit="scene")):
+            print(f'\nWorking on: {os.path.basename(ddir)}')
         
             # parse metadata xml file for scene time
             metadata_xml = glob.glob(os.path.join(ddir, '*xml'))[0]

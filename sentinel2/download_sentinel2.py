@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime
 from datetime import timedelta
 import gc
+from tqdm import tqdm
 
 parser=argparse.ArgumentParser(
         description='''This script downloads Sentinel-2 from the Copernicus OData API by list of tile IDs, polygon shapefile, or a single point.''',
@@ -199,31 +200,36 @@ keycloak_token, refresh_token = get_keycloak(cop_user, cop_pass)
 session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
 
 print('\n')
-for i, prod in enumerate(prods_to_download):
+for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit="file")):
     id, safe_name, length = prod
     outname = os.path.join(out_dir, safe_name+'.zip')
 
     if os.path.isfile(outname) and os.path.getsize(outname) == length:
-        print(f'{safe_name} already exists!', f'\t{i+1}/{num_of_prods}')
+        tqdm.write(f'  ✓ {safe_name} already exists!')
         continue
-    
-    print('Downloading: ', safe_name, f'\t{i+1}/{num_of_prods}')
+
+    tqdm.write(f'  → Downloading: {safe_name}')
     then = datetime.now()
     try:
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
         response = session.get(url, allow_redirects=True, stream=True)
 
+        # Download with progress bar for individual file
         with open(outname, "wb") as file:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk: file.write(chunk)
+            with tqdm(total=length, unit='B', unit_scale=True, unit_divisor=1024,
+                     desc=f"    {safe_name[:50]}", leave=False) as pbar:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        file.write(chunk)
+                        pbar.update(len(chunk))
 
-        print('\t* Download Time (s): ', (datetime.now()-then).total_seconds())
-        
+        tqdm.write(f'    ✓ Download Time: {(datetime.now()-then).total_seconds():.1f}s')
+
         # Refresh for next item
         keycloak_token, refresh_token = get_refresh(refresh_token)
         session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
     except Exception as e:
-        print(f'\t* Error downloading {safe_name}: {e}')
+        tqdm.write(f'    ✗ Error downloading {safe_name}: {e}')
 
 print('\nDownload complete!')
 os.system(f'chmod -R -f ug+rwx {out_dir}')

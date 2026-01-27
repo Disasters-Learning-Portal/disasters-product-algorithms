@@ -221,9 +221,16 @@ print('\n')
 for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit="file")):
     id, safe_name, length = prod
     outname = os.path.join(out_dir, safe_name+'.zip')
+    safe_dir = os.path.join(out_dir, safe_name+'.SAFE')
 
+    # Check if zip file exists with correct size
     if os.path.isfile(outname) and os.path.getsize(outname) == length:
-        tqdm.write(f'  ✓ {safe_name} already exists!')
+        tqdm.write(f'  ✓ {safe_name}.zip already exists!')
+        continue
+
+    # Check if already extracted .SAFE directory exists
+    if os.path.isdir(safe_dir):
+        tqdm.write(f'  ✓ {safe_name}.SAFE already exists (extracted)!')
         continue
 
     tqdm.write(f'  → Downloading: {safe_name}')
@@ -232,16 +239,16 @@ for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit=
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
         response = session.get(url, allow_redirects=True, stream=True)
 
-        # Download with progress bar for individual file
-        with open(outname, "wb") as file:
-            with tqdm(total=length, unit='B', unit_scale=True, unit_divisor=1024,
-                     desc=f"    {safe_name[:50]}", leave=False) as pbar:
+        with tqdm(total=length, unit='B', unit_scale=True, unit_divisor=1024, desc=f"    {safe_name[:30]}", leave=False) as pbar:
+            with open(outname, "wb") as file:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         file.write(chunk)
                         pbar.update(len(chunk))
 
-        tqdm.write(f'    ✓ Download Time: {(datetime.now()-then).total_seconds():.1f}s')
+        elapsed = (datetime.now()-then).total_seconds()
+        speed = length / (1024**2) / elapsed  # MB/s
+        tqdm.write(f'     ✓ Complete - {elapsed:.1f}s ({speed:.1f} MB/s)')
 
         # Refresh for next item
         keycloak_token, refresh_token = get_refresh(refresh_token)

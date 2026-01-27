@@ -13,6 +13,24 @@ from datetime import datetime
 from datetime import timedelta
 import gc
 from tqdm import tqdm
+import sys
+
+# Force unbuffered output for real-time display in JupyterHub/subprocess
+# Flush stdout/stderr after every write
+class Unbuffered(object):
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, data):
+        self.stream.write(data)
+        self.stream.flush()
+    def writelines(self, datas):
+        self.stream.writelines(datas)
+        self.stream.flush()
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+sys.stdout = Unbuffered(sys.stdout)
+sys.stderr = Unbuffered(sys.stderr)
 
 parser=argparse.ArgumentParser(
         description='''This script downloads Sentinel-2 from the Copernicus OData API by list of tile IDs, polygon shapefile, or a single point.''',

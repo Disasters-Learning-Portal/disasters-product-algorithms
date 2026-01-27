@@ -19,6 +19,25 @@ from lxml import etree
 from landsat.landsat89_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 from tqdm import tqdm
+import traceback
+import sys
+
+# Force unbuffered output for real-time display in JupyterHub/subprocess
+# Flush stdout/stderr after every write
+class Unbuffered(object):
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, data):
+        self.stream.write(data)
+        self.stream.flush()
+    def writelines(self, datas):
+        self.stream.writelines(datas)
+        self.stream.flush()
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+sys.stdout = Unbuffered(sys.stdout)
+sys.stderr = Unbuffered(sys.stderr)
 
 if __name__ == "__main__":
     then = datetime.now()
@@ -157,6 +176,13 @@ if __name__ == "__main__":
         if not os.path.isdir(out_dir):
             os.mkdir(out_dir)
 
+        # Initialize error tracking
+        processing_errors = []  # List of (scene, product, error_message) tuples
+        processing_success = []  # List of (scene, product) tuples
+
+        # Create log file path
+        log_file = os.path.join(out_dir, f'processing_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+
         for i,ddir in enumerate(tqdm(sorted(data_dirs), desc="Processing scenes", unit="scene")):
             print(f'\nWorking on: {os.path.basename(ddir)}')
         
@@ -221,36 +247,47 @@ if __name__ == "__main__":
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* Cloud Mask already exists: {os.path.basename(final_name)}. Use \"-force\" to overwrite.')
                     cloudMask = final_name
+                    processing_success.append((os.path.basename(ddir), 'Cloud Mask', 'Skipped - already exists'))
                 else:
-                    # produce cloud mask
-                    print('\n* Producing Cloud Mask')
-                    cloudMask = gen_cloudMask(ddir, prod_name)
+                    try:
+                        # produce cloud mask
+                        print('\n* Producing Cloud Mask')
+                        cloudMask = gen_cloudMask(ddir, prod_name)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
-                        # Rename TIF without COG conversion
-                        rename_with_event(prod_name, args.event)
+                        elif args.event and not args.merge:
+                            # Rename TIF without COG conversion
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'Cloud Mask', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'Cloud Mask', error_msg))
+                        print(f'\n  ✗ ERROR processing Cloud Mask: {error_msg}')
+                        print(f'  Continuing with next product...')
+                        cloudMask = None  # Set to None so other products can continue
 
                 if not args.mask:
                     cloudMask=None
@@ -270,25 +307,34 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* True color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'True Color', 'Skipped - already exists'))
                 else:
-                    # produce true color image
-                    print('\n* Processing true color')
-                    genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        # produce true color image
+                        print('\n* Processing true color')
+                        genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
-                    if not args.tif_only:
-                        cog_path = convert_to_cog(
-                            prod_name,
-                            nodata=args.nodata,
-                            dst_crs=dst_crs_value,
-                            compression=args.compression,
-                            compression_level=args.compression_level
-                        )
-                        if args.event and not args.merge:
-                            rename_with_event(cog_path, args.event)
-                    elif args.event and not args.merge:
-                        # Rename TIF without COG conversion
-                        rename_with_event(prod_name, args.event)
+                        # Convert to COG (default) and optionally rename with event
+                        if not args.tif_only:
+                            cog_path = convert_to_cog(
+                                prod_name,
+                                nodata=args.nodata,
+                                dst_crs=dst_crs_value,
+                                compression=args.compression,
+                                compression_level=args.compression_level
+                            )
+                            if args.event and not args.merge:
+                                rename_with_event(cog_path, args.event)
+                        elif args.event and not args.merge:
+                            # Rename TIF without COG conversion
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'True Color', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'True Color', error_msg))
+                        print(f'\n  ✗ ERROR processing True Color: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             pan_variants = ['pan', 'panchromatic']
             if next((True for p in products if p.lower() in pan_variants), False):
@@ -307,24 +353,34 @@ if __name__ == "__main__":
                     final_name = get_final_filename(prod_name, args.event, args.tif_only)
                     if os.path.exists(final_name) and not args.force:
                         print(f'\n* Panchromatic already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                        processing_success.append((os.path.basename(ddir), 'Panchromatic', 'Skipped - already exists'))
                     else:
-                        print('\n* Processing panchromatic')
-                        genPanchromatic(b8_file, sun_zen, prod_name, cloudMask)
+                        try:
+                            print('\n* Processing panchromatic')
+                            genPanchromatic(b8_file, sun_zen, prod_name, cloudMask)
 
-                        # Convert to COG (default) and optionally rename with event
-                        if not args.tif_only:
-                            cog_path = convert_to_cog(
-                                prod_name,
-                                nodata=args.nodata,
-                                dst_crs=dst_crs_value,
-                                compression=args.compression,
-                                compression_level=args.compression_level
-                            )
-                            if args.event and not args.merge:
-                                rename_with_event(cog_path, args.event)
-                        elif args.event and not args.merge:
-                            # Rename TIF without COG conversion
-                            rename_with_event(prod_name, args.event)
+                            # Convert to COG (default) and optionally rename with event
+                            # Skip COG conversion if merging - will convert merged file instead
+                            if not args.tif_only and not args.merge:
+                                cog_path = convert_to_cog(
+                                    prod_name,
+                                    nodata=args.nodata,
+                                    dst_crs=dst_crs_value,
+                                    compression=args.compression,
+                                    compression_level=args.compression_level
+                                )
+                                if args.event:
+                                    rename_with_event(cog_path, args.event)
+                            elif args.event and not args.merge:
+                                # Rename TIF without COG conversion
+                                rename_with_event(prod_name, args.event)
+
+                            processing_success.append((os.path.basename(ddir), 'Panchromatic', 'Success'))
+                        except Exception as e:
+                            error_msg = f"{type(e).__name__}: {str(e)}"
+                            processing_errors.append((os.path.basename(ddir), 'Panchromatic', error_msg))
+                            print(f'\n  ✗ ERROR processing Panchromatic: {error_msg}')
+                            print(f'  Continuing with next product...')
         
             nat_variants = ['nat', 'natural', 'naturalcolor', 'nc']
             if next((True for p in products if p.lower() in nat_variants), False):
@@ -339,37 +395,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* Natural color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'Natural Color', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing natural color')
-                    genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing natural color')
+                        genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'Natural Color', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'Natural Color', error_msg))
+                        print(f'\n  ✗ ERROR processing Natural Color: {error_msg}')
+                        print(f'  Continuing with next product...')
         
             cir_variants = ['cir', 'colorir', 'colorinfrared']
             if next((True for p in products if p.lower() in cir_variants), False):
@@ -384,37 +450,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* Color infrared already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing color infrared')
-                    genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing color infrared')
+                        genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'Color Infrared', error_msg))
+                        print(f'\n  ✗ ERROR processing Color Infrared: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             if next((True for p in products if p.lower() == 'ndvi'), False):
                 # check for NDVI image
@@ -428,37 +504,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* NDVI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'NDVI', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing NDVI')
-                    genNdvi(b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing NDVI')
+                        genNdvi(b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'NDVI', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'NDVI', error_msg))
+                        print(f'\n  ✗ ERROR processing NDVI: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             if next((True for p in products if p.lower() == 'ndwi'), False):
                 # check for NDWI image
@@ -472,37 +558,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* NDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'NDWI', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing NDWI')
-                    genNdwi(b3_file, b5_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing NDWI')
+                        genNdwi(b3_file, b5_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'NDWI', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'NDWI', error_msg))
+                        print(f'\n  ✗ ERROR processing NDWI: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             if next((True for p in products if p.lower() == 'mndwi'), False):
                 # check for mNDWI image
@@ -516,37 +612,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* MNDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'MNDWI', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing MNDWI')
-                    genmNdwi(b3_file, b6_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing MNDWI')
+                        genmNdwi(b3_file, b6_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'MNDWI', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'MNDWI', error_msg))
+                        print(f'\n  ✗ ERROR processing MNDWI: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             if next((True for p in products if p.lower() == 'evi'), False):
                 # check for EVI image
@@ -560,37 +666,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* EVI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'EVI', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing EVI')
-                    genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, prod_name ,cloudMask)
+                    try:
+                        print('\n* Processing EVI')
+                        genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, prod_name ,cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'EVI', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'EVI', error_msg))
+                        print(f'\n  ✗ ERROR processing EVI: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             if next((True for p in products if p.lower() == 'nbr'), False):
                 # check for NBR image
@@ -604,37 +720,47 @@ if __name__ == "__main__":
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
                 if os.path.exists(final_name) and not args.force:
                     print(f'\n* NBR already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
+                    processing_success.append((os.path.basename(ddir), 'NBR', 'Skipped - already exists'))
                 else:
-                    print('\n* Processing NBR')
-                    genNbr(b5_file, b7_file, qa_file, sun_zen, prod_name, cloudMask)
+                    try:
+                        print('\n* Processing NBR')
+                        genNbr(b5_file, b7_file, qa_file, sun_zen, prod_name, cloudMask)
 
-                    # Convert to COG (default) and optionally rename with event
+                        # Convert to COG (default) and optionally rename with event
+                        # Skip COG conversion if merging - will convert merged file instead
 
-                    if not args.tif_only:
+                        if not args.tif_only and not args.merge:
 
-                        cog_path = convert_to_cog(
+                            cog_path = convert_to_cog(
 
-                            prod_name,
+                                prod_name,
 
-                            nodata=args.nodata,
+                                nodata=args.nodata,
 
-                            dst_crs=dst_crs_value,
+                                dst_crs=dst_crs_value,
 
-                            compression=args.compression,
+                                compression=args.compression,
 
-                            compression_level=args.compression_level
+                                compression_level=args.compression_level
 
-                        )
+                            )
 
-                        if args.event and not args.merge:
+                            if args.event:
 
-                            rename_with_event(cog_path, args.event)
+                                rename_with_event(cog_path, args.event)
 
-                    elif args.event and not args.merge:
+                        elif args.event and not args.merge:
 
-                        # Rename TIF without COG conversion
+                            # Rename TIF without COG conversion
 
-                        rename_with_event(prod_name, args.event)
+                            rename_with_event(prod_name, args.event)
+
+                        processing_success.append((os.path.basename(ddir), 'NBR', 'Success'))
+                    except Exception as e:
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        processing_errors.append((os.path.basename(ddir), 'NBR', error_msg))
+                        print(f'\n  ✗ ERROR processing NBR: {error_msg}')
+                        print(f'  Continuing with next product...')
 
             # update permissions
             cmd = '/bin/chmod -R -f ug+rwx '+ddir
@@ -670,37 +796,48 @@ if __name__ == "__main__":
                     prod_name = os.path.join(prod_dir, f'{sensor}_waterExtent_NSTD_{nstd_str}_{date}.tif')
                     check = glob.glob(prod_name)
                     if len(check) == 0 or args.force:
-                        # produce water extent
-                        print(f'\n* Processing Water Extent (NSTD: {nstd})')
-                        gen_water_extent(date_dir, float(nstd), prod_name, cloudMask, sun_zen)
+                        try:
+                            # produce water extent
+                            print(f'\n* Processing Water Extent (NSTD: {nstd})')
+                            gen_water_extent(date_dir, float(nstd), prod_name, cloudMask, sun_zen)
 
-                        # Convert to COG (default) and optionally rename with event
+                            # Convert to COG (default) and optionally rename with event
+                            # Skip COG conversion if merging - will convert merged file instead
 
-                        if not args.tif_only:
+                            if not args.tif_only and not args.merge:
 
-                            cog_path = convert_to_cog(
+                                cog_path = convert_to_cog(
 
-                                prod_name,
+                                    prod_name,
 
-                                nodata=args.nodata,
+                                    nodata=args.nodata,
 
-                                dst_crs=dst_crs_value,
+                                    dst_crs=dst_crs_value,
 
-                                compression=args.compression,
+                                    compression=args.compression,
 
-                                compression_level=args.compression_level
+                                    compression_level=args.compression_level
 
-                            )
+                                )
 
-                            if args.event and not args.merge:
+                                if args.event:
 
-                                rename_with_event(cog_path, args.event)
+                                    rename_with_event(cog_path, args.event)
 
-                        elif args.event and not args.merge:
+                            elif args.event and not args.merge:
 
-                            # Rename TIF without COG conversion
+                                # Rename TIF without COG conversion
 
-                            rename_with_event(prod_name, args.event)
+                                rename_with_event(prod_name, args.event)
+
+                            processing_success.append((date, f'Water Extent (NSTD: {nstd})', 'Success'))
+                        except Exception as e:
+                            error_msg = f"{type(e).__name__}: {str(e)}"
+                            processing_errors.append((date, f'Water Extent (NSTD: {nstd})', error_msg))
+                            print(f'\n  ✗ ERROR processing Water Extent (NSTD: {nstd}): {error_msg}')
+                            print(f'  Continuing with next product...')
+                    else:
+                        processing_success.append((date, f'Water Extent (NSTD: {nstd})', 'Skipped - already exists'))
 
         if args.merge:
             dirs_to_merge = list(set(prod_dirs))
@@ -772,7 +909,58 @@ if __name__ == "__main__":
                             except Exception as e:
                                 print(f"  Warning: Could not rename {basename}: {e}")
 
+    if not args.unzip_only:
+        # Write processing summary and log file
+        total_processed = len(processing_success) + len(processing_errors)
+
+        print("\n" + "="*70)
+        print("PROCESSING SUMMARY")
+        print("="*70)
+        print(f"Total products processed: {total_processed}")
+        print(f"✓ Successful: {len(processing_success)}")
+        print(f"✗ Failed: {len(processing_errors)}")
+
+        if processing_errors:
+            print("\n" + "="*70)
+            print("ERRORS ENCOUNTERED:")
+            print("="*70)
+            for scene, product, error in processing_errors:
+                print(f"  ✗ {scene} - {product}")
+                print(f"     Error: {error}")
+
+        # Write detailed log file
+        with open(log_file, 'w') as f:
+            f.write("LANDSAT 8/9 PROCESSING LOG\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("="*70 + "\n\n")
+
+            f.write(f"Total products processed: {total_processed}\n")
+            f.write(f"Successful: {len(processing_success)}\n")
+            f.write(f"Failed: {len(processing_errors)}\n\n")
+
+            f.write("="*70 + "\n")
+            f.write("SUCCESSFUL PROCESSING:\n")
+            f.write("="*70 + "\n")
+            for scene, product, status in processing_success:
+                f.write(f"✓ {scene} - {product}: {status}\n")
+
+            if processing_errors:
+                f.write("\n" + "="*70 + "\n")
+                f.write("FAILED PROCESSING:\n")
+                f.write("="*70 + "\n")
+                for scene, product, error in processing_errors:
+                    f.write(f"✗ {scene} - {product}\n")
+                    f.write(f"   Error: {error}\n\n")
+
+        print(f"\n📄 Detailed log written to: {log_file}")
+        print("="*70)
+
     print("\nCompleted Landsat surface reflectance processing and product generation.")
+
+    if not args.unzip_only and processing_errors:
+        print(f"\n⚠ Processing completed with {len(processing_errors)} error(s). See log file for details.")
+    elif not args.unzip_only:
+        print("\n✓ Processing completed successfully!")
 
     cmd = f"chmod -R -f ug+rwx {input_dir}"
     os.system(cmd)

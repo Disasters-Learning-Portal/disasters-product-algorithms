@@ -1,0 +1,108 @@
+name: Enforce Branch Protection
+
+on:
+  pull_request:
+    branches: [ dev ]
+
+jobs:
+  check-feature-to-dev:
+    # Only run when PR targets dev branch
+    if: github.base_ref == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if PR to dev is from a feature branch (not dev itself)
+        run: |
+          echo "Target branch: ${{ github.base_ref }}"
+          echo "Source branch: ${{ github.head_ref }}"
+
+          # Block if someone tries to create a PR from dev to dev
+          if [ "${{ github.head_ref }}" == "dev" ]; then
+            echo "❌ Error: Cannot create a pull request from 'dev' to 'dev'."
+            echo "You must create a feature branch to contribute to dev."
+            echo ""
+            echo "Correct workflow:"
+            echo "1. Create a feature branch: git checkout -b feature/my-feature"
+            echo "2. Make your changes and commit"
+            echo "3. Push: git push origin feature/my-feature"
+            echo "4. Open PR: feature/my-feature → dev"
+            exit 1
+          fi
+
+          # Informational: show what branch naming patterns are good
+          echo "✅ PR is coming from a feature branch (${{ github.head_ref }}) to dev"
+          echo ""
+          echo "📝 Recommended branch naming conventions:"
+          echo "  - feature/description (for new features)"
+          echo "  - fix/description (for bug fixes)"
+          echo "  - hotfix/description (for urgent fixes)"
+          echo "  - refactor/description (for code refactoring)"
+          echo "  - docs/description (for documentation)"
+
+  pr-validation:
+    name: PR Validation Checks
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'dev'
+    steps:
+      - name: Validate PR title
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          echo "PR Title: $PR_TITLE"
+
+          # Check if PR title is not empty
+          if [ -z "$PR_TITLE" ]; then
+            echo "❌ Error: PR title cannot be empty"
+            exit 1
+          fi
+
+          # Check minimum length
+          if [ ${#PR_TITLE} -lt 10 ]; then
+            echo "⚠️  Warning: PR title is very short (${#PR_TITLE} characters)"
+            echo "Consider adding more context to your PR title"
+          fi
+
+          echo "✅ PR title validation passed"
+
+      - name: Check PR description
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+
+          if [ -z "$PR_BODY" ]; then
+            echo "⚠️  Warning: PR has no description"
+            echo "Consider adding:"
+            echo "  - What changes were made"
+            echo "  - Why these changes were needed"
+            echo "  - How to test the changes"
+          else
+            echo "✅ PR has a description"
+          fi
+
+      - name: Branch name validation
+        run: |
+          BRANCH_NAME="${{ github.head_ref }}"
+          echo "Branch name: $BRANCH_NAME"
+
+          # Recommended patterns
+          RECOMMENDED_PATTERNS="^(feature|fix|hotfix|refactor|docs|test|chore)/"
+
+          if echo "$BRANCH_NAME" | grep -qE "$RECOMMENDED_PATTERNS"; then
+            echo "✅ Branch name follows recommended convention"
+          else
+            echo "💡 Tip: Consider using conventional branch names:"
+            echo "  - feature/your-feature-name"
+            echo "  - fix/bug-description"
+            echo "  - hotfix/urgent-fix"
+            echo "  - refactor/what-you-refactored"
+            echo "  - docs/documentation-update"
+            echo ""
+            echo "Current branch: $BRANCH_NAME"
+            echo "This is just a suggestion - your PR can still proceed."
+          fi
+
+      - name: Summary
+        run: |
+          echo "### ✅ PR Validation Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** \`${{ github.head_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** \`${{ github.base_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All automatic checks passed! ✅" >> $GITHUB_STEP_SUMMARY

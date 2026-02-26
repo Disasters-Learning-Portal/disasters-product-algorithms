@@ -1,0 +1,29 @@
+name: Enforce Dev to Main
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check-dev-to-main:
+    # Only run this check when PR targets main branch
+    if: github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if PR to main is from dev branch
+        run: |
+          echo "Target branch: ${{ github.base_ref }}"
+          echo "Source branch: ${{ github.head_ref }}"
+
+          # Only enforce dev->main rule when targeting main
+          if [ "${{ github.base_ref }}" == "main" ] && [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "❌ Error: Pull requests to 'main' can only come from 'dev' branch."
+            echo "Your PR is from: ${{ github.head_ref }} → ${{ github.base_ref }}"
+            echo ""
+            echo "Please follow the branching strategy:"
+            echo "1. Merge feature branches → dev"
+            echo "2. Merge dev → main"
+            exit 1
+          else
+            echo "✅ PR is correctly coming from dev branch to main"
+          fi

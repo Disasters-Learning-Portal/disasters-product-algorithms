@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "disasters-product-algorithms"
-version = "0.1.0"
-description = "Process Landsat 8/9 and Sentinel-2 satellite imagery to generate disaster response products"
+version = "0.2.0"
+description = "Process Landsat 8/9 and Sentinel-2 satellite imagery to generate disaster response products, with COG conversion and AWS integration"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
@@ -14,6 +14,9 @@ authors = [
 dependencies = [
     "Pillow",
     "lxml",
+    "psutil",
+    "fsspec",
+    "s3fs",
 ]
 
 # Note: The following packages should be pre-installed via conda in your environment:
@@ -27,6 +30,14 @@ dependencies = [
 # - requests
 # - boto3
 # - botocore
+# - tqdm
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "moto[s3]>=5.0",
+]
 
 [project.scripts]
 process_landsat89 = "landsat.cli:process_landsat89_cli"
@@ -36,5 +47,13 @@ download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
-[tool.setuptools]
-packages = ["landsat", "sentinel2", "shared_utils"]
+[tool.setuptools.packages.find]
+include = ["landsat*", "sentinel2*", "shared_utils*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gdal: tests requiring GDAL CLI tools",
+    "rio_cogeo: tests requiring rio-cogeo CLI",
+    "slow: slow integration tests",
+]

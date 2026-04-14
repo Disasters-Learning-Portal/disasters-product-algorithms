@@ -1,4 +1,4 @@
-from satellogic_v2 import *
+from satellogic.satellogic_v2 import *
 
 __all__ = [
     'retrieve_satellogic_resources',

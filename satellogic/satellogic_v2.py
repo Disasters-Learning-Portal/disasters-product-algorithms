@@ -1,4 +1,3 @@
-import glob                    
 import os
 import sys                                     
 import numpy as np
@@ -22,6 +21,7 @@ import json
 
 from glob import glob
 from typing import Union
+from datetime import datetime
 from shared_utils.geotools import *
 from shared_utils.s3utils import *
 
@@ -35,7 +35,7 @@ from shared_utils.s3utils import *
 def retrieve_satellogic_resources(date : Union[str, datetime], level : str, bucket : str = "csda-data-vendor-satellogic", prefix : str = "disasters") -> list[list[str]]:
     files = retrieve_s3_file_list(bucket, prefix)
     filtered_files = [x for x in files if f"_{level}_" in x.split("/")[1]]
-    subdirs = list(set([x.split("/")[1] for x in filtered_files if x.split("/")[1]]))
+    subdirs = list(set([x.split("/")[1] for x in filtered_files]))
     dates = [datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S") for x in subdirs]
 
     if type(date) is str:

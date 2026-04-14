@@ -24,6 +24,13 @@ from shared_utils.geotools import (
     dump_geotiff_rgb,
 )
 
+from shared_utils.s3utils import (
+    retrieve_s3_file_list,
+    read_s3_file,
+    download_s3_file,
+    remove_s3_temp
+)
+
 __all__ = [
     # COG utilities
     'set_nodata_value',
@@ -40,4 +47,9 @@ __all__ = [
     'dump_geotiff_float',
     'dump_geotiff_byte',
     'dump_geotiff_rgb',
+    # s3utils
+    'retrieve_s3_file_list',
+    'read_s3_file',
+    'download_s3_file',
+    'remove_s3_temp'
 ]

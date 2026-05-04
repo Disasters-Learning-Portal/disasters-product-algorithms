@@ -126,8 +126,12 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
     blue_array[no_data] = 0
 
     ### Convert from reflectance to 8-bit values ###
-    print("\t* Converting reflectance to 8-bit values")
-    def stretch_display(band):
+    #r = bytescale(nir_array, cmin=0, cmax=1, low=1 ,high=255)
+    #g = bytescale(red_array, cmin=0, cmax=1, low=1, high=255)
+    #b = bytescale(green_array, cmin=0, cmax=1, low=1, high=255)
+    #print("\t* Converting reflectance to 8-bit values")
+    """def stretch_display(band):
+        band = np.nan_to_num(band, nan=0.0)
     
         p2, p98 = np.percentile(band, (2, 98))
     
@@ -136,14 +140,45 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
     
         band = (band - p2) / (p98 - p2)
         return np.clip(band, 0, 1)
-  
-    r = stretch_display(red_array)
-    g = stretch_display(green_array)
-    b = stretch_display(blue_array)
 
-    r = (r * 255).astype(np.uint8)
-    g = (g * 255).astype(np.uint8)
-    b = (b * 255).astype(np.uint8)
+    red_array[no_data] = np.nan
+    green_array[no_data] = np.nan
+    blue_array[no_data] = np.nan
+  
+    #r = stretch_display(red_array)
+    #g = stretch_display(green_array)
+    #b = stretch_display(blue_array)
+
+    r = (red_array * 255).astype(np.uint8)
+    g = (green_array * 255).astype(np.uint8)
+    b = (blue_array * 255).astype(np.uint8)"""
+
+
+    ### Convert from reflectance to 8-bit values ###
+    print("\t* Converting reflectance to 8-bit values")
+    r = bytescale(red_array, low=0 ,high=255)
+    g = bytescale(green_array, low=0, high=255)
+    b = bytescale(blue_array, low=0, high=255)
+
+    """# Use PIL to brighten it up
+    print("\t* Enhancing image")
+    rgbArray = np.ones( (rows,cols,3), 'uint8' )
+    rgbArray[...,0] = r
+    rgbArray[...,1] = g
+    rgbArray[...,2] = b
+    rgb = Image.fromarray(rgbArray)
+    enhancer = ImageEnhance.Brightness(rgb).enhance(3)  # increase this number to increase the brightness
+    r = np.reshape(enhancer.getdata(band=0), (rows,cols))
+    g = np.reshape(enhancer.getdata(band=1), (rows,cols))
+    b = np.reshape(enhancer.getdata(band=2), (rows,cols))"""
+    
+    r = np.clip(r, 0, 255)
+    g = np.clip(g, 0, 255)
+    b = np.clip(b, 0, 255)
+
+    #r[no_data] = 0
+    #g[no_data] = 0 
+    #b[no_data] = 0
     
     outfile = f"{save_location}/{in_file.split("/")[-1].replace("_TOA_0.tif", "_trueColor.tif")}"
     dump_geotiff_rgb(outfile, r, g, b, projref, in_geo)
@@ -206,26 +241,56 @@ def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_locatio
     nir_array[no_data] = 0
     red_array[no_data] = 0
     green_array[no_data] = 0
-
+    
     ### Convert from reflectance to 8-bit values ###
-    print("\t* Converting reflectance to 8-bit values")
+    r = bytescale(nir_array, low=0, high=255)
+    g = bytescale(red_array, low=0, high=255)
+    b = bytescale(green_array, low=0, high=255)
+    #print("\t* Converting reflectance to 8-bit values")
     def stretch_display(band):
-    
-        p2, p98 = np.percentile(band, (2, 98))
-    
+        p2, p98 = np.nanpercentile(band, (2, 98))
+
         if p98 <= p2:
             return np.zeros_like(band)
     
         band = (band - p2) / (p98 - p2)
         return np.clip(band, 0, 1)
-  
-    r = stretch_display(nir_array)
-    g = stretch_display(red_array)
-    b = stretch_display(green_array)
 
-    r = (r * 255).astype(np.uint8)
-    g = (g * 255).astype(np.uint8)
-    b = (b * 255).astype(np.uint8)
+    #nir_array[no_data] = np.nan
+    #red_array[no_data] = np.nan
+    #green_array[no_data] = np.nan
+  
+    #r = stretch_display(nir_array)
+    #g = stretch_display(red_array)
+    #b = stretch_display(green_array)
+
+    #r = (r * 255).astype(np.uint8)
+    #g = (g * 255).astype(np.uint8)
+    #b = (b * 255).astype(np.uint8)
+    
+    #r = (nir_array * 255).astype(np.uint8)
+    #g = (red_array * 255).astype(np.uint8)
+    #b = (green_array * 255).astype(np.uint8)
+
+    """# Use PIL to brighten it up
+    print("\t* Enhancing image")
+    rgbArray = np.ones( (rows,cols,3), 'uint8' )
+    rgbArray[...,0] = r
+    rgbArray[...,1] = g
+    rgbArray[...,2] = b
+    rgb = Image.fromarray(rgbArray)
+    enhancer = ImageEnhance.Brightness(rgb).enhance(1.5)  # increase this number to increase the brightness
+    r = np.reshape(enhancer.getdata(band=0), (rows,cols))
+    g = np.reshape(enhancer.getdata(band=1), (rows,cols))
+    b = np.reshape(enhancer.getdata(band=2), (rows,cols))"""
+
+    r = np.clip(r, 1, 255)
+    g = np.clip(g, 1, 255)
+    b = np.clip(b, 1, 255)
+
+    r[no_data] = 0
+    g[no_data] = 0
+    b[no_data] = 0
     
     outfile = f"{save_location}/{in_file.split("/")[-1].replace("_TOA_0.tif", "_colorIR.tif")}"
     dump_geotiff_rgb(outfile, r, g, b, projref, in_geo)

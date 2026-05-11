@@ -209,6 +209,8 @@ class SimpleProcessor:
 
         print("\nSettings:")
         print(f"  • Compression: ZSTD level 22")
+        target_crs = self._normalize_target_crs()
+        print(f"  • Target CRS: {target_crs if target_crs else 'Keep original (no reprojection)'}")
         print(f"  • Overwrite existing: {self.config.get('overwrite', False)}")
         print(f"  • Verify results: {self.config.get('verify', True)}")
         print("="*60)
@@ -315,7 +317,8 @@ class SimpleProcessor:
                     cog_data_prefix=f"{self.config['destination_base']}/{output_dir}",
                     s3_client=self.s3_client,
                     manual_nodata=nodata,
-                    overwrite=self.config.get('overwrite', False)
+                    overwrite=self.config.get('overwrite', False),
+                    target_crs=self._normalize_target_crs()
                 )
 
                 results.append({
@@ -395,6 +398,15 @@ class SimpleProcessor:
             return f"{self.config['event_name']}_{stem_clean}_{formatted_date}_day.tif"
         else:
             return f"{self.config['event_name']}_{stem}_day.tif"
+
+    def _normalize_target_crs(self) -> Optional[str]:
+        """Normalize target_crs config value. Returns None for no reprojection."""
+        crs = self.config.get('target_crs', 'EPSG:4326')
+        if crs is None:
+            return None
+        if isinstance(crs, str) and crs.strip().lower() in ('none', ''):
+            return None
+        return crs
 
     def _get_nodata_value(self, category: str) -> Optional[float]:
         """

@@ -96,6 +96,7 @@ def create_cog_gdal(
     compress_level: int = 22,
     blocksize: int = 512,
     reproject_to_4326: bool = True,
+    target_crs: Optional[str] = None,
     verbose: bool = True
 ) -> bool:
     """
@@ -109,13 +110,23 @@ def create_cog_gdal(
         compress: Compression type (ZSTD, LZW, DEFLATE, etc.)
         compress_level: Compression level (1-22 for ZSTD)
         blocksize: Tile block size
-        reproject_to_4326: Whether to reproject to EPSG:4326
+        reproject_to_4326: Whether to reproject to EPSG:4326 (ignored if target_crs is set)
+        target_crs: Target CRS string (e.g. 'EPSG:4326'). None = keep original CRS.
+            Overrides reproject_to_4326 when set.
         verbose: Print progress messages
 
     Returns:
         True if successful, False otherwise
     """
     try:
+        # Resolve effective CRS: target_crs takes precedence over reproject_to_4326
+        if target_crs is not None:
+            effective_crs = target_crs
+        elif reproject_to_4326:
+            effective_crs = 'EPSG:4326'
+        else:
+            effective_crs = None  # Keep original
+
         # Ensure output directory exists
         output_dir = os.path.dirname(output_path)
         if output_dir:
@@ -139,16 +150,18 @@ def create_cog_gdal(
         env = set_optimal_gdal_env()
 
         # Handle reprojection if needed
-        if reproject_to_4326:
+        if effective_crs is not None:
             # Use two-stage process for reprojection
             return create_cog_with_reprojection(
                 input_path, output_path, nodata,
                 compress, compress_level, blocksize,
                 resampling, overview_resampling,
-                env, verbose
+                env, verbose, target_crs=effective_crs
             )
 
         # Direct COG creation without reprojection
+        if verbose:
+            print(f"   [GDAL-COG] Keeping original CRS (no reprojection)")
         cmd = build_gdal_translate_command(
             input_path, output_path, nodata,
             compress, compress_level, blocksize,
@@ -194,7 +207,8 @@ def create_cog_with_reprojection(
     resampling: str,
     overview_resampling: str,
     env: Dict[str, str],
-    verbose: bool
+    verbose: bool,
+    target_crs: str = 'EPSG:4326'
 ) -> bool:
     """
     Create COG with reprojection using two-stage process.
@@ -226,12 +240,12 @@ def create_cog_with_reprojection(
             pass
 
         if verbose:
-            print(f"   [GDAL-COG] Stage 1: Reprojecting to EPSG:4326 using {resampling} resampling...")
+            print(f"   [GDAL-COG] Stage 1: Reprojecting to {target_crs} using {resampling} resampling...")
 
         # Stage 1: Reproject with gdalwarp (supports multi-threading)
         warp_cmd = [
             'gdalwarp',
-            '-t_srs', 'EPSG:4326',
+            '-t_srs', target_crs,
             '-r', resampling,  # Use appropriate resampling method
             '-multi',  # Enable multi-threading
             '-wo', 'NUM_THREADS=ALL_CPUS',
@@ -362,6 +376,7 @@ def process_file_optimized(
     nodata: Optional[float] = None,
     file_size_gb: float = 0,
     reproject: bool = True,
+    target_crs: Optional[str] = None,
     verbose: bool = True
 ) -> bool:
     """
@@ -372,7 +387,9 @@ def process_file_optimized(
         output_path: Output COG path
         nodata: Optional nodata value
         file_size_gb: File size in GB for strategy selection
-        reproject: Whether to reproject to EPSG:4326
+        reproject: Whether to reproject to EPSG:4326 (ignored if target_crs is set)
+        target_crs: Target CRS string (e.g. 'EPSG:4326'). None = keep original CRS.
+            Overrides reproject when set.
         verbose: Print progress messages
 
     Returns:
@@ -384,14 +401,16 @@ def process_file_optimized(
         return create_cog_gdal(
             input_path, output_path, nodata,
             compress='ZSTD', compress_level=22,
-            reproject_to_4326=reproject, verbose=verbose
+            reproject_to_4326=reproject, target_crs=target_crs,
+            verbose=verbose
         )
     elif file_size_gb < 3.0:
         # Medium files: Balance speed and compression
         return create_cog_gdal(
             input_path, output_path, nodata,
             compress='ZSTD', compress_level=15,
-            reproject_to_4326=reproject, verbose=verbose
+            reproject_to_4326=reproject, target_crs=target_crs,
+            verbose=verbose
         )
     else:
         # Large files: Prioritize speed
@@ -399,7 +418,8 @@ def process_file_optimized(
             input_path, output_path, nodata,
             compress='ZSTD', compress_level=9,
             blocksize=256,  # Smaller blocks for large files
-            reproject_to_4326=reproject, verbose=verbose
+            reproject_to_4326=reproject, target_crs=target_crs,
+            verbose=verbose
         )
 
 

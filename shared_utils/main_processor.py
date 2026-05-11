@@ -89,7 +89,7 @@ except ImportError:
 def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                    s3_client, cog_profile=None, local_output_dir=None,
                    chunk_config=None, manual_nodata=None, overwrite=False,
-                   skip_validation=False):
+                   skip_validation=False, target_crs='EPSG:4326'):
     """
     Main function to convert a file to Cloud Optimized GeoTIFF.
 
@@ -105,10 +105,17 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
         chunk_config: Chunk configuration (optional)
         manual_nodata: Manual no-data value (optional)
         overwrite: Whether to overwrite existing files (default: False)
+        skip_validation: Whether to skip COG validation (default: False)
+        target_crs: Target CRS string (e.g. 'EPSG:4326') or None to keep
+            the original CRS without reprojection. Default: 'EPSG:4326'.
 
     Returns:
         None (raises exception on error)
     """
+    # Normalize target_crs: treat string 'None'/'none' and empty string as actual None
+    if isinstance(target_crs, str) and target_crs.strip().lower() in ('none', ''):
+        target_crs = None
+
     # Initialize
     start_time = datetime.now()
     s3_key = f"{cog_data_prefix}/{cog_filename}"
@@ -207,7 +214,8 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                 cog_output_path,
                 nodata=src_nodata,
                 file_size_gb=file_size_gb,
-                reproject=True,  # Reproject to EPSG:4326
+                reproject=target_crs is not None,
+                target_crs=target_crs,
                 verbose=True
             )
 
@@ -294,19 +302,24 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                 from shared_utils.compression import remap_nodata_value
                 from rasterio.enums import Resampling
 
-                print(f"   [COG] Creating COG with nodata remapping and reprojection...")
+                print(f"   [COG] Creating COG with nodata remapping" +
+                      (f" and reprojection to {target_crs}..." if target_crs else " (keeping original CRS)..."))
                 temp_remapped = f"temp_remapped_{uuid.uuid4().hex}.tif"
                 temp_files.append(temp_remapped)
 
-                # First, create reprojected file with original nodata
                 with rasterio.open(input_path) as src:
-                    # Calculate transform for EPSG:4326
                     from rasterio.warp import calculate_default_transform, reproject
 
-                    dst_crs = 'EPSG:4326'
-                    transform, width, height = calculate_default_transform(
-                        src.crs, dst_crs, src.width, src.height, *src.bounds
-                    )
+                    if target_crs is not None:
+                        dst_crs = target_crs
+                        transform, width, height = calculate_default_transform(
+                            src.crs, dst_crs, src.width, src.height, *src.bounds
+                        )
+                    else:
+                        dst_crs = src.crs
+                        transform = src.transform
+                        width = src.width
+                        height = src.height
 
                     # Setup output profile
                     kwargs = src.meta.copy()
@@ -321,16 +334,15 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                     # Write reprojected data with remapped nodata
                     with rasterio.open(temp_remapped, 'w', **kwargs) as dst:
                         for band_idx in range(1, src.count + 1):
-                            # Reproject with proper nodata handling
                             reproject(
                                 source=rasterio.band(src, band_idx),
                                 destination=rasterio.band(dst, band_idx),
                                 src_transform=src.transform,
                                 src_crs=src.crs,
-                                src_nodata=original_nodata,  # Tell reproject about original nodata
+                                src_nodata=original_nodata,
                                 dst_transform=transform,
                                 dst_crs=dst_crs,
-                                dst_nodata=src_nodata,  # Remap to new nodata
+                                dst_nodata=src_nodata,
                                 resampling=Resampling.bilinear
                             )
 
@@ -349,28 +361,42 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                         use_cog_driver=False
                     )
             else:
-                # No remapping needed, use original optimized path
-                print(f"   [COG] Creating COG with reprojection in single pass...")
-
                 from rasterio.vrt import WarpedVRT
                 from rasterio.enums import Resampling
 
                 with rasterio.open(input_path) as src:
-                    with WarpedVRT(src, crs='EPSG:4326',
-                                  resampling=Resampling.bilinear,
-                                  nodata=src_nodata) as vrt:
-                        # Now use cog_translate with the reprojected VRT
+                    if target_crs is not None:
+                        # Reproject to target CRS via WarpedVRT
+                        print(f"   [COG] Creating COG with reprojection to {target_crs} in single pass...")
+                        with WarpedVRT(src, crs=target_crs,
+                                      resampling=Resampling.bilinear,
+                                      nodata=src_nodata) as vrt:
+                            cog_translate(
+                                vrt,
+                                cog_output_path,
+                                output_profile,
+                                nodata=src_nodata,
+                                overview_level=5,
+                                overview_resampling="average",
+                                config=config,
+                                quiet=False,
+                                in_memory=False,
+                                use_cog_driver=False
+                            )
+                    else:
+                        # Keep original CRS — translate directly without WarpedVRT
+                        print(f"   [COG] Creating COG with original CRS ({src.crs}) in single pass...")
                         cog_translate(
-                            vrt,
+                            src,
                             cog_output_path,
                             output_profile,
                             nodata=src_nodata,
-                            overview_level=5,  # Create 5 levels of overviews
+                            overview_level=5,
                             overview_resampling="average",
                             config=config,
                             quiet=False,
-                            in_memory=False,  # Don't load entire file into memory
-                            use_cog_driver=False  # Use standard GTiff driver with COG structure
+                            in_memory=False,
+                            use_cog_driver=False
                         )
 
             print(f"   [COG] ✅ COG created successfully")
@@ -421,12 +447,19 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                     print(f"   [CHUNKS] Using adaptive chunk size starting at: {chunk_size}x{chunk_size}")
 
             # Calculate reprojection parameters
-            if use_whole_file and file_size_gb < 1.5:
-                print(f"   [REPROJECT] Converting to EPSG:4326 using whole-file processing...")
+            if target_crs is not None:
+                dst_crs = target_crs
+                if use_whole_file and file_size_gb < 1.5:
+                    print(f"   [REPROJECT] Converting to {dst_crs} using whole-file processing...")
+                else:
+                    print(f"   [REPROJECT] Converting to {dst_crs} using fixed-grid chunked processing...")
+                transform, width, height = calculate_transform_parameters(src, dst_crs)
             else:
-                print(f"   [REPROJECT] Converting to EPSG:4326 using fixed-grid chunked processing...")
-            dst_crs = 'EPSG:4326'
-            transform, width, height = calculate_transform_parameters(src, dst_crs)
+                dst_crs = src.crs
+                transform = src.transform
+                width = src.width
+                height = src.height
+                print(f"   [CRS] Keeping original CRS: {dst_crs}")
 
             # Get or set nodata value and check if remapping is needed
             original_nodata = src.nodata

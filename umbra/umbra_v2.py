@@ -10,6 +10,9 @@ from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject
 from rasterio.enums import Resampling
 from pathlib import Path
+
+from scipy.ndimage.filters import uniform_filter
+from scipy.ndimage.measurements import variance
 import requests
 import shutil
 from scipy.signal import medfilt2d
@@ -43,6 +46,17 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
     tifs = [f"s3://{bucket}/{x}" for x in tifs]
 
     return tifs
+
+def lee_filter(img, size):
+    img_mean = uniform_filter(img, (size, size))
+    img_sqr_mean = uniform_filter(img**2, (size, size))
+    img_variance = img_sqr_mean - img_mean**2
+
+    overall_variance = variance(img)
+
+    img_weights = img_variance / (img_variance + overall_variance)
+    img_output = img_mean + img_weights * (img - img_mean)
+    return img_output
 
 def sigmaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     if save_location.endswith("/"):
@@ -80,7 +94,13 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
-    return outfile
+
+    sigma_0_filt = lee_filter(sigma_0, 5)
+    outfile_filt = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_sigma0Filt.tif")}"
+    dump_geotiff_float(outfile_filt, sigma_0_filt, projref, in_geo)
+
+    print(f"Generation (filtered) completed, file saved to {outfile_filt}")
+    return outfile, outfile_filt
     
 def betaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     if save_location.endswith("/"):
@@ -118,7 +138,13 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     dump_geotiff_float(outfile, beta_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
-    return outfile
+
+    beta_0_filt = lee_filter(beta_0, 5)
+    outfile_filt = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_beta0Filt.tif")}"
+    dump_geotiff_float(outfile_filt, beta_0_filt, projref, in_geo)
+
+    print(f"Generation (filtered) completed, file saved to {outfile_filt}")
+    return outfile, outfile_filt
 
 def gammaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     if save_location.endswith("/"):
@@ -156,7 +182,13 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     dump_geotiff_float(outfile, gamma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
-    return outfile
+
+    gamma_0_filt = lee_filter(gamma_0, 5)
+    outfile_filt = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_gamma0Filt.tif")}"
+    dump_geotiff_float(outfile_filt, gamma_0_filt, projref, in_geo)
+
+    print(f"Generation (filtered) completed, file saved to {outfile_filt}")
+    return outfile, outfile_filt
 
 def rcsCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     if save_location.endswith("/"):
@@ -194,7 +226,13 @@ def rcsCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     dump_geotiff_float(outfile, rcs_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
-    return outfile
+
+    rcs_0_filt = lee_filter(rcs_0, 5)
+    outfile_filt = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_rs0Filt.tif")}"
+    dump_geotiff_float(outfile_filt, rcs_0_filt, projref, in_geo)
+
+    print(f"Generation (filtered) completed, file saved to {outfile_filt}")
+    return outfile, outfile_filt
 
 ######################################################################
 #f_path = '/mnt/disasters1/data/esops/eventData/2026/wintWeatherJan2026/umbra/Greenville'

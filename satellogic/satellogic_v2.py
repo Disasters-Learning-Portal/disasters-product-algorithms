@@ -60,25 +60,25 @@ def getSolarZenithAngle(s3_metadata : list[str]):
     solarZenithAngle = float(data['features'][0]['properties']['solar']['zenith'])
     return solarZenithAngle
 
-def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
 
     def print_stats(arr):
         print(f"Min: {np.min(arr)}")
@@ -151,25 +151,25 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating Color Infrared')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)
@@ -233,25 +233,25 @@ def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_locatio
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating NDVI')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)
@@ -294,25 +294,25 @@ def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location :
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def genNDWI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genNDWI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating NDWI')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)

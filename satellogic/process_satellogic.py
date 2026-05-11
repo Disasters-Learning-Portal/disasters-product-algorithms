@@ -40,7 +40,7 @@ def main():
 
     parser.add_argument(
         "--output",
-        default="./s3_temp",
+        default="/tmp/s3_temp",
         help="Output directory"
     )
 

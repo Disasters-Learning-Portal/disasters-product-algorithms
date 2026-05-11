@@ -64,6 +64,7 @@ def create_cog_with_metadata(
     output_path: Optional[str] = None,
     preserve_compression: bool = True,
     compression_override: Optional[Dict[str, Any]] = None,
+    target_crs: Optional[str] = None,
     blockxsize: int = 512,
     blockysize: int = 512,
     overview_level: int = 4,
@@ -87,6 +88,8 @@ def create_cog_with_metadata(
         preserve_compression: Read compression settings from source and reuse (default True).
         compression_override: Dict to override compression settings.
                               Keys: 'compress', 'predictor', 'level' (any subset).
+        target_crs: Target CRS string (e.g. 'EPSG:4326') for reprojection.
+                    None = keep the original CRS. String 'None'/'none'/'' treated as None.
         blockxsize: Tile width (default 512).
         blockysize: Tile height (default 512).
         overview_level: Number of overview levels (default 4).
@@ -102,6 +105,10 @@ def create_cog_with_metadata(
     Raises:
         Exception: If COG creation fails.
     """
+    # Normalize target_crs
+    if isinstance(target_crs, str) and target_crs.strip().lower() in ('none', ''):
+        target_crs = None
+
     is_bytes = isinstance(input_data, bytes)
 
     if is_bytes:
@@ -111,6 +118,7 @@ def create_cog_with_metadata(
             output_path=output_path,
             preserve_compression=preserve_compression,
             compression_override=compression_override,
+            target_crs=target_crs,
             blockxsize=blockxsize,
             blockysize=blockysize,
             overview_level=overview_level,
@@ -126,6 +134,7 @@ def create_cog_with_metadata(
             output_path=output_path,
             preserve_compression=preserve_compression,
             compression_override=compression_override,
+            target_crs=target_crs,
             blockxsize=blockxsize,
             blockysize=blockysize,
             overview_level=overview_level,
@@ -243,6 +252,7 @@ def _create_cog_in_memory(
     output_path: Optional[str],
     preserve_compression: bool,
     compression_override: Optional[Dict[str, Any]],
+    target_crs: Optional[str],
     blockxsize: int,
     blockysize: int,
     overview_level: int,
@@ -271,6 +281,10 @@ def _create_cog_in_memory(
 
         if not quiet:
             print(f"    Output compression: {cog_profile.get('compress')}")
+            if target_crs:
+                print(f"    Reprojecting to: {target_crs}")
+            else:
+                print("    Keeping original CRS")
             print("    Creating COG with metadata...")
 
         # Auto-add PROCESSING_DATE if not provided
@@ -278,8 +292,31 @@ def _create_cog_in_memory(
         if 'PROCESSING_DATE' not in tags:
             tags['PROCESSING_DATE'] = datetime.utcnow().isoformat()
 
+        # If reprojection needed, wrap source in a WarpedVRT
+        source_for_translate = input_vsi
+        vrt_handle = None
+
+        if target_crs is not None:
+            from rasterio.vrt import WarpedVRT
+            from rasterio.enums import Resampling
+
+            src_ds = rasterio.open(input_vsi)
+            src_crs = str(src_ds.crs).upper() if src_ds.crs else None
+
+            if src_crs and src_crs != target_crs.upper():
+                vrt_handle = WarpedVRT(
+                    src_ds, crs=target_crs,
+                    resampling=Resampling.bilinear,
+                    nodata=src_ds.nodata,
+                )
+                source_for_translate = vrt_handle
+            else:
+                src_ds.close()
+                if not quiet:
+                    print(f"    Already in {target_crs}, skipping reprojection")
+
         cog_translate(
-            source=input_vsi,
+            source=source_for_translate,
             dst_path=output_vsi,
             dst_kwargs=cog_profile,
             add_mask=add_mask,
@@ -289,6 +326,11 @@ def _create_cog_in_memory(
             additional_cog_metadata=tags,
             quiet=quiet,
         )
+
+        # Clean up VRT handle
+        if vrt_handle is not None:
+            vrt_handle.close()
+            src_ds.close()
 
         if not quiet:
             print("    COG creation complete")
@@ -320,6 +362,7 @@ def _create_cog_on_disk(
     output_path: Optional[str],
     preserve_compression: bool,
     compression_override: Optional[Dict[str, Any]],
+    target_crs: Optional[str],
     blockxsize: int,
     blockysize: int,
     overview_level: int,
@@ -345,6 +388,10 @@ def _create_cog_on_disk(
 
         if not quiet:
             print(f"    Output compression: {cog_profile.get('compress')}")
+            if target_crs:
+                print(f"    Reprojecting to: {target_crs}")
+            else:
+                print("    Keeping original CRS")
             print("    Creating COG with metadata...")
 
         # Auto-add PROCESSING_DATE if not provided
@@ -360,8 +407,33 @@ def _create_cog_on_disk(
         else:
             dst = output_path
 
+        # If reprojection needed, wrap source in a WarpedVRT
+        source_for_translate = input_path
+        vrt_handle = None
+        src_ds = None
+
+        if target_crs is not None:
+            from rasterio.vrt import WarpedVRT
+            from rasterio.enums import Resampling
+
+            src_ds = rasterio.open(input_path)
+            src_crs = str(src_ds.crs).upper() if src_ds.crs else None
+
+            if src_crs and src_crs != target_crs.upper():
+                vrt_handle = WarpedVRT(
+                    src_ds, crs=target_crs,
+                    resampling=Resampling.bilinear,
+                    nodata=src_ds.nodata,
+                )
+                source_for_translate = vrt_handle
+            else:
+                src_ds.close()
+                src_ds = None
+                if not quiet:
+                    print(f"    Already in {target_crs}, skipping reprojection")
+
         cog_translate(
-            source=input_path,
+            source=source_for_translate,
             dst_path=dst,
             dst_kwargs=cog_profile,
             add_mask=add_mask,
@@ -371,6 +443,12 @@ def _create_cog_on_disk(
             additional_cog_metadata=tags,
             quiet=quiet,
         )
+
+        # Clean up VRT handle
+        if vrt_handle is not None:
+            vrt_handle.close()
+        if src_ds is not None:
+            src_ds.close()
 
         if not quiet:
             size_mb = os.path.getsize(dst) / (1024 * 1024)

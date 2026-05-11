@@ -13,6 +13,7 @@ from pathlib import Path
 import requests
 import shutil
 from scipy.signal import medfilt2d
+from scipy.ndimage import uniform_filter
 from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
@@ -195,6 +196,40 @@ def rcsCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
 
     print(f"Generation completed, file saved to {outfile}")
     return outfile
+
+def apply_filter(input_tif, size=5, output_tif=None):
+    with rio.open(input_tif) as src:
+        img = src.read(1).astype(float)
+        profile = src.profile.copy()
+
+    if 'rcs' in input_tif:
+        img = np.clip(img, -40, 0)
+    else:
+        img = np.clip(img, -25, 10)
+
+    img_mean = uniform_filter(img, (size, size))
+    img_sqr_mean = uniform_filter(img**2, (size, size))
+    img_variance = img_sqr_mean - img_mean**2
+
+    overall_variance = np.nanvar(img)
+
+    eps = 1e-10
+    weights = img_variance / (img_variance + overall_variance + eps)
+
+    img_out = img_mean + weights * (img - img_mean)
+
+    # restore nodata
+    img_out[np.isnan(img)] = np.nan
+
+    if output_tif is None:
+        output_tif = input_tif.replace(".tif", "_filtered.tif")
+
+    profile.update(dtype=rio.float32, nodata=np.nan)
+
+    with rio.open(output_tif, "w", **profile) as dst:
+        dst.write(img_out.astype(np.float32), 1)
+
+    return output_tif
 
 ######################################################################
 #f_path = '/mnt/disasters1/data/esops/eventData/2026/wintWeatherJan2026/umbra/Greenville'

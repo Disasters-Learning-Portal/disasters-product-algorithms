@@ -32,9 +32,10 @@ dependencies = [
 process_landsat89 = "landsat.cli:process_landsat89_cli"
 process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
+process_umbra = "umbra.cli:process_umbra_cli"
 
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools]
-packages = ["landsat", "sentinel2", "shared_utils"]
+packages = ["landsat", "sentinel2", "umbra", "shared_utils"]

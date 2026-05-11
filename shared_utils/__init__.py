@@ -48,6 +48,16 @@ try:
 except ImportError:
     pass  # These modules have optional dependencies (boto3, etc.)
 
+# COG metadata (requires rasterio, GDAL, rio-cogeo)
+try:
+    from shared_utils.cog_metadata import (
+        create_cog_with_metadata,
+        read_compression_settings,
+        validate_cog_in_memory,
+    )
+except ImportError:
+    pass  # rasterio/GDAL/rio-cogeo not available
+
 __all__ = [
     # COG utilities
     'set_nodata_value',
@@ -72,4 +82,8 @@ __all__ = [
     'remap_nodata_value',
     'check_and_fix_nan_values',
     'check_cog_with_warnings',
+    # COG metadata
+    'create_cog_with_metadata',
+    'read_compression_settings',
+    'validate_cog_in_memory',
 ]

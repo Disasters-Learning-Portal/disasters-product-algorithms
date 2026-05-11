@@ -9,6 +9,7 @@ Complete reference for all functions in the `shared_utils` package.
   - [main_processor](#main_processor) - S3-based COG conversion pipeline
   - [cog_processing](#cog_processing) - Single-file S3 processing
 - [COG Creation & Validation](#cog-creation--validation)
+  - [cog_metadata](#cog_metadata) - COG creation with embedded metadata tags
   - [cog_utils](#cog_utils) - Local COG conversion and utilities
   - [gdal_cog_processor](#gdal_cog_processor) - GDAL-native COG creation
   - [cog_validation](#cog_validation) - COG validation and integrity checks
@@ -144,6 +145,41 @@ process_single_file(
 ---
 
 ## COG Creation & Validation
+
+### cog_metadata
+
+Create Cloud Optimized GeoTIFFs with embedded metadata tags. Supports both in-memory (GDAL vsimem) and on-disk workflows.
+
+#### `create_cog_with_metadata(input_data, metadata, ...) -> Union[bytes, str]`
+
+```python
+create_cog_with_metadata(
+    input_data: Union[bytes, str],     # GeoTIFF bytes or file path
+    metadata: Dict[str, str],          # Arbitrary key-value metadata tags
+    output_path: Optional[str] = None, # File path output (None = return bytes)
+    preserve_compression: bool = True, # Keep source compression settings
+    compression_override: Optional[Dict] = None,  # Override compress/predictor/level
+    blockxsize: int = 512,
+    blockysize: int = 512,
+    overview_level: int = 4,
+    overview_resampling: str = 'average',
+    web_optimized: bool = True,
+    add_mask: bool = False,
+    quiet: bool = False,
+) -> Union[bytes, str]
+```
+
+Automatically adds `PROCESSING_DATE` if not present in metadata dict.
+
+#### `read_compression_settings(input_data) -> Dict[str, Any]`
+
+Read compression settings from a GeoTIFF. Returns `{'compress': str, 'predictor': int, 'level': int}`.
+
+#### `validate_cog_in_memory(file_bytes, filename="temp.tif") -> Tuple[bool, dict]`
+
+Validate COG structure from in-memory bytes. Returns `(is_valid, info_dict)` with compression, blocksize, overviews, errors, warnings.
+
+---
 
 ### cog_utils
 

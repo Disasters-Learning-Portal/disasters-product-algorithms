@@ -209,6 +209,8 @@ class SimpleProcessor:
 
         print("\nSettings:")
         print(f"  • Compression: ZSTD level 22")
+        target_crs = self._normalize_target_crs()
+        print(f"  • Target CRS: {target_crs if target_crs else 'Keep original (no reprojection)'}")
         print(f"  • Overwrite existing: {self.config.get('overwrite', False)}")
         print(f"  • Verify results: {self.config.get('verify', True)}")
         print("="*60)
@@ -315,7 +317,8 @@ class SimpleProcessor:
                     cog_data_prefix=f"{self.config['destination_base']}/{output_dir}",
                     s3_client=self.s3_client,
                     manual_nodata=nodata,
-                    overwrite=self.config.get('overwrite', False)
+                    overwrite=self.config.get('overwrite', False),
+                    target_crs=self._normalize_target_crs()
                 )
 
                 results.append({
@@ -396,6 +399,15 @@ class SimpleProcessor:
         else:
             return f"{self.config['event_name']}_{stem}_day.tif"
 
+    def _normalize_target_crs(self) -> Optional[str]:
+        """Normalize target_crs config value. Returns None for no reprojection."""
+        crs = self.config.get('target_crs', 'EPSG:4326')
+        if crs is None:
+            return None
+        if isinstance(crs, str) and crs.strip().lower() in ('none', ''):
+            return None
+        return crs
+
     def _get_nodata_value(self, category: str) -> Optional[float]:
         """
         Get appropriate no-data value for category.
@@ -469,7 +481,7 @@ class SimpleProcessor:
         # Save results if configured
         if self.config.get('save_results', True):  # Default to True for backward compatibility
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = f"output/{self.config['event_name']}"
+            output_dir = f"/tmp/output/{self.config['event_name']}"
             os.makedirs(output_dir, exist_ok=True)
 
             csv_path = f"{output_dir}/results_{timestamp}.csv"

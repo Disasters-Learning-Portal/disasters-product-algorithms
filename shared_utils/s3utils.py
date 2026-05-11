@@ -18,7 +18,7 @@ def read_s3_file(s3filepath : str, file_format : str = "utf-8"):
     file = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode(file_format)
     return file
 
-def download_s3_file(s3filepath : str, save_location : str = "./s3_temp") -> str:
+def download_s3_file(s3filepath : str, save_location : str = "/tmp/s3_temp") -> str:
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     bucket = s3filepath.split("/")[2]
@@ -32,5 +32,5 @@ def download_s3_file(s3filepath : str, save_location : str = "./s3_temp") -> str
     s3_client.download_file(bucket, key, outpath)
     return outpath
 
-def remove_s3_temp() -> None:
-    shutil.rmtree("./s3_temp/")
+def remove_s3_temp(save_location: str = "/tmp/s3_temp") -> None:
+    shutil.rmtree(save_location)

@@ -6,6 +6,9 @@ aws_credentials.py
 temp_gdal/
 temp_cog/
 temp_processing/
+reproj/
+data_download/
+output/
 
 # Python
 __pycache__/

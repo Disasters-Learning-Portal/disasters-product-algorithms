@@ -119,7 +119,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
     # Initialize
     start_time = datetime.now()
     s3_key = f"{cog_data_prefix}/{cog_filename}"
-    reproject_filename = f"reproj/{cog_filename}"
+    reproject_filename = f"/tmp/reproj/{cog_filename}"
     temp_files = []
 
     try:
@@ -142,7 +142,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             print(f"   [CONFIG] Using {'fixed' if not chunk_config['adaptive_chunks'] else 'adaptive'} chunks")
 
         # Step 3: Setup directories
-        os.makedirs("reproj", exist_ok=True)
+        os.makedirs("/tmp/reproj", exist_ok=True)
         setup_temp_directory()
 
         # Step 4: Memory monitoring
@@ -169,7 +169,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
 
         # Fallback to download
         if input_path is None:
-            local_download_path = f"data_download/{name}"
+            local_download_path = f"/tmp/data_download/{name}"
             os.makedirs(os.path.dirname(local_download_path), exist_ok=True)
 
             if os.path.exists(local_download_path):
@@ -188,7 +188,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
 
         if HAS_GDAL_PROCESSOR and file_size_gb < 10.0:  # Use GDAL for files under 10GB
             print(f"   [OPTIMIZED] Using GDAL COG driver for maximum performance")
-            cog_output_path = f"cog_{cog_filename}"
+            cog_output_path = f"/tmp/cog_{cog_filename}"
 
             # Ensure output directory exists
             output_dir = os.path.dirname(cog_output_path)
@@ -251,7 +251,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
         # Fallback to rio-cogeo if GDAL processor failed or not available
         if HAS_RIO_COGEO and file_size_gb < 5.0:  # Use rio-cogeo for files under 5GB
             print(f"   [OPTIMIZED] Using rio-cogeo for single-pass COG creation")
-            cog_output_path = f"cog_{cog_filename}"
+            cog_output_path = f"/tmp/cog_{cog_filename}"
 
             # Ensure output directory exists
             output_dir = os.path.dirname(cog_output_path)
@@ -304,7 +304,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
 
                 print(f"   [COG] Creating COG with nodata remapping" +
                       (f" and reprojection to {target_crs}..." if target_crs else " (keeping original CRS)..."))
-                temp_remapped = f"temp_remapped_{uuid.uuid4().hex}.tif"
+                temp_remapped = f"/tmp/temp_remapped_{uuid.uuid4().hex}.tif"
                 temp_files.append(temp_remapped)
 
                 with rasterio.open(input_path) as src:
@@ -552,7 +552,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             )
 
             # Create temporary COG with overviews
-            temp_cog = f"cog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tif"
+            temp_cog = f"/tmp/cog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tif"
             temp_files.append(temp_cog)
 
             if create_cog_with_overviews(reproject_filename, temp_cog, compression_config):

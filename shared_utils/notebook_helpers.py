@@ -481,7 +481,7 @@ class SimpleProcessor:
         # Save results if configured
         if self.config.get('save_results', True):  # Default to True for backward compatibility
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = f"output/{self.config['event_name']}"
+            output_dir = f"/tmp/output/{self.config['event_name']}"
             os.makedirs(output_dir, exist_ok=True)
 
             csv_path = f"{output_dir}/results_{timestamp}.csv"

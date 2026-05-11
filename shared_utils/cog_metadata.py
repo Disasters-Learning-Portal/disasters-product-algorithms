@@ -9,8 +9,9 @@ Single responsibility: COG creation with custom metadata injection.
 """
 
 import os
+import re
 import tempfile
-from typing import Dict, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any
 from datetime import datetime
 
 from osgeo import gdal
@@ -20,6 +21,99 @@ from rio_cogeo.cogeo import cog_validate, cog_translate
 
 # Enable GDAL exceptions
 gdal.UseExceptions()
+
+# Default filename pattern: YYYYMM_HAZARD_LOCATION_*.tif
+DEFAULT_ACTIVATION_PATTERN = r'^(\d{6})_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(.*)\.tif$'
+
+
+def parse_activation_event(event_name: str) -> Dict[str, str]:
+    """
+    Parse YEAR_MONTH, HAZARD, LOCATION from an activation event name.
+
+    Args:
+        event_name: Event string like '202501_Flood_CA'.
+
+    Returns:
+        Dict with keys YEAR_MONTH, HAZARD, LOCATION (whichever are present).
+    """
+    parts = event_name.split('_', 2)
+    result = {}
+    if len(parts) >= 1:
+        result['YEAR_MONTH'] = parts[0]
+    if len(parts) >= 2:
+        result['HAZARD'] = parts[1]
+    if len(parts) >= 3:
+        result['LOCATION'] = parts[2]
+    return result
+
+
+def detect_activation_event(
+    filename: str,
+    pattern: str = DEFAULT_ACTIVATION_PATTERN,
+) -> Optional[Dict[str, str]]:
+    """
+    Auto-detect activation event metadata from a filename.
+
+    Args:
+        filename: Basename of the file (e.g. '202501_Flood_CA_trueColor.tif').
+        pattern: Regex with groups (year_month, hazard, location, remainder).
+
+    Returns:
+        Metadata dict or None if the pattern doesn't match.
+    """
+    match = re.match(pattern, filename)
+    if not match:
+        return None
+    year_month, hazard, location, _ = match.groups()
+    return {
+        'ACTIVATION_EVENT': f"{year_month}_{hazard}_{location}",
+        'YEAR_MONTH': year_month,
+        'HAZARD': hazard,
+        'LOCATION': location,
+        'PROCESSOR': 'NASA Disasters COG Processor v1.0',
+    }
+
+
+def resolve_metadata(
+    filename: str,
+    mode: str = 'manual',
+    manual_metadata: Optional[Dict[str, str]] = None,
+    pattern: str = DEFAULT_ACTIVATION_PATTERN,
+) -> Dict[str, str]:
+    """
+    Build the full metadata dict for a file.
+
+    In 'manual' mode, starts from manual_metadata and auto-parses
+    YEAR_MONTH/HAZARD/LOCATION from ACTIVATION_EVENT if not already set.
+
+    In 'auto' mode, tries to detect from the filename first, falls back
+    to manual_metadata.
+
+    Args:
+        filename: Basename of the file.
+        mode: 'manual' or 'auto'.
+        manual_metadata: Base metadata dict (used in manual mode or as fallback).
+        pattern: Regex pattern for auto-detection.
+
+    Returns:
+        Complete metadata dict.
+    """
+    manual_metadata = manual_metadata or {}
+
+    if mode == 'auto':
+        detected = detect_activation_event(filename, pattern)
+        if detected:
+            return detected
+        print(f"  WARNING: No pattern match for {filename}, using manual fallback")
+
+    # Manual mode (or auto fallback)
+    meta = dict(manual_metadata)
+    if 'ACTIVATION_EVENT' in meta:
+        parsed = parse_activation_event(meta['ACTIVATION_EVENT'])
+        for key, val in parsed.items():
+            if key not in meta:
+                meta[key] = val
+    return meta
 
 
 def read_compression_settings(input_data: Union[bytes, str]) -> Dict[str, Any]:

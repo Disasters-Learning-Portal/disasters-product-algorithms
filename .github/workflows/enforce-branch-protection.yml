@@ -11,12 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check if PR to dev is from a feature branch (not dev itself)
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          echo "Target branch: ${{ github.base_ref }}"
-          echo "Source branch: ${{ github.head_ref }}"
+          echo "Target branch: $BASE_REF"
+          echo "Source branch: $HEAD_REF"
 
           # Block if someone tries to create a PR from dev to dev
-          if [ "${{ github.head_ref }}" == "dev" ]; then
+          if [ "$HEAD_REF" == "dev" ]; then
             echo "❌ Error: Cannot create a pull request from 'dev' to 'dev'."
             echo "You must create a feature branch to contribute to dev."
             echo ""
@@ -29,7 +32,7 @@ jobs:
           fi
 
           # Informational: show what branch naming patterns are good
-          echo "✅ PR is coming from a feature branch (${{ github.head_ref }}) to dev"
+          echo "✅ PR is coming from a feature branch ($HEAD_REF) to dev"
           echo ""
           echo "📝 Recommended branch naming conventions:"
           echo "  - feature/description (for new features)"
@@ -44,8 +47,9 @@ jobs:
     if: github.base_ref == 'dev'
     steps:
       - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
           echo "PR Title: $PR_TITLE"
 
           # Check if PR title is not empty
@@ -63,9 +67,9 @@ jobs:
           echo "✅ PR title validation passed"
 
       - name: Check PR description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_BODY="${{ github.event.pull_request.body }}"
-
           if [ -z "$PR_BODY" ]; then
             echo "⚠️  Warning: PR has no description"
             echo "Consider adding:"
@@ -77,8 +81,9 @@ jobs:
           fi
 
       - name: Branch name validation
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
         run: |
-          BRANCH_NAME="${{ github.head_ref }}"
           echo "Branch name: $BRANCH_NAME"
 
           # Recommended patterns
@@ -99,10 +104,13 @@ jobs:
           fi
 
       - name: Summary
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           echo "### ✅ PR Validation Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Source:** \`${{ github.head_ref }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Target:** \`${{ github.base_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** \`$HEAD_REF\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** \`$BASE_REF\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "All automatic checks passed! ✅" >> $GITHUB_STEP_SUMMARY

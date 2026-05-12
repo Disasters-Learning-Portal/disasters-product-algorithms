@@ -77,7 +77,13 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     sigma_0 = 20. * np.log10(float(sigma_val) * dn)
     print(np.max(sigma_0), np.min(sigma_0))
     
-    outfile = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_sigma0.tif")}"
+    outfile = (
+        f"{save_location}/"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
+        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
+        f"sigma0"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    )
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
@@ -115,7 +121,13 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     beta_0 = 20. * np.log10(float(beta_val) * dn)
     print(np.max(beta_0), np.min(beta_0))
 
-    outfile = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_beta0.tif")}"
+    outfile = (
+        f"{save_location}/"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
+        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
+        f"beta0"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    )
     dump_geotiff_float(outfile, beta_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
@@ -153,7 +165,13 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     gamma_0 = 20. * np.log10(float(gamma_val) * dn)
     print(np.max(gamma_0), np.min(gamma_0))
 
-    outfile = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_gamma0.tif")}"
+    outfile = (
+        f"{save_location}/"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
+        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
+        f"gamma0"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    )
     dump_geotiff_float(outfile, gamma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
@@ -191,7 +209,13 @@ def rcsCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     rcs_0 = 20. * np.log10(float(rcs_val) * dn)
     print(np.max(rcs_0), np.min(rcs_0))
 
-    outfile = f"{save_location}/{in_file.split("/")[-1].replace("_GEC.tif", "_rcs0.tif")}"
+    outfile = (
+        f"{save_location}/"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
+        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
+        f"rcs0"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    )
     dump_geotiff_float(outfile, rcs_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")

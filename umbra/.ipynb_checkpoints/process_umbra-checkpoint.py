@@ -65,7 +65,7 @@ def main():
         help="Output directory"
     )
 
-    # COG OPTIONS
+    # COG options
     parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
     parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
     parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
@@ -124,9 +124,7 @@ def main():
             if os.path.exists(raw_outfile):
                 os.remove(raw_outfile)
 
-    # ---------------------------
-    # COG CONVERSION STEP
-    # ---------------------------
+    # COG Conversion Step
     if outfile:
         print("\nConverting to COG...")
 

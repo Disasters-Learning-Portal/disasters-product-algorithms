@@ -4,7 +4,6 @@ from typing import Union
 import os
 import shutil
 from urllib.parse import urlparse
-from rasterio.shutil import copy as rio_copy
 
 def retrieve_s3_file_list(bucket : str, prefix : str) -> list[str]:
     session = boto3.Session(region_name="us-west-2")
@@ -20,7 +19,7 @@ def read_s3_file(s3filepath : str, file_format : str = "utf-8"):
     file = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode(file_format)
     return file
 
-def download_s3_file(s3filepath : str, save_location : str = "./s3_temp") -> str:
+def download_s3_file(s3filepath : str, save_location : str = "/tmp/s3_temp") -> str:
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     bucket = s3filepath.split("/")[2]
@@ -34,8 +33,8 @@ def download_s3_file(s3filepath : str, save_location : str = "./s3_temp") -> str
     s3_client.download_file(bucket, key, outpath)
     return outpath
 
-def remove_s3_temp() -> None:
-    shutil.rmtree("./s3_temp/")
+def remove_s3_temp(save_location: str = "/tmp/s3_temp") -> None:
+    shutil.rmtree(save_location)
 
 def parse_s3_uri(uri):
     parsed = urlparse(uri)
@@ -56,15 +55,3 @@ def build_flat_s3_uri(spath, filename):
         return f"s3://{out_bucket}/{out_prefix}/{filename}"
     else:
         return f"s3://{out_bucket}/{filename}"
-
-def convert_to_cog(in_tif, out_cog):
-    rio_copy(
-        in_tif,
-        out_cog,
-        driver="COG",
-        compress="deflate",
-        blocksize=512,
-        overview_resampling="nearest",
-    )
-    return out_cog
-

@@ -45,17 +45,17 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
 
     return tifs
 
-def sigmaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
+def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.endswith("_GEC.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'/tmp/s3_temp/{in_filepath.split("/")[-1]}' not in glob("/tmp/s3_temp/*"):
         print("GEC file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("GEC file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
+        in_file = f'/tmp/s3_temp/{in_filepath.split("/")[-1]}'
     print('Generating Sigma Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)
@@ -89,17 +89,17 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     print(f"Generation completed, file saved to {outfile}")
     return outfile
     
-def betaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
+def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.endswith("_GEC.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'/tmp/s3_temp/{in_filepath.split("/")[-1]}' not in glob("/tmp/s3_temp/*"):
         print("GEC file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("GEC file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
+        in_file = f'/tmp/s3_temp/{in_filepath.split("/")[-1]}'
     print('Generating Beta Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)
@@ -133,17 +133,17 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gammaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
+def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.endswith("_GEC.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'/tmp/s3_temp/{in_filepath.split("/")[-1]}' not in glob("/tmp/s3_temp/*"):
         print("GEC file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("GEC file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
+        in_file = f'/tmp/s3_temp/{in_filepath.split("/")[-1]}'
     print('Generating Gamma Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)
@@ -177,17 +177,17 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def rcsCalib(s3_image_paths : list[str], save_location : str = "./s3_temp"):
+def rcsCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.endswith("_GEC.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'/tmp/s3_temp/{in_filepath.split("/")[-1]}' not in glob("/tmp/s3_temp/*"):
         print("GEC file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("GEC file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
+        in_file = f'/tmp/s3_temp/{in_filepath.split("/")[-1]}'
     print('Generating RCS Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)

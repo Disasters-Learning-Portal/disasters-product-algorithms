@@ -6,22 +6,32 @@ Based on implementation patterns from disasters-aws-conversion repository.
 
 import os
 import subprocess
+import tempfile
 import rasterio
-from typing import Optional, Union
+import numpy as np
+from typing import Optional, Union, Tuple
 
 
-def set_nodata_value(dtype: str) -> Union[int, float]:
+def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = None) -> Union[int, float]:
     """
     Automatically select appropriate no-data value based on data type.
 
     Args:
         dtype: Rasterio/numpy data type string (e.g., 'uint8', 'int16', 'float32')
+        manual_nodata: Optional manual no-data value to use. If provided and valid
+            for the given dtype, it will be used instead of auto-detection.
 
     Returns:
         Appropriate no-data value for the data type
 
     Based on disasters-aws-conversion/lib/core/compression.py:set_nodata_value()
     """
+    # Use manual no-data if provided and valid
+    if manual_nodata is not None:
+        validation = validate_nodata_for_dtype(manual_nodata, dtype)
+        if validation['valid']:
+            return manual_nodata
+
     dtype_str = str(dtype).lower()
 
     if dtype_str == 'uint8':
@@ -41,7 +51,7 @@ def set_nodata_value(dtype: str) -> Union[int, float]:
         return -9999.0
 
 
-def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> bool:
+def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> dict:
     """
     Validate that a no-data value is valid for the given data type.
 
@@ -50,7 +60,7 @@ def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> bool:
         dtype: Rasterio/numpy data type string
 
     Returns:
-        True if valid, False otherwise
+        dict with keys: 'valid' (bool), 'error' (str or None)
 
     Based on disasters-aws-conversion/lib/core/compression.py:validate_nodata_for_dtype()
     """
@@ -59,27 +69,33 @@ def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> bool:
     try:
         nodata = float(nodata)
     except (TypeError, ValueError):
-        return False
+        return {'valid': False, 'error': f"Cannot convert {nodata} to numeric value"}
 
     if dtype_str == 'uint8':
-        return 0 <= nodata <= 255
+        if not (0 <= nodata <= 255):
+            return {'valid': False, 'error': f"Value {nodata} out of range for uint8 [0, 255]"}
     elif dtype_str == 'uint16':
-        return 0 <= nodata <= 65535
+        if not (0 <= nodata <= 65535):
+            return {'valid': False, 'error': f"Value {nodata} out of range for uint16 [0, 65535]"}
     elif dtype_str == 'int8':
-        return -128 <= nodata <= 127
+        if not (-128 <= nodata <= 127):
+            return {'valid': False, 'error': f"Value {nodata} out of range for int8 [-128, 127]"}
     elif dtype_str == 'int16':
-        return -32768 <= nodata <= 32767
+        if not (-32768 <= nodata <= 32767):
+            return {'valid': False, 'error': f"Value {nodata} out of range for int16 [-32768, 32767]"}
     elif dtype_str == 'int32':
-        return -2147483648 <= nodata <= 2147483647
+        if not (-2147483648 <= nodata <= 2147483647):
+            return {'valid': False, 'error': f"Value {nodata} out of range for int32"}
     elif 'float' in dtype_str:
-        # Float types can use any value including NaN
-        return True
-    else:
-        # Unknown type, be permissive
-        return True
+        # Float types can use any numeric value including NaN
+        if not (isinstance(nodata, (int, float)) or np.isnan(nodata)):
+            return {'valid': False, 'error': f"Value {nodata} must be numeric for float types"}
+    # Unknown type, be permissive
+
+    return {'valid': True, 'error': None}
 
 
-def determine_resampling_method(src_path: str) -> str:
+def determine_resampling_method(src_path: str) -> Tuple[str, str]:
     """
     Auto-detect appropriate resampling method based on data characteristics.
 
@@ -87,18 +103,26 @@ def determine_resampling_method(src_path: str) -> str:
         src_path: Path to source raster file
 
     Returns:
-        Resampling method string: 'cubic', 'bilinear', or 'nearest'
+        Tuple of (resampling_method, overview_resampling):
+        - resampling_method: 'cubic', 'bilinear', or 'nearest'
+        - overview_resampling: 'average' or 'mode'
 
     Logic:
-        - 3-band data (RGB imagery) → cubic
-        - Single-band continuous data → bilinear
-        - Single-band categorical data → nearest
+        - 3-band data (RGB imagery) -> cubic / average
+        - Single-band continuous data -> bilinear / average
+        - Single-band categorical data -> nearest / mode
     """
+    def _overview_for(method: str) -> str:
+        if method == 'nearest':
+            return 'mode'
+        return 'average'
+
     try:
         with rasterio.open(src_path) as src:
             # 3-band imagery (RGB products)
             if src.count == 3:
-                return 'cubic'
+                method = 'cubic'
+                return method, _overview_for(method)
 
             # Single-band data - determine if categorical or continuous
             elif src.count == 1:
@@ -110,31 +134,41 @@ def determine_resampling_method(src_path: str) -> str:
                 # Check filename for categorical indicators
                 categorical_keywords = ['mask', 'extent', 'classification', 'scl', 'qa']
                 if any(keyword in filename for keyword in categorical_keywords):
-                    return 'nearest'
+                    return 'nearest', 'mode'
 
                 # Check nodata value (999 and 255 common for categorical)
                 if nodata in [999, 255] and dtype in ['uint8', 'uint16', 'int8']:
-                    return 'nearest'
+                    return 'nearest', 'mode'
 
                 # Default to bilinear for continuous single-band data
-                return 'bilinear'
+                return 'bilinear', 'average'
 
             # Multi-band but not 3 (rare case)
-            return 'bilinear'
+            return 'bilinear', 'average'
 
     except Exception as e:
         print(f"  Warning: Could not determine resampling method: {e}")
         print("  Defaulting to bilinear resampling")
-        return 'bilinear'
+        return 'bilinear', 'average'
 
 
-def get_compression_profile(compression: str = 'ZSTD', compression_level: int = 22) -> dict:
+def get_compression_profile(
+    compression: str = 'ZSTD',
+    compression_level: int = 22,
+    dtype: Optional[str] = None,
+    file_size_gb: Optional[float] = None,
+) -> dict:
     """
     Get compression profile for COG creation.
 
     Args:
         compression: Compression type (DEFLATE, LZW, ZSTD, etc.)
         compression_level: Compression level (default: 22 for ZSTD, 9 for others)
+        dtype: Optional data type string. If it contains 'float', predictor 3
+            (floating point) is used; if 'int'/'uint', predictor 2 (horizontal
+            differencing). Default (None) uses predictor 2.
+        file_size_gb: Optional file size in GB. Files >10 GB get 256x256 block
+            size; files >3 GB get bigtiff='YES'.
 
     Returns:
         Dictionary of compression options for rio cogeo
@@ -145,11 +179,33 @@ def get_compression_profile(compression: str = 'ZSTD', compression_level: int = 
         print(f"Warning: Invalid compression '{compression}', using ZSTD")
         compression = 'ZSTD'
 
-    return {
+    # Determine predictor based on dtype
+    if dtype is not None:
+        dtype_lower = str(dtype).lower()
+        if 'float' in dtype_lower:
+            predictor = '3'  # Floating point predictor
+        elif 'int' in dtype_lower or 'uint' in dtype_lower:
+            predictor = '2'  # Horizontal differencing
+        else:
+            predictor = '2'
+    else:
+        predictor = '2'  # Default: horizontal differencing
+
+    profile = {
         'compress': compression.upper(),
-        'predictor': '2',  # Horizontal differencing (good for most satellite data)
+        'predictor': predictor,
         'level': compression_level,
     }
+
+    # Adjust for large files
+    if file_size_gb is not None:
+        if file_size_gb > 10:
+            profile['blockxsize'] = 256
+            profile['blockysize'] = 256
+        if file_size_gb > 3:
+            profile['bigtiff'] = 'YES'
+
+    return profile
 
 
 def convert_to_cog(
@@ -160,7 +216,8 @@ def convert_to_cog(
     compression: str = 'ZSTD',
     compression_level: int = 22,
     overview_levels: int = 5,
-    quiet: bool = False
+    quiet: bool = False,
+    backend: str = 'rio',
 ) -> str:
     """
     Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format with optional reprojection.
@@ -174,21 +231,40 @@ def convert_to_cog(
         compression_level: Compression level (default: 22 for ZSTD)
         overview_levels: Number of overview levels (default: 5, minimum)
         quiet: Suppress output messages
+        backend: Backend to use for COG creation. 'rio' (default) uses rio-cogeo
+            CLI, 'gdal' delegates to shared_utils.gdal_cog_processor.create_cog_gdal.
 
     Returns:
         Path to created COG file
 
     Based on disasters-aws-conversion/scripts/update_nodata_cog.py
-    Enhanced with reprojection support (two-step: warp → COG)
+    Enhanced with reprojection support (two-step: warp -> COG)
     """
     if not os.path.exists(input_tif):
         raise FileNotFoundError(f"Input file not found: {input_tif}")
+
+    # GDAL backend delegation
+    if backend == 'gdal':
+        from shared_utils.gdal_cog_processor import create_cog_gdal
+        final_output = output_cog if output_cog is not None else input_tif
+        success = create_cog_gdal(
+            input_path=input_tif,
+            output_path=final_output,
+            nodata=nodata,
+            compress=compression,
+            compress_level=compression_level,
+            reproject_to_4326=(dst_crs == 'EPSG:4326') if dst_crs else False,
+            verbose=not quiet,
+        )
+        if not success:
+            raise RuntimeError(f"GDAL backend failed to create COG for {input_tif}")
+        return final_output
 
     # Determine output path
     if output_cog is None:
         # Replace input file with COG version
         output_cog = input_tif
-        temp_output = input_tif + '.cog.tmp.tif'
+        temp_output = os.path.join('/tmp', os.path.basename(input_tif) + '.cog.tmp.tif')
     else:
         temp_output = output_cog
 
@@ -213,7 +289,7 @@ def convert_to_cog(
                     print(f"  Auto-selected no-data value for {dtype}: {nodata}")
         else:
             # Validate user-provided no-data
-            if not validate_nodata_for_dtype(nodata, dtype):
+            if not validate_nodata_for_dtype(nodata, dtype)['valid']:
                 print(f"  Warning: No-data value {nodata} may be invalid for {dtype}")
 
         # Check if reprojection is needed
@@ -234,12 +310,15 @@ def convert_to_cog(
             print(f"  Compression: {compression} (level {compression_level})")
             print(f"  Overview levels: {overview_levels}")
 
+    # Default overview resampling (may be overridden during reprojection)
+    overview_resampling = 'average'
+
     # Step 1: Reproject if needed (warp to dst_crs)
     if needs_reprojection:
-        warped_file = input_tif + '.warped.tmp.tif'
+        warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
 
         # Auto-detect appropriate resampling method
-        resampling_method = determine_resampling_method(input_tif)
+        resampling_method, overview_resampling = determine_resampling_method(input_tif)
 
         if not quiet:
             print(f"  Resampling method: {resampling_method} (auto-detected)")
@@ -283,7 +362,7 @@ def convert_to_cog(
         temp_output,
         '--cog-profile', compression.lower(),
         '--overview-level', str(overview_levels),
-        '--overview-resampling', 'average',
+        '--overview-resampling', overview_resampling,
     ]
 
     # Add no-data value
@@ -347,19 +426,42 @@ def convert_to_cog(
         raise
 
 
-def validate_cog(cog_path: str) -> bool:
+def validate_cog(cog_path: str) -> Tuple[bool, dict]:
     """
     Validate that a file is a valid Cloud Optimized GeoTIFF.
+
+    Tries the rio_cogeo Python library first for richer detail, then falls
+    back to the ``rio cogeo validate`` CLI subprocess.
 
     Args:
         cog_path: Path to COG file
 
     Returns:
-        True if valid COG, False otherwise
+        Tuple of (is_valid, details) where details is a dict with keys:
+            'valid' (bool), 'errors' (list[str]), 'warnings' (list[str])
     """
-    if not os.path.exists(cog_path):
-        return False
+    empty_details = {'valid': False, 'errors': [], 'warnings': []}
 
+    if not os.path.exists(cog_path):
+        empty_details['errors'].append(f"File not found: {cog_path}")
+        return False, empty_details
+
+    # Try the Python library first
+    try:
+        from rio_cogeo.cogeo import cog_validate
+        is_valid, errors, warnings = cog_validate(cog_path, quiet=True)
+        details = {
+            'valid': is_valid,
+            'errors': errors if errors else [],
+            'warnings': warnings if warnings else [],
+        }
+        return is_valid, details
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Fallback to CLI subprocess
     try:
         result = subprocess.run(
             ['rio', 'cogeo', 'validate', cog_path],
@@ -368,12 +470,18 @@ def validate_cog(cog_path: str) -> bool:
             check=False
         )
 
-        # rio cogeo validate returns 0 if valid
-        return result.returncode == 0
+        is_valid = result.returncode == 0
+        details = {
+            'valid': is_valid,
+            'errors': [] if is_valid else [result.stderr.strip() or "COG validation failed"],
+            'warnings': [],
+        }
+        return is_valid, details
 
     except Exception as e:
         print(f"Error validating COG: {e}")
-        return False
+        empty_details['errors'].append(str(e))
+        return False, empty_details
 
 
 def get_final_filename(original_path: str, event_name: Optional[str] = None, tif_only: bool = False) -> str:

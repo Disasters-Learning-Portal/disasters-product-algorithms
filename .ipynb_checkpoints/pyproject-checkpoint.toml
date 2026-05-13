@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "disasters-product-algorithms"
+version = "0.1.0"
+description = "Process Landsat 8/9 and Sentinel-2 satellite imagery to generate disaster response products"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Kaylee Sharp"}
+]
+dependencies = [
+    "Pillow",
+    "lxml",
+]
+
+# Note: The following packages should be pre-installed via conda in your environment:
+# - gdal (must match system libgdal version)
+# - rasterio
+# - rio-cogeo
+# - geopandas
+# - pyproj
+# - numpy
+# - scipy
+# - requests
+# - boto3
+# - botocore
+
+[project.scripts]
+process_landsat89 = "landsat.cli:process_landsat89_cli"
+process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
+download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
+process_satellogic = "satellogic.cli:process_satellogic_cli"
+
+[project.urls]
+Homepage = "https://github.com/klesinger/disasters-product-algorithms"
+
+[tool.setuptools]
+packages = ["landsat", "sentinel2", "satellogic", "shared_utils"]

@@ -60,25 +60,33 @@ def getSolarZenithAngle(s3_metadata : list[str]):
     solarZenithAngle = float(data['features'][0]['properties']['solar']['zenith'])
     return solarZenithAngle
 
-def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
+
+    def print_stats(arr):
+        print(f"Min: {np.min(arr)}")
+        print(f"Q1 : {np.percentile(arr, 25)}")
+        print(f"Median: {np.percentile(arr, 50)}")
+        print(f"Q3 : {np.percentile(arr, 75)}")
+        print(f"Max: {np.max(arr)}")
+         
     print('Generating True Color')
     print("\n\t* Opening Red File")
     ds = gdal.Open(in_file)
@@ -91,21 +99,21 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
     print(np.max(red_array))
     red_array = red_array / 10000.
     red_array = red_array / np.cos(np.radians(sunzen))
-    print(np.max(red_array))
+    print(print_stats(red_array))
 
     print("\n\t* Opening Green File")
     green_array = ds.GetRasterBand(2).ReadAsArray(0, 0, cols, rows)
     print(np.max(green_array))
     green_array = green_array / 10000.
     green_array = green_array / np.cos(np.radians(sunzen))
-    print(np.max(green_array))
+    print(print_stats(green_array))
     
     print("\n\t* Opening Blue File")
     blue_array = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
     print(np.max(blue_array))
     blue_array = blue_array / 10000.
     blue_array = blue_array / np.cos(np.radians(sunzen))
-    print(np.max(blue_array))
+    print(print_stats(blue_array))
 
     # Cloud Mask 
     print("\n\t* Opening Cloud/QA File")
@@ -119,29 +127,23 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
 
     ### Convert from reflectance to 8-bit values ###
     print("\t* Converting reflectance to 8-bit values")
-    r = bytescale(red_array, cmin=0, cmax=1, low=1 ,high=255)
-    g = bytescale(green_array, cmin=0, cmax=1, low=1, high=255)
-    b = bytescale(blue_array, cmin=0, cmax=1, low=1, high=255)
+    def stretch_display(band):
+    
+        p2, p98 = np.percentile(band, (2, 98))
+    
+        if p98 <= p2:
+            return np.zeros_like(band)
+    
+        band = (band - p2) / (p98 - p2)
+        return np.clip(band, 0, 1)
+  
+    r = stretch_display(red_array)
+    g = stretch_display(green_array)
+    b = stretch_display(blue_array)
 
-    # Use PIL to brighten it up
-    print("\t* Enhancing image")
-    rgbArray = np.ones( (rows,cols,3), 'uint8' )
-    rgbArray[...,0] = r
-    rgbArray[...,1] = g
-    rgbArray[...,2] = b
-    rgb = Image.fromarray(rgbArray)
-    enhancer = ImageEnhance.Brightness(rgb).enhance(3)  # increase this number to increase the brightness
-    r = np.reshape(enhancer.getdata(band=0), (rows,cols))
-    g = np.reshape(enhancer.getdata(band=1), (rows,cols))
-    b = np.reshape(enhancer.getdata(band=2), (rows,cols))
-
-    r = np.clip(r, 1, 255)
-    g = np.clip(g, 1, 255)
-    b = np.clip(b, 1, 255)
-
-    r[no_data] = 0
-    g[no_data] = 0 
-    b[no_data] = 0
+    r = (r * 255).astype(np.uint8)
+    g = (g * 255).astype(np.uint8)
+    b = (b * 255).astype(np.uint8)
     
     outfile = f"{save_location}/{in_file.split("/")[-1].replace("_TOA_0.tif", "_trueColor.tif")}"
     dump_geotiff_rgb(outfile, r, g, b, projref, in_geo)
@@ -149,25 +151,25 @@ def genTrueColor(s3_image_paths : list[str], s3_metadata : list[str], save_locat
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating Color Infrared')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)
@@ -207,29 +209,23 @@ def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_locatio
 
     ### Convert from reflectance to 8-bit values ###
     print("\t* Converting reflectance to 8-bit values")
-    r = bytescale(nir_array, cmin=0, cmax=1, low=1 ,high=255)
-    g = bytescale(red_array, cmin=0, cmax=1, low=1, high=255)
-    b = bytescale(green_array, cmin=0, cmax=1, low=1, high=255)
+    def stretch_display(band):
+    
+        p2, p98 = np.percentile(band, (2, 98))
+    
+        if p98 <= p2:
+            return np.zeros_like(band)
+    
+        band = (band - p2) / (p98 - p2)
+        return np.clip(band, 0, 1)
+  
+    r = stretch_display(nir_array)
+    g = stretch_display(red_array)
+    b = stretch_display(green_array)
 
-    # Use PIL to brighten it up
-    print("\t* Enhancing image")
-    rgbArray = np.ones( (rows,cols,3), 'uint8' )
-    rgbArray[...,0] = r
-    rgbArray[...,1] = g
-    rgbArray[...,2] = b
-    rgb = Image.fromarray(rgbArray)
-    enhancer = ImageEnhance.Brightness(rgb).enhance(3)  # increase this number to increase the brightness
-    r = np.reshape(enhancer.getdata(band=0), (rows,cols))
-    g = np.reshape(enhancer.getdata(band=1), (rows,cols))
-    b = np.reshape(enhancer.getdata(band=2), (rows,cols))
-
-    r = np.clip(r, 1, 255)
-    g = np.clip(g, 1, 255)
-    b = np.clip(b, 1, 255)
-
-    r[no_data] = 0
-    g[no_data] = 0
-    b[no_data] = 0
+    r = (r * 255).astype(np.uint8)
+    g = (g * 255).astype(np.uint8)
+    b = (b * 255).astype(np.uint8)
     
     outfile = f"{save_location}/{in_file.split("/")[-1].replace("_TOA_0.tif", "_colorIR.tif")}"
     dump_geotiff_rgb(outfile, r, g, b, projref, in_geo)
@@ -237,25 +233,25 @@ def gencolorIR(s3_image_paths : list[str], s3_metadata : list[str], save_locatio
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating NDVI')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)
@@ -298,25 +294,25 @@ def genNDVI(s3_image_paths : list[str], s3_metadata : list[str], save_location :
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def genNDWI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "./s3_temp"):
+def genNDWI(s3_image_paths : list[str], s3_metadata : list[str], save_location : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
     sunzen = getSolarZenithAngle(s3_metadata)
     in_filepath = [x for x in s3_image_paths if x.endswith("_TOA_0.tif")][0]
     cloud_filepath = [x for x in s3_image_paths if x.endswith("_CLOUD_0.tif")][0]
-    if f'./s3_temp/{in_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+    if f'{save_location}/{in_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("TOA file not found, downloading from s3")
         in_file = download_s3_file(in_filepath)
     else:
         print("TOA file found, proceeding")
-        in_file = f'./s3_temp/{in_filepath.split("/")[-1]}'
-    if f'./s3_temp/{cloud_filepath.split("/")[-1]}' not in glob("./s3_temp/*"):
+        in_file = f'{save_location}/{in_filepath.split("/")[-1]}'
+    if f'{save_location}/{cloud_filepath.split("/")[-1]}' not in glob(f"{save_location}/*"):
         print("Cloud file not found, downloading from s3")
         cloud_file = download_s3_file(cloud_filepath)
     else:
         print("Cloud file found, proceeding")
-        cloud_file = f'./s3_temp/{cloud_filepath.split("/")[-1]}'
+        cloud_file = f'{save_location}/{cloud_filepath.split("/")[-1]}'
     print('Generating NDWI')
     print("\n\t* Opening NIR File")
     ds = gdal.Open(in_file)

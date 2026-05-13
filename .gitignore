@@ -1,0 +1,35 @@
+# AWS credentials
+aws_credentials.py
+*.pem
+
+# Temp processing directories
+temp_gdal/
+temp_cog/
+temp_processing/
+reproj/
+data_download/
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data files
+*.tif
+*.tiff
+!tests/fixtures/*.tif
+
+# AWS cost and EC2 scripts (internal only)
+aws-cost/
+ec2/
+aws_credentials.example.py
+
+# Notebooks
+.ipynb_checkpoints/
+
+shared_utils/scripts
+shared_utils/scripts/*

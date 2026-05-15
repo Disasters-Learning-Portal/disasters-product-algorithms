@@ -44,12 +44,13 @@ process_landsat89 = "landsat.cli:process_landsat89_cli"
 process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 process_satellogic = "satellogic.cli:process_satellogic_cli"
+process_umbra = "umbra.cli:process_umbra_cli"
 
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
-include = ["landsat*", "sentinel2*", "satellogic*", "shared_utils*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "shared_utils*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

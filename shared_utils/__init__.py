@@ -58,6 +58,20 @@ try:
 except ImportError:
     pass  # rasterio/GDAL/rio-cogeo not available
 
+# S3 utilities (requires boto3; optional helpers require rasterio)
+try:
+    from shared_utils.s3utils import (
+        retrieve_s3_file_list,
+        read_s3_file,
+        download_s3_file,
+        remove_s3_temp,
+        parse_s3_uri,
+        upload_file_to_s3,
+        build_flat_s3_uri,
+    )
+except ImportError:
+    pass  # boto3/rasterio not available
+
 __all__ = [
     # COG utilities
     'set_nodata_value',
@@ -86,4 +100,12 @@ __all__ = [
     'create_cog_with_metadata',
     'read_compression_settings',
     'validate_cog_in_memory',
+    # S3 utilities
+    'retrieve_s3_file_list',
+    'read_s3_file',
+    'download_s3_file',
+    'remove_s3_temp',
+    'parse_s3_uri',
+    'upload_file_to_s3',
+    'build_flat_s3_uri',
 ]

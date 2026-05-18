@@ -30,6 +30,11 @@ aws_credentials.example.py
 
 # Notebooks
 .ipynb_checkpoints/
+# Stray operator copy of the template — the tracked one lives in notebooks/
+/local_file_processing_template.ipynb
+
+# Local STAC-build artifacts dropped at repo root
+build_stac_*.json
 
 shared_utils/scripts
 shared_utils/scripts/*

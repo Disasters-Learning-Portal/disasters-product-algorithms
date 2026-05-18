@@ -1,4 +1,0 @@
-landsat
-satellogic
-sentinel2
-shared_utils

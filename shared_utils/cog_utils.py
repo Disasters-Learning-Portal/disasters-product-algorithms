@@ -353,17 +353,24 @@ def convert_to_cog(
             print(f"  Resampling method: {resampling_method} (auto-detected)")
             print(f"  Warping to {dst_crs}...")
 
-        # Build rio warp command
+        # Build gdalwarp command (chosen over `rio warp` so we can use
+        # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
         warp_cmd = [
-            'rio', 'warp', input_tif, warped_file,
-            '--dst-crs', dst_crs,
-            '--resampling', resampling_method
+            'gdalwarp',
+            '-t_srs', dst_crs,
+            '-r', resampling_method,
+            '-multi',
+            '-wo', 'NUM_THREADS=ALL_CPUS',
+            '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
+            '-overwrite',
         ]
 
-        # Add nodata to warp command
+        # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata)
         if nodata is not None:
-            warp_cmd.extend(['--src-nodata', str(nodata)])
-            warp_cmd.extend(['--dst-nodata', str(nodata)])
+            warp_cmd.extend(['-srcnodata', str(nodata)])
+            warp_cmd.extend(['-dstnodata', str(nodata)])
+
+        warp_cmd.extend([input_tif, warped_file])
 
         try:
             result = subprocess.run(
@@ -392,6 +399,7 @@ def convert_to_cog(
         '--cog-profile', compression.lower(),
         '--overview-level', str(overview_levels),
         '--overview-resampling', overview_resampling,
+        '--co', 'NUM_THREADS=ALL_CPUS',
     ]
 
     # Add no-data value

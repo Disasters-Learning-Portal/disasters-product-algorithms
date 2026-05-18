@@ -3,6 +3,7 @@ Reprojection module - handles coordinate system transformations.
 Single responsibility: Reprojection and coordinate transformation.
 """
 
+import os
 import numpy as np
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -11,6 +12,10 @@ import gc
 from tqdm import tqdm
 from shared_utils.memory_management import get_memory_usage
 from shared_utils.cog_validation import check_and_fix_nan_values
+
+# All-CPU parallelism for rasterio.warp.reproject (param requires an integer,
+# unlike GDAL's "ALL_CPUS" string).
+_NUM_THREADS = os.cpu_count() or 1
 
 
 def process_whole_file(src, dst, src_crs, dst_crs, transform, width, height, src_nodata, dst_nodata=None):
@@ -62,7 +67,8 @@ def process_whole_file(src, dst, src_crs, dst_crs, transform, width, height, src
                 dst_crs=dst_crs,
                 resampling=Resampling.nearest,
                 src_nodata=src_nodata,
-                dst_nodata=dst_nodata
+                dst_nodata=dst_nodata,
+                num_threads=_NUM_THREADS,
             )
 
             # Check and fix NaN values if needed
@@ -159,7 +165,8 @@ def reproject_chunk(src, band_idx, src_window, dst_window, src_transform,
             dst_crs=dst_crs,
             resampling=Resampling.nearest,
             src_nodata=src_nodata,
-            dst_nodata=src_nodata
+            dst_nodata=src_nodata,
+            num_threads=_NUM_THREADS,
         )
         return True
 
@@ -259,7 +266,8 @@ def process_with_fixed_chunks(src, dst, src_crs, dst_crs, transform, width, heig
                                     dst_crs=dst_crs,
                                     resampling=Resampling.nearest,
                                     src_nodata=src_nodata,
-                                    dst_nodata=dst_nodata
+                                    dst_nodata=dst_nodata,
+                                    num_threads=_NUM_THREADS,
                                 )
                             except Exception as reproject_error:
                                 print(f"\n   [CHUNK ERROR] Failed at chunk ({x}, {y}) window ({sub_x}, {sub_y})")
@@ -307,7 +315,8 @@ def process_with_fixed_chunks(src, dst, src_crs, dst_crs, transform, width, heig
                             dst_crs=dst_crs,
                             resampling=Resampling.nearest,
                             src_nodata=src_nodata,
-                            dst_nodata=dst_nodata
+                            dst_nodata=dst_nodata,
+                            num_threads=_NUM_THREADS,
                         )
                     except Exception as reproject_error:
                         print(f"\n   [CHUNK ERROR] Failed at chunk ({chunk_x}, {chunk_y}), band {band_idx}")

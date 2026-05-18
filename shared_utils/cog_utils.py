@@ -12,6 +12,35 @@ import numpy as np
 from typing import Optional, Union, Tuple
 
 
+def normalize_wgs84_crs(filepath: str, target_crs) -> None:
+    """
+    After reprojecting to WGS84, rewrite the file's CRS tag using a PROJ4 string.
+    Strips the WGS 84 ensemble WKT (PROJ >=8 default) and forces traditional
+    (lon, lat) axis order — both trip PROJ-based downstream consumers such as
+    rio_stac.get_dataset_geom in veda-data-airflow's build_stac handler.
+
+    PROJ4 strings cannot express the WGS84 ensemble, so the rewrite collapses
+    the WKT to clean lon-first WGS84. `gdal_edit.py -a_srs EPSG:4326` does NOT
+    strip the ensemble on modern GDAL — the PROJ4 form is required.
+
+    No-op when target_crs is falsy or any non-WGS84 CRS.
+    """
+    if not target_crs:
+        return
+    if str(target_crs).strip().upper() not in (
+        "EPSG:4326", "WGS84", "+PROJ=LONGLAT +DATUM=WGS84 +NO_DEFS"
+    ):
+        return
+    # -oo IGNORE_COG_LAYOUT_BREAK=YES: gdal_edit refuses to touch an existing COG
+    # by default because rewriting the IFD breaks strict COG layout. The CRS-only
+    # edit is the trade-off we want here — output remains a valid GeoTIFF.
+    subprocess.run(
+        ["gdal_edit.py", "-a_srs", "+proj=longlat +datum=WGS84 +no_defs",
+         "-oo", "IGNORE_COG_LAYOUT_BREAK=YES", filepath],
+        capture_output=True, text=True, check=True,
+    )
+
+
 def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = None) -> Union[int, float]:
     """
     Automatically select appropriate no-data value based on data type.

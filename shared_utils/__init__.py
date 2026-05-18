@@ -16,6 +16,7 @@ try:
         validate_cog,
         get_final_filename,
         rename_with_event,
+        normalize_wgs84_crs,
     )
 except ImportError:
     pass  # rasterio not available
@@ -82,6 +83,7 @@ __all__ = [
     'validate_cog',
     'get_final_filename',
     'rename_with_event',
+    'normalize_wgs84_crs',
     # Geotools
     'bytescale',
     'match_geotiff',

@@ -37,6 +37,7 @@ from shared_utils.s3_operations import (
     get_file_size_from_s3
 )
 from shared_utils.cog_validation import check_cog_with_warnings
+from shared_utils.cog_utils import normalize_wgs84_crs
 from shared_utils.compression import set_nodata_value_src, get_predictor_for_dtype
 from shared_utils.reprojection import calculate_transform_parameters, process_with_fixed_chunks
 
@@ -221,6 +222,9 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
 
             if success:
                 print(f"   [GDAL-COG] ✅ COG created successfully")
+
+                # Normalize WGS84 CRS metadata (strip ensemble + force lon-first axis)
+                normalize_wgs84_crs(cog_output_path, target_crs)
 
                 # Upload to S3
                 if upload_to_s3(s3_client, cog_output_path, cog_data_bucket, s3_key):
@@ -407,6 +411,9 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                 if not is_valid:
                     print(f"   [WARNING] COG validation had warnings but continuing...")
 
+            # Normalize WGS84 CRS metadata (strip ensemble + force lon-first axis)
+            normalize_wgs84_crs(cog_output_path, target_crs)
+
             # Upload to S3
             if upload_to_s3(s3_client, cog_output_path, cog_data_bucket, s3_key):
                 # Save locally if requested
@@ -528,6 +535,8 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
 
         if is_valid_cog:
             print(f"   [COG] ✅ File is a valid COG with overviews")
+            # Normalize WGS84 CRS metadata (strip ensemble + force lon-first axis)
+            normalize_wgs84_crs(reproject_filename, target_crs)
             # Upload directly to S3
             if upload_to_s3(s3_client, reproject_filename, cog_data_bucket, s3_key):
                 # Save locally if requested
@@ -556,6 +565,8 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             temp_files.append(temp_cog)
 
             if create_cog_with_overviews(reproject_filename, temp_cog, compression_config):
+                # Normalize WGS84 CRS metadata (strip ensemble + force lon-first axis)
+                normalize_wgs84_crs(temp_cog, target_crs)
                 # Upload to S3
                 if upload_to_s3(s3_client, temp_cog, cog_data_bucket, s3_key):
                     # Save locally if requested

@@ -241,7 +241,9 @@ def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
     nodata: Optional[Union[int, float]] = None,
-    dst_crs: Optional[str] = 'EPSG:4326',
+    dst_crs: Optional[str] = 'EPSG:3857',
+    resampling_method: Optional[str] = None,
+    clip_to_webmerc: Optional[bool] = None,
     compression: str = 'ZSTD',
     compression_level: int = 22,
     overview_levels: int = 5,
@@ -255,7 +257,16 @@ def convert_to_cog(
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
         nodata: No-data value (if None, auto-detects from file or data type)
-        dst_crs: Target CRS (default: 'EPSG:4326', None to preserve native CRS)
+        dst_crs: Target CRS (default: 'EPSG:3857', None to preserve native CRS).
+            Web Mercator avoids the WGS 84 ensemble / lat-first axis bug that
+            breaks rio_stac.get_dataset_geom in veda-data-airflow build_stac.
+        resampling_method: Warp resampling ('near', 'bilinear', 'cubic',
+            'average'). If None, auto-detected via determine_resampling_method().
+        clip_to_webmerc: Clip output extent to Web Mercator's valid domain
+            (±20037508.34 m / ±85.05° latitude). True/False to force; None to
+            auto-detect via reprojection.needs_webmerc_clip() — required for
+            world-extent sources (e.g. global Mollweide) when dst_crs is
+            EPSG:3857, no-op for regional rasters that already fit.
         compression: Compression type (default: ZSTD)
         compression_level: Compression level (default: 22 for ZSTD)
         overview_levels: Number of overview levels (default: 5, minimum)
@@ -265,11 +276,12 @@ def convert_to_cog(
 
     Returns:
         Path to created COG file
-
-    Based on disasters-aws-conversion/scripts/update_nodata_cog.py
-    Enhanced with reprojection support (two-step: warp -> COG)
     """
-    if not os.path.exists(input_tif):
+    # GDAL virtual filesystem prefixes (/vsis3/, /vsicurl/, /vsigs/, ...) bypass
+    # the existence check — rasterio + gdalwarp open them natively when the
+    # caller is streaming a remote object instead of downloading first.
+    is_vsi = isinstance(input_tif, str) and input_tif.startswith('/vsi')
+    if not is_vsi and not os.path.exists(input_tif):
         raise FileNotFoundError(f"Input file not found: {input_tif}")
 
     # GDAL backend delegation
@@ -301,6 +313,10 @@ def convert_to_cog(
     warped_file = None
     input_for_cog = input_tif
 
+    from shared_utils.reprojection import (
+        needs_webmerc_clip, WEBMERC_EXTENT_M,
+    )
+
     with rasterio.open(input_tif) as src:
         dtype = src.dtypes[0]
         existing_nodata = src.nodata
@@ -326,6 +342,14 @@ def convert_to_cog(
                              src_crs is not None and
                              str(src_crs).upper() != dst_crs.upper())
 
+        # Decide whether to clip output to Web Mercator's valid domain.
+        # `clip_to_webmerc=None` (default) defers to auto-detect; pass True/False
+        # to force-override.
+        if clip_to_webmerc is None:
+            clip_webmerc = needs_reprojection and needs_webmerc_clip(src, dst_crs)
+        else:
+            clip_webmerc = bool(clip_to_webmerc) and needs_reprojection
+
         if not quiet:
             print(f"  Data type: {dtype}")
             print(f"  No-data value: {nodata}")
@@ -334,6 +358,8 @@ def convert_to_cog(
                 print(f"  Target CRS: {dst_crs}")
                 if needs_reprojection:
                     print(f"  Reprojection: Required")
+                    if clip_webmerc:
+                        print(f"  Web Mercator clip: enabled (source exceeds ±85° lat)")
                 else:
                     print(f"  Reprojection: Not needed (already in target CRS)")
             print(f"  Compression: {compression} (level {compression_level})")
@@ -346,11 +372,18 @@ def convert_to_cog(
     if needs_reprojection:
         warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
 
-        # Auto-detect appropriate resampling method
-        resampling_method, overview_resampling = determine_resampling_method(input_tif)
+        # Resolve resampling: explicit override > auto-detect from file content.
+        if resampling_method is None:
+            resampling_method, overview_resampling = determine_resampling_method(input_tif)
+            if not quiet:
+                print(f"  Resampling method: {resampling_method} (auto-detected)")
+        else:
+            # If caller specified resampling, also use it for overview building.
+            overview_resampling = resampling_method
+            if not quiet:
+                print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
         if not quiet:
-            print(f"  Resampling method: {resampling_method} (auto-detected)")
             print(f"  Warping to {dst_crs}...")
 
         # Build gdalwarp command (chosen over `rio warp` so we can use
@@ -364,6 +397,16 @@ def convert_to_cog(
             '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
             '-overwrite',
         ]
+
+        # Clamp output extent to Web Mercator's valid domain when source
+        # exceeds it (global Mollweide, polar stereographic, etc.).
+        if clip_webmerc:
+            warp_cmd.extend([
+                '-te',
+                f'-{WEBMERC_EXTENT_M}', f'-{WEBMERC_EXTENT_M}',
+                f'{WEBMERC_EXTENT_M}', f'{WEBMERC_EXTENT_M}',
+                '-te_srs', 'EPSG:3857',
+            ])
 
         # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata)
         if nodata is not None:

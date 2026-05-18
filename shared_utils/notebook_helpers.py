@@ -124,13 +124,16 @@ class SimpleProcessor:
         Automatically categorize files by product type.
         Uses notebook-provided patterns first, then falls back to defaults.
 
+        Delegates per-filename matching to `shared_utils.file_naming.categorize_file`
+        so the regex behavior stays consistent with the standalone notebooks.
+
         Args:
             file_list: List of file paths
 
         Returns:
             Dictionary of categorized files
         """
-        categories = {}
+        from shared_utils.file_naming import categorize_file
 
         # Use notebook-provided patterns if available, otherwise use defaults
         user_patterns = self.config.get('categorization_patterns', {})
@@ -149,25 +152,16 @@ class SimpleProcessor:
         # Merge patterns - user patterns take precedence
         patterns = {**default_patterns, **user_patterns}
 
-        # Track uncategorized files for warning
+        categories: Dict[str, List[str]] = {}
         uncategorized_files = []
 
-        # Categorize each file
         for file_path in file_list:
             filename = os.path.basename(file_path)
-            categorized = False
-
-            for category, pattern in patterns.items():
-                if re.search(pattern, filename, re.IGNORECASE):
-                    if category not in categories:
-                        categories[category] = []
-                    categories[category].append(file_path)
-                    categorized = True
-                    break
-
-            # Track files that don't match any pattern
-            if not categorized:
+            category = categorize_file(filename, patterns)
+            if category == 'uncategorized':
                 uncategorized_files.append(filename)
+            else:
+                categories.setdefault(category, []).append(file_path)
 
         # Warn about uncategorized files
         if uncategorized_files:
@@ -318,7 +312,10 @@ class SimpleProcessor:
                     s3_client=self.s3_client,
                     manual_nodata=nodata,
                     overwrite=self.config.get('overwrite', False),
-                    target_crs=self._normalize_target_crs()
+                    target_crs=self._normalize_target_crs(),
+                    resampling=self.config.get('resampling'),
+                    clip_to_webmerc=self.config.get('clip_to_webmerc'),
+                    stream_from_s3=self.config.get('stream_from_s3', True),
                 )
 
                 results.append({
@@ -376,32 +373,32 @@ class SimpleProcessor:
 
     def _generate_filename(self, original_path: str, _: str = None) -> str:
         """
-        Generate COG filename.
+        Generate COG filename via the unified `file_naming.create_output_filename`.
 
         Args:
             original_path: Original file path
-            category: File category
+            _: File category (unused — kept for backwards compat with notebooks
+               that pass `(path, category)` positionally).
 
         Returns:
             New filename
         """
-        filename = os.path.basename(original_path)
-        stem = os.path.splitext(filename)[0]
-
-        # Extract date if present (YYYYMMDD format)
-        date_match = re.search(r'\d{8}', stem)
-        if date_match:
-            date_str = date_match.group()
-            formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-            # Remove date from stem and add formatted version
-            stem_clean = re.sub(r'_?\d{8}_?', '_', stem)
-            return f"{self.config['event_name']}_{stem_clean}_{formatted_date}_day.tif"
-        else:
-            return f"{self.config['event_name']}_{stem}_day.tif"
+        from shared_utils.file_naming import create_output_filename
+        return create_output_filename(
+            original_path,
+            self.config['event_name'],
+            categories=self.config.get('categorization_patterns'),
+        )
 
     def _normalize_target_crs(self) -> Optional[str]:
-        """Normalize target_crs config value. Returns None for no reprojection."""
-        crs = self.config.get('target_crs', 'EPSG:4326')
+        """
+        Normalize target_crs config value. Returns None to skip reprojection.
+
+        Default is EPSG:3857 (Web Mercator) — sidesteps the WGS 84 ensemble +
+        lat-first axis bug that breaks rio_stac.get_dataset_geom in
+        veda-data-airflow's build_stac handler.
+        """
+        crs = self.config.get('target_crs', 'EPSG:3857')
         if crs is None:
             return None
         if isinstance(crs, str) and crs.strip().lower() in ('none', ''):

@@ -53,10 +53,13 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `bucket` | str | Yes | - | S3 bucket name |
 | `source_path` | str | Yes | - | S3 prefix for source files |
 | `destination_base` | str | Yes | - | S3 prefix for output files |
-| `target_crs` | str/None | No | `'EPSG:4326'` | Target CRS. `None` or `'None'` to keep original |
+| `target_crs` | str/None | No | `'EPSG:3857'` | Target CRS. `None` / `'None'` / `''` = keep original. Default is Web Mercator to dodge the WGS 84 ensemble + lat-first axis bug in `rio_stac`. |
+| `resampling` | str/None | No | `None` | Warp resampling (`'near'`, `'bilinear'`, `'cubic'`, `'average'`). `None` = auto-detect from data. |
+| `clip_to_webmerc` | bool/None | No | `None` | Clip output to Web Mercator's ±85° lat domain. `None` = auto-detect via `needs_webmerc_clip()`. |
+| `stream_from_s3` | bool | No | `True` | Probe `/vsis3/` first; fall back to `/tmp` download. Set False to force download. |
 | `overwrite` | bool | No | `False` | Overwrite existing files |
 | `verify` | bool | No | `True` | Verify results after processing |
-| `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization |
+| `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization. Forwarded to `shared_utils.file_naming.categorize_file`. |
 | `filename_creators` | dict | No | built-in | Functions to generate output filenames |
 | `output_dirs` | dict | No | built-in | Category-to-directory mapping |
 | `nodata_values` | dict | No | built-in | Category-specific nodata values |
@@ -105,20 +108,27 @@ convert_to_cog(
     cog_data_bucket: str,         # Destination S3 bucket
     cog_data_prefix: str,         # Destination S3 prefix
     s3_client,                    # Boto3 S3 client
-    cog_profile=None,             # COG profile (auto-selected)
+    *,
+    cog_profile=None,             # (deprecated, accepted for backwards compat)
     local_output_dir=None,        # Save local copy if set
-    chunk_config=None,            # Chunk config (auto-selected by file size)
+    chunk_config=None,            # (deprecated, accepted for backwards compat)
     manual_nodata=None,           # Override nodata value
     overwrite=False,              # Overwrite existing S3 files
     skip_validation=False,        # Skip COG validation step
-    target_crs='EPSG:4326'        # Target CRS, None = keep original
+    target_crs='EPSG:3857',       # Target CRS, None = keep original
+    resampling=None,              # Warp resampling, None = auto-detect
+    clip_to_webmerc=None,         # ±85° lat clip, None = auto-detect
+    stream_from_s3=True,          # Probe /vsis3 first; fall back to download
 )
 ```
 
-Processing strategy (auto-selected):
-1. **GDAL COG driver** — files < 10 GB (fastest)
-2. **rio-cogeo** — files < 5 GB (fallback)
-3. **Chunked reprojection** — large files (memory-safe)
+**Implementation**: thin S3 orchestrator (~216 lines). The function:
+1. Checks the destination S3 key (skip unless `overwrite=True`).
+2. Tries `/vsis3/{bucket}/{name}` streaming when `stream_from_s3=True`; falls back to a one-shot download to `/tmp/data_download/{name}`.
+3. Delegates the actual warp + COG creation to `shared_utils.cog_utils.convert_to_cog` (the engine).
+4. Optionally validates the output, then uploads to S3.
+
+The chunked / GDAL-driver / rio-cogeo branching that used to live here was removed when the function was unified onto the `cog_utils` engine — `gdalwarp` + `rio cogeo create` already handle their own chunking via `BLOCKSIZE` and `NUM_THREADS=ALL_CPUS`. Pass-through kwargs (`cog_profile`, `chunk_config`) are accepted but ignored.
 
 ---
 
@@ -189,10 +199,12 @@ Local COG conversion utilities (no S3 required).
 
 ```python
 convert_to_cog(
-    input_tif: str,                         # Input GeoTIFF path
+    input_tif: str,                         # Input GeoTIFF path OR /vsi* URI
     output_cog: str = None,                 # Output path (None = replace input)
     nodata: Optional[Union[int, float]] = None,  # Nodata (auto-detect if None)
-    dst_crs: str = 'EPSG:4326',             # Target CRS (None = keep original)
+    dst_crs: str = 'EPSG:3857',             # Target CRS (None = keep original)
+    resampling_method: str = None,          # 'near'/'bilinear'/'cubic'/'average'; None = auto
+    clip_to_webmerc: bool = None,           # ±85° lat clip; None = auto-detect
     compression: str = 'ZSTD',
     compression_level: int = 22,
     overview_levels: int = 5,
@@ -200,6 +212,10 @@ convert_to_cog(
     backend: str = 'rio'                    # 'rio' or 'gdal'
 ) -> str                                    # Returns path to created COG
 ```
+
+The engine: subprocess `gdalwarp` (with `NUM_THREADS=ALL_CPUS`) + `rio cogeo create`.
+Default `dst_crs` is EPSG:3857 (see CLAUDE.md / .clinerules.md for the airflow ensemble bug).
+Accepts `/vsis3/`, `/vsicurl/`, etc. — useful when called from `main_processor` in streaming mode.
 
 #### `validate_cog(cog_path) -> Tuple[bool, dict]`
 
@@ -455,6 +471,20 @@ Optimal compression config by file size and dtype.
 
 ### reprojection
 
+Pure-rasterio warp helpers plus the **`needs_webmerc_clip()`** helper that decides when a source raster needs a ±85° latitude clip to stay inside Web Mercator's valid domain.
+
+```python
+from shared_utils.reprojection import (
+    needs_webmerc_clip,        # (src_or_path, dst_crs) -> bool — True iff source lat bounds exceed ±85.05° AND dst_crs ≈ EPSG:3857
+    WEBMERC_VALID_LAT,         # 85.05112878
+    WEBMERC_EXTENT_M,          # 20037508.342789244
+    WEBMERC_EPSGS,             # {'EPSG:3857', 'EPSG:900913', 'EPSG:102100', 'EPSG:102113'}
+)
+```
+
+Returns False for the 99% regional-raster case → no behavior change for sensor pipelines.
+Returns True for global Mollweide, polar stereographic, and similar world-extent sources targeting Web Mercator. `cog_utils.convert_to_cog` consults this automatically when `clip_to_webmerc=None`.
+
 CRS reprojection and COG overview creation.
 
 #### `calculate_transform_parameters(src, dst_crs='EPSG:4326') -> Tuple[transform, width, height]`
@@ -480,6 +510,22 @@ Calculate appropriate overview factors based on image dimensions.
 ---
 
 ### file_naming
+
+**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. Both legacy (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) and new unified (`extract_datetime_from_filename`, `categorize_file`, `create_output_filename`) helpers live here; the legacy set is preserved for backwards compatibility with unit tests and `shared_utils_reference.ipynb`.
+
+New code should use the unified helpers:
+
+```python
+from shared_utils.file_naming import (
+    DATETIME_PATTERNS,           # list of (regex, granularity) pairs, ordered most-specific-first
+    extract_datetime_from_filename,  # -> (matched_str, 'hour'|'day') | (None, None)
+    categorize_file,                  # (filename, {regex: subdir}) -> subdir | 'uncategorized'
+    create_output_filename,           # (path, event, categories=None) -> '{event}_{stem}_{date}_{granularity}.tif'
+    no_change,                        # passthrough builder for sub-products like AVIRIS
+)
+```
+
+`create_output_filename` auto-normalizes 8-digit `YYYYMMDD` to hyphenated `YYYY-MM-DD` so the output matches the legacy operator-facing convention.
 
 Filename parsing, date extraction, and standardized naming.
 

@@ -49,6 +49,26 @@ try:
 except ImportError:
     pass  # These modules have optional dependencies (boto3, etc.)
 
+# Unified filename / categorization helpers (pure Python, no GDAL).
+from shared_utils.file_naming import (
+    DATETIME_PATTERNS,
+    extract_datetime_from_filename,
+    categorize_file,
+    create_output_filename,
+    no_change,
+)
+
+# Web Mercator clip detection (requires rasterio).
+try:
+    from shared_utils.reprojection import (
+        needs_webmerc_clip,
+        WEBMERC_VALID_LAT,
+        WEBMERC_EXTENT_M,
+        WEBMERC_EPSGS,
+    )
+except ImportError:
+    pass  # rasterio not available
+
 # COG metadata (requires rasterio, GDAL, rio-cogeo)
 try:
     from shared_utils.cog_metadata import (
@@ -72,6 +92,12 @@ try:
     )
 except ImportError:
     pass  # boto3/rasterio not available
+
+# Raster inspection helpers (requires rasterio)
+try:
+    from shared_utils.geotiff_analyzer import summarize_raster
+except ImportError:
+    pass  # rasterio not available
 
 __all__ = [
     # COG utilities
@@ -110,4 +136,17 @@ __all__ = [
     'parse_s3_uri',
     'upload_file_to_s3',
     'build_flat_s3_uri',
+    # Unified filename / categorization (file_naming.py)
+    'DATETIME_PATTERNS',
+    'extract_datetime_from_filename',
+    'categorize_file',
+    'create_output_filename',
+    'no_change',
+    # Web Mercator clip detection (reprojection.py)
+    'needs_webmerc_clip',
+    'WEBMERC_VALID_LAT',
+    'WEBMERC_EXTENT_M',
+    'WEBMERC_EPSGS',
+    # Raster inspection (geotiff_analyzer.py)
+    'summarize_raster',
 ]

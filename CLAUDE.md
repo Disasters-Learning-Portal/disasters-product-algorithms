@@ -20,10 +20,13 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 ## Key Patterns
 
 - `shared_utils/` modules follow single-responsibility: one concern per file
-- Two COG creation paths: CLI subprocess (`rio cogeo create`) and Python API (`cog_translate`)
+- **One engine, one orchestrator**:
+  - `shared_utils.cog_utils.convert_to_cog(input_tif, ...)` — local-file warp+COG primitive (subprocess `gdalwarp` + `rio cogeo create`)
+  - `shared_utils.main_processor.convert_to_cog(name, bucket, ...)` — S3 download (or `/vsis3` stream) → cog_utils → S3 upload. Thin wrapper, ~216 lines.
+- **One filename module**: `shared_utils/file_naming.py` is the single source of truth. Notebooks import `extract_datetime_from_filename`, `categorize_file`, `create_output_filename` — never re-define inline.
 - Notebooks should be short — import from `shared_utils`, don't inline complex logic
-- Processing profiles auto-scale by file size: standard (<3GB), large (3-7GB), ultra-large (>7GB)
 - All temp files go to `/tmp`, cleaned up in `finally` blocks
+- All raster hot paths set `NUM_THREADS=ALL_CPUS` (gdalwarp + rio cogeo) or `num_threads=os.cpu_count()` (rasterio.warp.reproject)
 
 ## CLI Entry Points (from pyproject.toml)
 
@@ -34,10 +37,14 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 ## Critical Constraints
 
+- **Default `dst_crs` / `target_crs` is `EPSG:3857`** (Web Mercator). Reason: EPSG:4326 outputs trigger a `Point outside of projection domain` error in `veda-data-airflow`'s `build_stac` (PROJ writes the WGS 84 ensemble + lat-first axis, which `rio_stac.get_dataset_geom` can't handle). Web Mercator dodges both. Don't change without solving the ensemble + axis problem.
+- **`needs_webmerc_clip()`** in `shared_utils/reprojection.py` auto-detects when a source's geographic lat range exceeds ±85.05° AND `dst_crs ≈ EPSG:3857`, in which case `cog_utils.convert_to_cog` injects `-te ... -te_srs EPSG:3857` into gdalwarp. Without this, global Mollweide → 3857 produces 50+ GB of nodata. Returns False for the 99% regional-raster case.
+- **`normalize_wgs84_crs()`** in `cog_utils.py` is preserved but **does not work** — PROJ re-canonicalizes back to the ensemble on read. Don't call it from new code.
 - GDAL must be installed via conda (not pip) to avoid dylib version mismatches
 - S3 credentials use STS assume-role via `aws_credentials.py` when available, fallback to default creds
 - COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels
 - Nodata auto-detection: uint8=0, int16=-9999, float=-9999.0
+- `main_processor.convert_to_cog` defaults `stream_from_s3=True` — probes `/vsis3/` then falls back to `/tmp` download. Set False for ZSTD-22 heavy workloads where the up-front download avoids many small range-request round-trips.
 
 ## How to Run
 

@@ -6,7 +6,7 @@ Single responsibility: Reprojection and coordinate transformation.
 import os
 import numpy as np
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
 from rasterio.windows import Window
 import gc
 from tqdm import tqdm
@@ -16,6 +16,70 @@ from shared_utils.cog_validation import check_and_fix_nan_values
 # All-CPU parallelism for rasterio.warp.reproject (param requires an integer,
 # unlike GDAL's "ALL_CPUS" string).
 _NUM_THREADS = os.cpu_count() or 1
+
+# Web Mercator (EPSG:3857) is only defined within ±85.05113° latitude.
+# Source rasters whose lat footprint extends past this band (global Mollweide,
+# polar stereographic, etc.) blow up when warped to 3857 without an output
+# extent clip — gdalwarp will either error with "Point outside of projection
+# domain" or produce a 50+ GB mostly-nodata canvas.
+WEBMERC_VALID_LAT = 85.05112878
+WEBMERC_EXTENT_M = 20037508.342789244
+WEBMERC_EPSGS = frozenset({
+    'EPSG:3857', 'EPSG:900913', 'EPSG:102100', 'EPSG:102113',
+})
+
+
+def _crs_is_webmerc(crs) -> bool:
+    """Check whether a CRS string maps to Web Mercator."""
+    if crs is None:
+        return False
+    s = str(crs).strip().upper()
+    return s in WEBMERC_EPSGS
+
+
+def needs_webmerc_clip(src, dst_crs) -> bool:
+    """
+    Decide whether a warp to `dst_crs` requires a ±85° latitude clip to stay
+    inside Web Mercator's valid domain.
+
+    Args:
+        src: An open `rasterio.DatasetReader` (preferred — bounds + CRS read
+            from metadata) OR a path string. If a path is given, the file
+            is opened transiently.
+        dst_crs: Target CRS string (e.g. 'EPSG:3857'). Anything that doesn't
+            map to Web Mercator returns False immediately.
+
+    Returns:
+        True iff dst_crs is Web Mercator AND the source's reprojected
+        geographic bounds extend past ±WEBMERC_VALID_LAT. For the 99% case
+        (regional rasters) this is False and no behavior change is induced.
+
+    Falls back to True if bounds projection raises — when in doubt, clip.
+    """
+    if not _crs_is_webmerc(dst_crs):
+        return False
+
+    # Accept either a path or an open dataset.
+    opened_here = False
+    if isinstance(src, (str, bytes, os.PathLike)):
+        src = rasterio.open(src)
+        opened_here = True
+
+    try:
+        if src.crs is None:
+            return True
+        try:
+            _, south, _, north = transform_bounds(
+                src.crs, 'EPSG:4326', *src.bounds, densify_pts=21
+            )
+        except Exception:
+            # Curved or pathological source CRS (e.g. world Mollweide whose
+            # bounding-box corners fall outside the valid ellipse) — clip.
+            return True
+        return south < -WEBMERC_VALID_LAT or north > WEBMERC_VALID_LAT
+    finally:
+        if opened_here:
+            src.close()
 
 
 def process_whole_file(src, dst, src_crs, dst_crs, transform, width, height, src_nodata, dst_nodata=None):

@@ -68,6 +68,56 @@ def analyze_geotiff(file_path: str, sample_size: int = None) -> Dict:
     return results
 
 
+def summarize_raster(
+    path: str,
+    band: int = 1,
+    nodata: Optional[float] = None,
+) -> Dict[str, float]:
+    """
+    Compute basic statistics for a single band of a GeoTIFF.
+
+    Parameters
+    ----------
+    path : str
+        Absolute path to the GeoTIFF.
+    band : int
+        1-indexed band number (rasterio convention).
+    nodata : float, optional
+        Override the file's stored nodata value. If None, uses the
+        nodata recorded in the dataset metadata.
+
+    Returns
+    -------
+    dict with keys: min, max, mean, nodata_count, valid_count
+    """
+    with rasterio.open(path) as src:
+        data = src.read(band, masked=False)
+        nd = nodata if nodata is not None else src.nodata
+
+    if nd is not None:
+        mask = data != nd
+        valid = data[mask]
+    else:
+        valid = data.ravel()
+
+    if valid.size == 0:
+        return {
+            "min": float("nan"),
+            "max": float("nan"),
+            "mean": float("nan"),
+            "nodata_count": int(data.size),
+            "valid_count": 0,
+        }
+
+    return {
+        "min": float(valid.min()),
+        "max": float(valid.max()),
+        "mean": float(valid.mean()),
+        "nodata_count": int(data.size - valid.size),
+        "valid_count": int(valid.size),
+    }
+
+
 def analyze_band(src, band_idx: int, sample_size: int = None) -> Dict:
     """
     Analyze a single band of a raster.

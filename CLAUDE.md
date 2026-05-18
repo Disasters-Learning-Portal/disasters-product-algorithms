@@ -14,8 +14,10 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 - `shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
 - `notebooks/` — Operator-facing Jupyter templates for disaster event processing
-- `landsat/`, `sentinel2/`, `satellogic/` — Sensor-specific product generation (CLI entry points)
-- `docs/` — API reference, deployment guides, resampling guide
+- `landsat/`, `sentinel2/`, `satellogic/`, `umbra/` — Sensor-specific product generation (CLI entry points)
+- `raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
+- `tests/fixtures/` — Real-data crops committed for tests (small, <500KB each; e.g. `gaia_atlanta_sample.tif` is a 256×256 GAIA Web-Mercator crop)
+- `docs/` — API reference, deployment guides, resampling guide, contributor tutorial
 
 ## Key Patterns
 
@@ -34,6 +36,8 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 - `process_sentinel2` — Sentinel-2 product generation
 - `download_sentinel2` — Sentinel-2 data download
 - `process_satellogic` — Satellogic processing
+- `process_umbra` — Umbra SAR processing
+- `summarize_raster` — Print min/max/mean/nodata stats for a single GeoTIFF band (`-b`, `-n`, `--json`)
 
 ## Critical Constraints
 
@@ -64,3 +68,7 @@ jupyter notebook notebooks/
 ## API Reference
 
 See `docs/SHARED_UTILS_API.md` for complete function signatures.
+
+## Contributing
+
+See `docs/ADDING_FUNCTIONS_TUTORIAL.md` for the end-to-end walkthrough of adding a new `shared_utils` function and wiring it up as a CLI entry point (worked example: `summarize_raster`).

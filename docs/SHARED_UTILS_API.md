@@ -375,6 +375,10 @@ Verify S3 upload permissions by writing and cleaning up a test object.
 
 Analyze GeoTIFF files for metadata, statistics, and nodata recommendations.
 
+#### `summarize_raster(path, band=1, nodata=None) -> Dict[str, float]`
+
+Lightweight per-band stats: `min`, `max`, `mean`, `nodata_count`, `valid_count`. Pass `nodata=...` to override the file's recorded sentinel. Returns NaN-valued stats for all-nodata input (instead of raising). Also exposed as the `summarize_raster` CLI (`raster_tools/`).
+
 #### `analyze_geotiff(file_path, sample_size=None) -> Dict`
 
 Full analysis: CRS, bounds, bands, statistics, nodata, compression.

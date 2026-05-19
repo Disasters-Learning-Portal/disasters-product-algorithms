@@ -80,19 +80,28 @@ OVERWRITE = False  # Set True to replace existing files
 
 ### Custom Filename Functions
 
-Define how your files are renamed:
+Define how your files are renamed. The unified helper in
+`shared_utils.file_naming` handles datetime extraction, granularity (hour vs
+day), and `YYYYMMDD` → `YYYY-MM-DD` normalization for you:
 
 ```python
-def create_truecolor_filename(original_path, event_name):
-    """Create filename for trueColor products."""
-    filename = os.path.basename(original_path)
-    stem = os.path.splitext(filename)[0]
-    date = extract_date_from_filename(stem)
+from shared_utils.file_naming import create_output_filename
 
-    if date:
-        stem_clean = re.sub(r'_\d{8}', '', stem)
-        return f"{event_name}_{stem_clean}_{date}_day.tif"
-    return f"{event_name}_{stem}_day.tif"
+def create_truecolor_filename(original_path, event_name):
+    """Build the standardized trueColor filename for this event."""
+    return create_output_filename(original_path, event_name)
+```
+
+If you need different renaming behavior per category, pass the categories
+dict so AVIRIS / passthrough rules apply:
+
+```python
+from shared_utils.file_naming import create_output_filename
+
+CATEGORIES = {r'trueColor': 'Sentinel-2/trueColor', r'earlylook': 'AVIRIS'}
+
+def make_name(original_path, event_name):
+    return create_output_filename(original_path, event_name, categories=CATEGORIES)
 ```
 
 ### Map Products to Filename Functions

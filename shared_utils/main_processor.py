@@ -37,7 +37,6 @@ from shared_utils.s3_operations import (
     get_file_size_from_s3
 )
 from shared_utils.cog_validation import check_cog_with_warnings
-from shared_utils.cog_utils import normalize_wgs84_crs
 from shared_utils.compression import set_nodata_value_src, get_predictor_for_dtype
 from shared_utils.reprojection import calculate_transform_parameters, process_with_fixed_chunks
 

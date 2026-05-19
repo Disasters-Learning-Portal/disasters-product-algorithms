@@ -3,106 +3,159 @@
 import pytest
 
 
-class TestExtractDateFromFilename:
-    """Tests for extract_date_from_filename(filename)."""
+class TestExtractDatetimeFromFilename:
+    """Tests for extract_datetime_from_filename(filename)."""
 
-    def test_landsat_date(self):
-        from shared_utils.file_naming import extract_date_from_filename
-        result = extract_date_from_filename("LC08_trueColor_20250922_185617_046028.tif")
-        assert result == "2025-09-22"
+    def test_landsat_8digit_date(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename(
+            "LC08_trueColor_20250922_185617_046028.tif"
+        )
+        assert matched == "20250922"
+        assert granularity == "day"
 
-    def test_sentinel_date(self):
-        from shared_utils.file_naming import extract_date_from_filename
-        result = extract_date_from_filename("S2B_MSIL2A_colorInfrared_20251111_161419.tif")
-        assert result == "2025-11-11"
+    def test_sentinel_8digit_date(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename(
+            "S2B_MSIL2A_colorInfrared_20251111_161419.tif"
+        )
+        assert matched == "20251111"
+        assert granularity == "day"
 
     def test_no_date(self):
-        from shared_utils.file_naming import extract_date_from_filename
-        result = extract_date_from_filename("some_file_no_date.tif")
-        assert result is None
+        from shared_utils.file_naming import extract_datetime_from_filename
+        assert extract_datetime_from_filename("some_file_no_date.tif") == (None, None)
 
-    def test_date_in_path(self):
-        from shared_utils.file_naming import extract_date_from_filename
-        result = extract_date_from_filename("20230415_data.tif")
-        assert result == "2023-04-15"
+    def test_date_at_start_of_stem(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename("20230415_data.tif")
+        assert matched == "20230415"
+        assert granularity == "day"
+
+    def test_iso_hyphenated_date(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename("noaa_2025-01-11_thermal.tif")
+        assert matched == "2025-01-11"
+        assert granularity == "day"
+
+    def test_iso_full_timestamp_with_z(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename(
+            "sentinel_2025-01-11T19:46:16Z_red.tif"
+        )
+        assert matched == "2025-01-11T19:46:16Z"
+        assert granularity == "hour"
+
+    def test_compact_datetime(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename(
+            "sentinel_20250111T194616Z_red.tif"
+        )
+        assert matched == "20250111T194616Z"
+        assert granularity == "hour"
+
+    def test_iso_date_with_hour(self):
+        from shared_utils.file_naming import extract_datetime_from_filename
+        matched, granularity = extract_datetime_from_filename("planet_2025-01-11T19_blue.tif")
+        assert matched == "2025-01-11T19"
+        assert granularity == "hour"
 
 
-class TestConvertDate:
-    """Tests for convert_date(date_str)."""
+class TestCategorizeFile:
+    """Tests for categorize_file(filename, categories)."""
 
-    def test_standard_conversion(self):
-        from shared_utils.file_naming import convert_date
-        assert convert_date('20250922') == '2025-09-22'
+    CATEGORIES = {
+        r'trueColor|truecolor|true_color': 'Sentinel-2/trueColor',
+        r'colorInfrared|colorIR|color_infrared': 'Sentinel-2/colorIR',
+        r'naturalColor|natural_color': 'Sentinel-2/naturalColor',
+        r'wood': 'GAIA',
+    }
 
-    def test_another_date(self):
-        from shared_utils.file_naming import convert_date
-        assert convert_date('20231231') == '2023-12-31'
+    def test_matches_truecolor(self):
+        from shared_utils.file_naming import categorize_file
+        assert categorize_file("S2B_trueColor_20250101.tif", self.CATEGORIES) == "Sentinel-2/trueColor"
 
-    def test_short_string_unchanged(self):
-        from shared_utils.file_naming import convert_date
-        # Non-8-char strings returned as-is
-        assert convert_date('2025') == '2025'
+    def test_case_insensitive(self):
+        from shared_utils.file_naming import categorize_file
+        assert categorize_file("S2B_TRUECOLOR_20250101.tif", self.CATEGORIES) == "Sentinel-2/trueColor"
+
+    def test_first_match_wins(self):
+        from shared_utils.file_naming import categorize_file
+        # 'trueColor' is the first dict entry; even if a filename theoretically
+        # matches multiple, the first one in dict order is returned.
+        assert categorize_file("trueColor_naturalColor.tif", self.CATEGORIES) == "Sentinel-2/trueColor"
+
+    def test_uncategorized(self):
+        from shared_utils.file_naming import categorize_file
+        assert categorize_file("S2B_unknown_20250101.tif", self.CATEGORIES) == "uncategorized"
+
+    def test_gaia_pattern(self):
+        from shared_utils.file_naming import categorize_file
+        assert categorize_file("low-durability-wood-framed-1.tif", self.CATEGORIES) == "GAIA"
 
 
-class TestCreateCogFilename:
-    """Tests for create_cog_filename(original_path, event_name, custom_suffix)."""
+class TestCreateOutputFilename:
+    """Tests for create_output_filename(original_path, event_name, ...)."""
 
-    def test_basic_creation(self):
-        from shared_utils.file_naming import create_cog_filename
-        result = create_cog_filename(
+    def test_basic_8digit_date_is_hyphenated(self):
+        from shared_utils.file_naming import create_output_filename
+        result = create_output_filename(
             "/path/LC08_trueColor_20250922_185617.tif",
             "202509_Flood_WA"
         )
-        assert "202509_Flood_WA" in result
+        assert result.startswith("202509_Flood_WA_")
+        # 8-digit YYYYMMDD must be normalized to YYYY-MM-DD in the embedded date.
         assert "2025-09-22" in result
-        assert result.endswith(".tif")
-        assert "_day" in result
-
-    def test_custom_suffix(self):
-        from shared_utils.file_naming import create_cog_filename
-        result = create_cog_filename(
-            "/path/LC08_trueColor_20250922_185617.tif",
-            "Event",
-            custom_suffix='night'
-        )
-        assert "_night" in result
+        assert result.endswith("_day.tif")
 
     def test_no_double_underscores(self):
-        from shared_utils.file_naming import create_cog_filename
-        result = create_cog_filename(
-            "/path/LC08_trueColor_20250922_185617.tif",
+        from shared_utils.file_naming import create_output_filename
+        result = create_output_filename(
+            "/path/LC08_trueColor_20250922.tif",
             "Event"
         )
+        # Stem-strip leaves no consecutive underscores around the removed date.
         assert "__" not in result
 
+    def test_no_date_falls_back_to_day_suffix(self):
+        from shared_utils.file_naming import create_output_filename
+        result = create_output_filename(
+            "/path/umbra_low-durability-wood-framed-1.tif",
+            "Event"
+        )
+        assert result == "Event_umbra_low-durability-wood-framed-1_day.tif"
 
-class TestParseFilenameComponents:
-    """Tests for parse_filename_components(filepath)."""
+    def test_hour_granularity_preserved_for_iso_timestamps(self):
+        from shared_utils.file_naming import create_output_filename
+        result = create_output_filename(
+            "sentinel_20250111T194616Z_red.tif",
+            "Event"
+        )
+        # Hour-granularity datetimes are NOT hyphenated; they keep their raw form
+        # and use the _hour suffix.
+        assert "20250111T194616Z" in result
+        assert result.endswith("_hour.tif")
 
-    def test_extracts_basic_components(self):
-        from shared_utils.file_naming import parse_filename_components
-        result = parse_filename_components("/data/S2B_MSIL2A_colorInfrared_20251111_161419.tif")
-        assert result['directory'] == '/data'
-        assert result['filename'] == 'S2B_MSIL2A_colorInfrared_20251111_161419.tif'
-        assert result['extension'] == '.tif'
+    def test_passthrough_category_uses_no_change(self):
+        from shared_utils.file_naming import create_output_filename
+        categories = {r'earlylook': 'AVIRIS'}
+        result = create_output_filename(
+            "ang20250101_earlylook_strip.tif",
+            "Event",
+            categories=categories,
+        )
+        # AVIRIS is the default passthrough — keep the original stem verbatim.
+        assert result == "Event_ang20250101_earlylook_strip.tif"
 
-    def test_extracts_date(self):
-        from shared_utils.file_naming import parse_filename_components
-        result = parse_filename_components("/data/LC08_trueColor_20250922_185617.tif")
-        assert result['date'] == '2025-09-22'
 
-    def test_extracts_satellite(self):
-        from shared_utils.file_naming import parse_filename_components
-        result = parse_filename_components("/data/S2B_MSIL2A_colorInfrared_20251111.tif")
-        assert result.get('satellite') == 'S2B'
+class TestNoChange:
+    """Tests for no_change(original_path, event_name)."""
 
-    def test_extracts_product(self):
-        from shared_utils.file_naming import parse_filename_components
-        result = parse_filename_components("/data/LC08_NDVI_20250922.tif")
-        # Should find the uppercase product pattern
-        assert 'product' in result
+    def test_prepends_event_keeps_extension(self):
+        from shared_utils.file_naming import no_change
+        assert no_change("/data/foo.tif", "evt") == "evt_foo.tif"
 
-    def test_no_date_file(self):
-        from shared_utils.file_naming import parse_filename_components
-        result = parse_filename_components("/data/some_file.tif")
-        assert 'date' not in result
+    def test_preserves_complex_stem(self):
+        from shared_utils.file_naming import no_change
+        assert no_change("ang_20250101T01_20250101T05_strip.tif", "Event") == \
+            "Event_ang_20250101T01_20250101T05_strip.tif"

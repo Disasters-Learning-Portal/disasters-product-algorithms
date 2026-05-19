@@ -531,27 +531,15 @@ from shared_utils.file_naming import (
 
 `create_output_filename` auto-normalizes 8-digit `YYYYMMDD` to hyphenated `YYYY-MM-DD` so the output matches the legacy operator-facing convention.
 
-Filename parsing, date extraction, and standardized naming.
+Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, etc.) are matched by the entries higher up in `DATETIME_PATTERNS` and emit `_hour.tif`; ordering is most-specific first so a filename containing both an ISO timestamp and a bare YYYYMMDD prefers the timestamp.
 
-#### `extract_date_from_filename(filename) -> str`
-
-Extract date string (YYYYMMDD) from filename.
-
-#### `convert_date(date_str) -> str`
-
-Convert `YYYYMMDD` to `YYYY-MM-DD`.
-
-#### `parse_filename_components(filepath) -> dict`
-
-Parse filename into components: `date`, `satellite`, `product`, `location`.
-
-#### `create_cog_filename(original_path, event_name, custom_suffix='day') -> str`
-
-Generate standardized COG filename: `{event}_{stem}_{date}_{suffix}.tif`.
-
-#### `create_output_path(base_dir, target_dir, filename) -> str`
-
-Create full output path from components.
+> The earlier helpers `extract_date_from_filename`, `convert_date`,
+> `parse_filename_components`, `create_cog_filename`, and `create_output_path`
+> were deleted in the unification refactor. Their behavior is covered by
+> `extract_datetime_from_filename` + `create_output_filename` above (and a
+> plain `os.path.join(base, subdir, filename)` for path composition). If you
+> need filename-component parsing (satellite code, product code, location)
+> reintroduce a focused helper instead of resurrecting the old function.
 
 ---
 

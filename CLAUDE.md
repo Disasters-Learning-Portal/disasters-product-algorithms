@@ -43,7 +43,7 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 - **Default `dst_crs` / `target_crs` is `EPSG:3857`** (Web Mercator). Reason: EPSG:4326 outputs trigger a `Point outside of projection domain` error in `veda-data-airflow`'s `build_stac` (PROJ writes the WGS 84 ensemble + lat-first axis, which `rio_stac.get_dataset_geom` can't handle). Web Mercator dodges both. Don't change without solving the ensemble + axis problem.
 - **`needs_webmerc_clip()`** in `shared_utils/reprojection.py` auto-detects when a source's geographic lat range exceeds ±85.05° AND `dst_crs ≈ EPSG:3857`, in which case `cog_utils.convert_to_cog` injects `-te ... -te_srs EPSG:3857` into gdalwarp. Without this, global Mollweide → 3857 produces 50+ GB of nodata. Returns False for the 99% regional-raster case.
-- **`normalize_wgs84_crs()`** in `cog_utils.py` is preserved but **does not work** — PROJ re-canonicalizes back to the ensemble on read. Don't call it from new code.
+- **There is no `normalize_wgs84_crs()` helper anymore.** The old gdal_edit.py-based approach didn't work (PROJ re-canonicalizes the WKT to the ensemble on read). The replacement is just "use EPSG:3857" (see above).
 - GDAL must be installed via conda (not pip) to avoid dylib version mismatches
 - S3 credentials use STS assume-role via `aws_credentials.py` when available, fallback to default creds
 - COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels

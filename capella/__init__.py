@@ -4,4 +4,5 @@ __all__ = [
     'retrieve_capella_resources',
     'lee_filter',
     'sigmaCalib',
+    'apply_filter',
 ]

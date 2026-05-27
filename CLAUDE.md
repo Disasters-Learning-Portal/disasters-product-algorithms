@@ -37,11 +37,15 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 - `download_sentinel2` — Sentinel-2 data download
 - `process_satellogic` — Satellogic processing
 - `process_umbra` — Umbra SAR processing
+- `process_capella` — Capella SAR (sigma0 + optional Lee filter)
 - `summarize_raster` — Print min/max/mean/nodata stats for a single GeoTIFF band (`-b`, `-n`, `--json`)
+
+All sensor CLIs accept `-dst_crs <EPSG:xxxx | native>`. `native` (default on capella/satellogic/umbra) maps to `None` → preserve source projection. `landsat` and `sentinel2` still default to `EPSG:4326` for back-compat; pass `-dst_crs native` to skip the warp.
 
 ## Critical Constraints
 
-- **Default `dst_crs` / `target_crs` is `EPSG:3857`** (Web Mercator). Reason: EPSG:4326 outputs trigger a `Point outside of projection domain` error in `veda-data-airflow`'s `build_stac` (PROJ writes the WGS 84 ensemble + lat-first axis, which `rio_stac.get_dataset_geom` can't handle). Web Mercator dodges both. Don't change without solving the ensemble + axis problem.
+- **Library default `dst_crs` / `target_crs` is `EPSG:3857`** (Web Mercator) — applies to `cog_utils.convert_to_cog`, `main_processor.convert_to_cog`, and `SimpleProcessor`. Reason: EPSG:4326 outputs trigger a `Point outside of projection domain` error in `veda-data-airflow`'s `build_stac` (PROJ writes the WGS 84 ensemble + lat-first axis, which `rio_stac.get_dataset_geom` can't handle). Web Mercator dodges both. Don't change without solving the ensemble + axis problem.
+- **Notebook templates default `TARGET_CRS = None`** (preserve native projection, fastest — no warp), with a commented `# TARGET_CRS = "EPSG:3857"` alternative directly below. Operators opt-in to Web Mercator when they're about to push through `build_stac`. The variable is forwarded to the CLI as `"-dst_crs", TARGET_CRS if TARGET_CRS else "native"`. This is intentional: native-CRS COGs are fine for browser preview / leafmap but will fail in airflow until reprojected.
 - **`needs_webmerc_clip()`** in `shared_utils/reprojection.py` auto-detects when a source's geographic lat range exceeds ±85.05° AND `dst_crs ≈ EPSG:3857`, in which case `cog_utils.convert_to_cog` injects `-te ... -te_srs EPSG:3857` into gdalwarp. Without this, global Mollweide → 3857 produces 50+ GB of nodata. Returns False for the 99% regional-raster case.
 - **There is no `normalize_wgs84_crs()` helper anymore.** The old gdal_edit.py-based approach didn't work (PROJ re-canonicalizes the WKT to the ensemble on read). The replacement is just "use EPSG:3857" (see above).
 - GDAL must be installed via conda (not pip) to avoid dylib version mismatches

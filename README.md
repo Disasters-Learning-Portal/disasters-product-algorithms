@@ -276,11 +276,11 @@ flow for adding a new dep depends on whether it's pip- or conda-installable:
 
 **Pip-installable dep (has a manylinux wheel) — preferred:**
 
-Add it to `[project] dependencies` in `pyproject.toml` and push to `main`.
-That's it. The image repo's `environment.yml` already has a
-`pip: - git+https://...algorithms.git` line; the dep flows in
-transitively on the next image build (which the `ALGORITHMS_SHA`
-cache-buster guarantees actually re-runs).
+Add it to `[project] dependencies` in `pyproject.toml` and push to the
+branch that the relevant image variant tracks (prod=`main`, dev=`dev`).
+That's it — the dep flows in transitively on the next image build,
+because the image-repo `Dockerfile` has a dedicated algorithms install
+layer pinned to that branch's SHA via `--build-arg ALGORITHMS_REF`.
 
 **Conda-only dep (binary system lib, specific GDAL plugin, etc.):**
 
@@ -299,17 +299,30 @@ image build.
 
 If `process_landsat89` / `process_sentinel2` / `process_satellogic` are
 **missing on `$PATH`** in a fresh hub session, the cause is almost always
-an image-build issue, not a local install issue:
+"wrong branch on wrong image variant," not a local-install issue.
 
-1. Check `pangeo-notebook-veda-image/environment.yml` for the line
-   `pip: - git+https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git`.
-2. Check the most recent build log on GitHub Actions for the image repo —
-   a build that finishes in well under 5 minutes is suspicious (cache hit).
-3. Confirm the `ARG ALGORITHMS_SHA` cache-buster is wired into the
-   Dockerfile and the `build-and-push*.yaml` workflows.
+Each hub image variant pins to a different algorithms branch:
+
+| Image variant | Algorithms branch installed |
+|---|---|
+| Prod (`disasters-jupyterhub-docker-image:latest`) | `main` HEAD |
+| Dev (`...-dev:latest`) | `dev` HEAD |
+
+Order of checks:
+
+1. **Which image variant is the hub spawning, and which branch has your CLI?**
+   If your CLI was added on `dev` and you're spawning the prod image, you
+   need to merge `dev` → `main` (and wait ~3 min for the rebuild) before
+   it shows up there.
+2. **Most recent build log on GitHub Actions for the image repo** — confirm
+   the right `ALGORITHMS_REF` was resolved (it's echoed in the "Resolve
+   algorithms ref" step) and that the pip install layer ran (look for
+   `Installing disasters-product-algorithms@<sha>` in the Dockerfile RUN).
+3. **Entry point present in `pyproject.toml` `[project.scripts]`** on the
+   relevant branch.
 
 Reinstalling locally with `pip install -e .` is a single-session workaround,
-not a fix. See `docs/HUB_DEPLOYMENT.md` for the full debugging checklist.
+not a fix. See `docs/HUB_DEPLOYMENT.md` for the full mechanics.
 
 ## Development in JupyterHub
 

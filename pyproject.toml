@@ -36,11 +36,12 @@ dependencies = [
 #
 # For the hub image: deps flow through one of two paths —
 #   1. Pip-installable deps → add to `[project] dependencies` below.
-#      Auto-picked-up by the `pip: - git+https://...algorithms.git` line in
-#      pangeo-notebook-veda-image/environment.yml.
+#      Auto-picked-up by the algorithms install RUN layer in
+#      pangeo-notebook-veda-image/Dockerfile (pinned per variant via
+#      ARG ALGORITHMS_REF: prod→main, dev→dev).
 #   2. Conda-only deps → add to hub-conda-deps.txt at the repo root.
 #      The sync-conda-deps workflow auto-opens a PR in the image repo.
-# Full flow + cache-buster mechanics: docs/HUB_DEPLOYMENT.md.
+# Full flow + per-variant pinning mechanics: docs/HUB_DEPLOYMENT.md.
 # =============================================================================
 
 [project.optional-dependencies]

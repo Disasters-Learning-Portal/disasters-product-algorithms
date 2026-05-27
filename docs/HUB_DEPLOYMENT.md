@@ -7,60 +7,72 @@ pattern that makes algorithm updates actually land.
 
 ```
 disasters-product-algorithms (this repo)
-  push to main
+  push to <branch>
         │
-        │ .github/workflows/trigger-docker-rebuild.yml
+        │ .github/workflows/trigger-docker-rebuild*.yml
         │ fires repository_dispatch with client_payload.sha
         ▼
 pangeo-notebook-veda-image (Disasters-Learning-Portal)
-  .github/workflows/build-and-push.yaml runs
+  .github/workflows/build-and-push*.yaml runs
         │
-        │ jupyter-repo2docker → uses repo's own Dockerfile
-        │ (NOT auto-detected env; the Dockerfile takes precedence)
-        ▼
-  Dockerfile:
+        ├─ Step 1: resolve algorithms ref to a concrete SHA
+        │    - dispatch trigger    → use client_payload.sha
+        │    - direct image push   → gh api .../git/ref/heads/<branch>
+        │      where <branch> = main (prod variant) or dev (dev variant)
+        │
+        └─ Step 2: jupyter-repo2docker (uses repo's own Dockerfile)
+             │
+             ▼
+  Dockerfile (two RUN layers):
     ADD environment.yml environment.yml
     ARG GH_PAT
-    ARG ALGORITHMS_SHA=unknown                  ← cache-buster
-    RUN echo "Building with algorithms SHA: $ALGORITHMS_SHA" && \
-        conda env update --prefix /srv/conda/envs/notebook --file environment.yml ...
+    RUN conda env update ...                          ← Layer 1
+        (env.yml has NO disasters-product-algorithms line;
+         this layer is cached on env.yml contents only)
+    ARG ALGORITHMS_REF=main
+    RUN pip install                                   ← Layer 2
+        "git+https://...algorithms.git@$ALGORITHMS_REF"
+        (cached per unique SHA — algorithm-only changes
+         re-run JUST this small layer, ~30s)
         │
-        │ environment.yml contains:
-        │   pip:
-        │     - git+https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
         ▼
   Image published to Docker Hub as
-    disasters-jupyterhub-docker-image:latest  (and :<sha-12>)
+    disasters-jupyterhub-docker-image[-dev]:latest
 ```
 
-There are three branch-specific variants in the image repo:
-`build-and-push.yaml` (main), `build-and-push-dev.yaml` (dev), and
-`build-and-push-testmerge.yaml` (testMerge). Each is triggered by a matching
-workflow here (`trigger-docker-rebuild*.yml`) and produces a separate Docker
-Hub repo (`...image`, `...image-dev`, `...image-testmerge`).
+Two branch-specific variants in the image repo, each with its own
+default algorithms branch when triggered by a direct push (vs dispatch):
 
-## Why the cache-buster is required
+| Image variant | Workflow file | Default algorithms branch |
+|---|---|---|
+| Prod (`...image`) | `build-and-push.yaml` | `main` |
+| Dev (`...image-dev`) | `build-and-push-dev.yaml` | `dev` |
 
-The Dockerfile's `RUN conda env update` layer is keyed on the contents of
-`environment.yml`. The pip line in that file is unpinned
-(`git+https://.../algorithms.git` — no `@ref`). Without the cache-buster:
+When triggered by `repository_dispatch` (algorithm push), the SHA from
+`client_payload.sha` overrides the branch fallback. So your dev-branch
+push always lands in the dev image at that exact SHA; the prod image is
+unaffected until you merge to main.
 
-1. Push to algorithms `main` fires `repository_dispatch`.
-2. Image-repo workflow runs `jupyter-repo2docker --cache-from=...:latest`.
-3. Docker sees `environment.yml` unchanged → **reuses the cached `RUN` layer**.
-4. No new clone of this repo happens. New algorithm code never lands.
-5. Image is retagged and pushed under a new SHA — same content.
+## How the two-layer install design fixes two old bugs
 
-The symptom: a fresh hub pod is missing `process_satellogic`,
-`process_landsat89`, etc. — because the cached install layer predates when
-the entry points were added. The usual "fix" (`pip install -e .` in a
-notebook terminal) writes the scripts into the conda env, but they're gone
-on the next pod spawn because the image layer is restored from cache.
+Before this design, the Dockerfile had a single `RUN conda env update`
+layer that included the algorithms install (via env.yml's pip block, with
+no `@ref`). Two consequences both bit us:
 
-The cache-buster `ARG ALGORITHMS_SHA` changes per algorithms commit (passed
-via `--build-arg ALGORITHMS_SHA=${{ github.event.client_payload.sha || github.sha }}`),
-which changes the `RUN` layer's cache key, forcing the conda+pip step to
-actually re-execute.
+1. **Docker cached the layer indefinitely.** `env.yml` rarely changed, so
+   Docker reused the cached layer across rebuilds. Algorithm pushes never
+   landed. Symptom: `process_satellogic` etc. missing on fresh hub pods,
+   workaround `pip install -e .` per session. Fixed by giving the
+   algorithms install its own RUN layer cache-keyed on `ALGORITHMS_REF`.
+
+2. **Both image variants installed the same code** (HEAD of algorithms
+   `main` — whatever `pip install git+https://.../algorithms.git`
+   resolves to without a ref). The "dev image" wasn't dev. Fixed by
+   passing per-variant `ALGORITHMS_REF` (`main` for prod, `dev` for dev),
+   resolved to a concrete SHA at workflow time.
+
+Bonus from the split: algorithm-only changes now rebuild a tiny pip-install
+layer (~30s) instead of the full conda env update (~2-3 min).
 
 ## Source of truth files
 
@@ -88,8 +100,9 @@ Need a new dep?
            │
            └── add a line to hub-conda-deps.txt. Push to main.
                The sync-conda-deps workflow opens an auto-PR in
-               pangeo-notebook-veda-image. Review + merge that PR.
-               Next image build picks it up via ALGORITHMS_SHA.
+               pangeo-notebook-veda-image. Review + merge that PR;
+               the next image build picks up the new conda dep on
+               its own (the algorithms install layer is separate).
 ```
 
 You only need to **interact with** the image repo when adding a conda-only
@@ -142,10 +155,11 @@ Order of checks:
      bash -lc 'which process_satellogic && \
                pip show disasters-product-algorithms | grep -E "Version|Location"'
    ```
-4. **`ALGORITHMS_SHA` cache-buster is wired**: confirm
-   `pangeo-notebook-veda-image/Dockerfile` has `ARG ALGORITHMS_SHA` and the
-   three `build-and-push*.yaml` files pass
-   `--build-arg ALGORITHMS_SHA=${{ github.event.client_payload.sha || github.sha }}`.
+4. **`ALGORITHMS_REF` per-variant pinning is wired**: confirm
+   `pangeo-notebook-veda-image/Dockerfile` has the two-layer design
+   (separate `RUN pip install ...@$ALGORITHMS_REF`) and that each
+   `build-and-push*.yaml` has a "Resolve algorithms ref" step + passes
+   `--build-arg ALGORITHMS_REF=${{ steps.algo.outputs.sha }}`.
 
 The `pip install -e .` workaround stays valid for hot-iterating local
 edits inside a single hub session (see [README.md](../README.md) "Development

@@ -18,6 +18,12 @@ dependencies:
   - geoviews-core==1.14.1
   # Working around https://github.com/stac-utils/pystac/issues/1575
   - pystac==1.14.1
+  # The block below is auto-managed by the sync-conda-deps workflow in the
+  # disasters-product-algorithms repo. Source of truth: hub-conda-deps.txt
+  # in that repo. To add a conda-only dep that needs to land in the image,
+  # edit hub-conda-deps.txt there and merge the auto-opened PR. The sync
+  # script REPLACES anything between BEGIN/END, so keep all explanatory
+  # comments OUTSIDE the markers like this one.
   # === BEGIN disasters-product-algorithms managed conda deps (do not edit by hand) ===
   # === END disasters-product-algorithms managed conda deps ===
   - pip

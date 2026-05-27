@@ -93,8 +93,9 @@ jobs:
             [`hub-conda-deps.txt`](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/hub-conda-deps.txt).
 
             **What to do:** Review the diff. If it looks right, merge.
-            The next image build will pick it up via the `ALGORITHMS_SHA`
-            cache-buster wired into the Dockerfile, no other action needed.
+            The next image build will pick up the new conda deps. The
+            algorithms install layer is independent and unaffected by
+            this change.
           branch: sync-conda-deps-from-algorithms
           delete-branch: true
           add-paths: environment.yml

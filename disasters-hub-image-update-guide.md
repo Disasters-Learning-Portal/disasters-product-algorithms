@@ -21,14 +21,17 @@
 >    preferred** — put them in `pyproject.toml`'s `[project] dependencies`
 >    and skip the image repo entirely.
 >
-> 3. **`ARG ALGORITHMS_SHA` cache-buster** in
->    `pangeo-notebook-veda-image/Dockerfile` is what makes algorithm
->    pushes actually land in the next image. Without it, the
->    `RUN conda env update` layer is cached on `environment.yml` contents
->    and the unpinned `git+https://...algorithms.git` install never
->    re-runs. The three `build-and-push*.yaml` workflows pass
->    `--build-arg ALGORITHMS_SHA=${{ github.event.client_payload.sha || github.sha }}`
->    to wire it up.
+> 3. **Two-layer Dockerfile + per-variant `ALGORITHMS_REF`.** The
+>    algorithms install now lives in its own `RUN` layer in
+>    `pangeo-notebook-veda-image/Dockerfile`, separate from
+>    `conda env update`. Each image variant (prod / dev) pins to a
+>    different algorithms branch (`main` / `dev`) via
+>    `--build-arg ALGORITHMS_REF=<sha>`, resolved at workflow time from
+>    the dispatch payload or via `gh api .../git/ref/heads/<branch>`.
+>    So your `dev` push lands in the dev image, your `main` push (or
+>    merge) lands in the prod image. Algorithm-only changes re-build
+>    only the small pip layer (~30s). The pip line that used to live
+>    in `environment.yml` was removed — it lives in the Dockerfile now.
 >
 > See [docs/HUB_DEPLOYMENT.md](docs/HUB_DEPLOYMENT.md) for the corrected
 > deployment story, the decision flow (pip vs conda), auto-sync mechanics,

@@ -12,8 +12,8 @@
 # via .github/workflows/sync-conda-deps.yml: on push to main that touches this
 # file, a PR is opened in the image repo replacing the contents of the
 # `# === BEGIN disasters-product-algorithms managed conda deps ===` block.
-# Review and merge that PR — the next image build then picks up the change
-# via the ALGORITHMS_SHA cache-buster wired into the Dockerfile.
+# Review and merge that PR — the next image build then picks up the new
+# conda dep (the algorithms install layer is independent and unaffected).
 #
 # Pip-first preference:
 #   If a new dep ships a manylinux wheel, prefer adding it to

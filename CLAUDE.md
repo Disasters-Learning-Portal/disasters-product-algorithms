@@ -72,3 +72,13 @@ See `docs/SHARED_UTILS_API.md` for complete function signatures.
 ## Contributing
 
 See `docs/ADDING_FUNCTIONS_TUTORIAL.md` for the end-to-end walkthrough of adding a new `shared_utils` function and wiring it up as a CLI entry point (worked example: `summarize_raster`).
+
+## Disasters Hub deployment (`pangeo-notebook-veda-image`)
+
+- **No `environment.yml` in this repo.** `jupyter-repo2docker` is invoked on the `pangeo-notebook-veda-image` checkout, not this one. The env that ships in the hub image is defined by `pangeo-notebook-veda-image/environment.yml`.
+- **Adding a new dep — pip-first:**
+  - **Pip-installable (has a manylinux wheel)** → add to `[project] dependencies` in `pyproject.toml`. Pushes to `main` flow into the image automatically via the existing `pip: - git+https://...algorithms.git` line + the `ALGORITHMS_SHA` cache-buster. No image-repo touch needed.
+  - **Conda-only (binary lib, GDAL plugin)** → add a line to `hub-conda-deps.txt`. The `.github/workflows/sync-conda-deps.yml` workflow auto-opens a PR in `pangeo-notebook-veda-image` updating the managed block in its `environment.yml`. Review + merge that PR; next image build picks it up.
+- **`pyproject.toml`'s conda-dep comment block** is the DEV-LOCAL install spec (what to `conda install` on your laptop), NOT what the image installs — the image gets its conda deps from the Pangeo base image plus `hub-conda-deps.txt`.
+- **Cache-buster `ARG ALGORITHMS_SHA`** in the image-repo Dockerfile is what makes algorithm pushes actually land in the next image. Without it, the `RUN conda env update` layer is cached on `environment.yml` contents and the unpinned `git+https://...algorithms.git` install never re-runs. If `process_*` CLIs are missing on a fresh hub pod, **check the image-repo build log first**, not local install.
+- Full diagnosis, decision flow, and auto-sync mechanics in `docs/HUB_DEPLOYMENT.md`.

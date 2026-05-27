@@ -1,5 +1,39 @@
 # Disasters Hub Image Update Guide
 
+> ⚠️ **PARTIALLY OUTDATED — read [`docs/HUB_DEPLOYMENT.md`](docs/HUB_DEPLOYMENT.md) first.**
+>
+> This guide is the original setup walkthrough for the two-repo CI/CD flow.
+> The high-level architecture (algorithms repo dispatches → image repo
+> rebuilds → Docker Hub) is still correct, but three things have changed:
+>
+> 1. **`environment.yml` does not live in this repo.** It lives in
+>    `pangeo-notebook-veda-image`. `jupyter-repo2docker` only reads the
+>    env file from the repo it is invoked on (the image repo), so any
+>    env file here is ignored. Step 5 of this guide is wrong on that
+>    point.
+>
+> 2. **Conda dependencies are now managed via `hub-conda-deps.txt`
+>    (at the root of this repo) with auto-PR.** When you push a change
+>    to `hub-conda-deps.txt`, `.github/workflows/sync-conda-deps.yml`
+>    opens a PR in `pangeo-notebook-veda-image` updating a managed
+>    block in its `environment.yml`. Review + merge that PR; no manual
+>    editing of the image repo is needed. **Pip-installable deps are
+>    preferred** — put them in `pyproject.toml`'s `[project] dependencies`
+>    and skip the image repo entirely.
+>
+> 3. **`ARG ALGORITHMS_SHA` cache-buster** in
+>    `pangeo-notebook-veda-image/Dockerfile` is what makes algorithm
+>    pushes actually land in the next image. Without it, the
+>    `RUN conda env update` layer is cached on `environment.yml` contents
+>    and the unpinned `git+https://...algorithms.git` install never
+>    re-runs. The three `build-and-push*.yaml` workflows pass
+>    `--build-arg ALGORITHMS_SHA=${{ github.event.client_payload.sha || github.sha }}`
+>    to wire it up.
+>
+> See [docs/HUB_DEPLOYMENT.md](docs/HUB_DEPLOYMENT.md) for the corrected
+> deployment story, the decision flow (pip vs conda), auto-sync mechanics,
+> and the debug checklist when CLIs go missing on the hub.
+
 A comprehensive guide for updating and maintaining the Disasters Hub Docker image through automated CI/CD pipelines.
 
 ## Table of Contents

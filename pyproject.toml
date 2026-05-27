@@ -19,18 +19,29 @@ dependencies = [
     "s3fs",
 ]
 
-# Note: The following packages should be pre-installed via conda in your environment:
-# - gdal (must match system libgdal version)
-# - rasterio
-# - rio-cogeo
-# - geopandas
-# - pyproj
-# - numpy
-# - scipy
-# - requests
-# - boto3
-# - botocore
-# - tqdm
+# =============================================================================
+# DEV-LOCAL conda-install spec (not the hub-image spec)
+# =============================================================================
+# This block lists the conda packages you need for LOCAL development on a
+# laptop / VM. The Disasters Hub image gets its conda packages from a
+# different place — see hub-conda-deps.txt and docs/HUB_DEPLOYMENT.md.
+#
+# For local dev:
+#   conda install -c conda-forge gdal rasterio rio-cogeo geopandas pyproj \
+#     numpy scipy pillow lxml requests boto3 botocore tqdm psutil fsspec s3fs
+#   pip install -e .
+#
+# Why these aren't in pip dependencies: GDAL and friends require dylib
+# version coupling that pip can't safely manage.
+#
+# For the hub image: deps flow through one of two paths —
+#   1. Pip-installable deps → add to `[project] dependencies` below.
+#      Auto-picked-up by the `pip: - git+https://...algorithms.git` line in
+#      pangeo-notebook-veda-image/environment.yml.
+#   2. Conda-only deps → add to hub-conda-deps.txt at the repo root.
+#      The sync-conda-deps workflow auto-opens a PR in the image repo.
+# Full flow + cache-buster mechanics: docs/HUB_DEPLOYMENT.md.
+# =============================================================================
 
 [project.optional-dependencies]
 test = [

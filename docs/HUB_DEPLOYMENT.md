@@ -142,22 +142,29 @@ re-add them, the markers are literally:
 Don't reach for `pip install -e .` first — that masks the real problem.
 Order of checks:
 
-1. **Image-repo `environment.yml` line 26-ish**: confirm the
-   `git+https://...algorithms.git` line is present.
-2. **Most recent build log on Docker Hub or GH Actions**: look for the
-   `pip install` step and any error from the algorithms-repo install. A
-   build that completes in well under 5 minutes is suspicious — that's
-   probably full-cache reuse, meaning the install didn't actually run.
-3. **The image's installed version**:
+1. **Which image variant did the hub spawn, and which algorithms branch
+   has the CLI?** Prod image installs from `main` HEAD; dev image from
+   `dev` HEAD. If your CLI lives on `dev` and you're on the prod image,
+   you need to merge `dev` → `main` (and wait for the rebuild) before
+   it shows up in prod.
+2. **Most recent build log on GitHub Actions for the image repo**:
+   - Confirm the "Resolve algorithms ref to a concrete SHA" step echoed
+     the SHA you expect (e.g. for the dev image, a SHA on the algorithms
+     `dev` branch).
+   - Confirm the Dockerfile Layer 2 RUN ran (`Installing
+     disasters-product-algorithms@<sha>`) and reported
+     `Successfully installed disasters-product-algorithms-<version>`.
+3. **The image's actually-installed version**:
    ```
-   docker pull <user>/disasters-jupyterhub-docker-image:latest
-   docker run --rm <user>/disasters-jupyterhub-docker-image:latest \
+   docker pull <DOCKER_USERNAME>/disasters-jupyterhub-docker-image:latest
+   docker run --rm <DOCKER_USERNAME>/disasters-jupyterhub-docker-image:latest \
      bash -lc 'which process_satellogic && \
                pip show disasters-product-algorithms | grep -E "Version|Location"'
    ```
 4. **`ALGORITHMS_REF` per-variant pinning is wired**: confirm
    `pangeo-notebook-veda-image/Dockerfile` has the two-layer design
-   (separate `RUN pip install ...@$ALGORITHMS_REF`) and that each
+   (separate `RUN pip install ...@$ALGORITHMS_REF`), `environment.yml`
+   does NOT have a `disasters-product-algorithms` line, and each
    `build-and-push*.yaml` has a "Resolve algorithms ref" step + passes
    `--build-arg ALGORITHMS_REF=${{ steps.algo.outputs.sha }}`.
 
@@ -165,3 +172,81 @@ The `pip install -e .` workaround stays valid for hot-iterating local
 edits inside a single hub session (see [README.md](../README.md) "Development
 in JupyterHub" section), but should never be the answer to "the image is
 broken on every fresh pod."
+
+## Build duration expectations & diagnostic signals
+
+Empirical durations from the 27 May 2026 deployment of this two-layer
+design (cached `--cache-from=...:latest`, runs on `ubuntu-latest`):
+
+| Scenario | Conda env update layer | Algorithms install layer | Total wall-clock |
+|---|---|---|---|
+| Cache-cold (first build, or `env.yml` changed) | ~2-3 min | ~5s (with `--no-deps`) | ~3-4 min |
+| Algorithm-only change (`env.yml` unchanged, new `ALGORITHMS_REF`) | cached, <1s | ~5s | ~1-1.5 min |
+| No-op (re-trigger with same inputs) | cached, <1s | cached, <1s | ~30-60s |
+
+Wall-clock includes GitHub-runner setup, `pip install jupyter-repo2docker`,
+`docker login`, `cache-from` manifest import, and the final `docker push`
+to Docker Hub — typically ~1-1.5 min of overhead independent of the build
+itself.
+
+**Red flags in build logs:**
+- A build that finishes in **under 90 seconds** when you'd expect a real
+  rebuild → cache reused something that shouldn't have been. Check that
+  `ALGORITHMS_REF` differs from the previous successful build, and that
+  the Dockerfile actually references `$ALGORITHMS_REF` in a `RUN`.
+- "Resolve algorithms ref" step prints the wrong SHA (e.g., prod build
+  resolved a dev-branch SHA) → workflow's fallback branch is wrong, or
+  the dispatch payload SHA is bleeding across variants. Check
+  `github.event.client_payload.sha || gh api .../heads/<branch>`.
+- "Installing disasters-product-algorithms@..." line is **missing** from
+  the build log → Layer 2 was cached entirely. Means
+  `ALGORITHMS_REF` is identical to a previous build for this image variant.
+  This is correct behavior; the image content from that previous build
+  is still valid.
+
+## Known limitations / cleanup follow-ups
+
+1. **Image-repo `build-and-push*.yaml` workflows use `on: push:` with no
+   branch filter.** Any push to any branch (including transient PR branches
+   from auto-sync) fires every workflow. Today the auto-PR branch
+   `sync-conda-deps-from-algorithms` triggered 3 spurious builds and even
+   tagged a Docker Hub image off that branch. Fix: add
+   `on: push: branches: [main]` to all three workflows.
+2. **Sync-conda-deps script wipes any comment lines inside the BEGIN/END
+   managed block** in image-repo `environment.yml`. The script treats `#`
+   lines in `hub-conda-deps.txt` as comments-to-skip, so an empty deps
+   list writes a literally-empty block. Mitigation: explanatory comments
+   live OUTSIDE the markers; this is documented inline in `environment.yml`
+   so future contributors don't drop comments back in.
+3. **Stale `disasters-jupyterhub-docker-image-testmerge` Docker Hub repo.**
+   Workflow that built it was deleted in this session; the existing image
+   in Docker Hub will no longer receive updates. Delete manually via the
+   Docker Hub UI if no longer needed.
+4. **Stale `merge-aws-conversion` branch in this repo.** No longer tracked
+   by any trigger workflow. Delete with
+   `git push origin --delete merge-aws-conversion` if no longer needed
+   (destructive — confirm first).
+
+## Design history (short)
+
+The fix landed in two iterations on 27 May 2026 because the first round
+exposed a deeper bug:
+
+1. **First attempt: cache-buster `ARG ALGORITHMS_SHA`** on the single
+   `RUN conda env update` layer. Theory was that the Docker layer was
+   cached forever and pip never re-fetched. The buster did force the
+   layer to re-run — confirmed in build logs — but it still installed
+   algorithms `main` HEAD because the pip line in `environment.yml` had
+   no `@ref`. Every image variant (prod / dev / testmerge) silently
+   pulled the same `main` code regardless of which trigger fired.
+2. **Second attempt (current): two-layer Dockerfile + per-variant
+   `ALGORITHMS_REF`.** Algorithms install moves out of `environment.yml`
+   into its own `RUN` layer, pinned to a SHA the workflow resolves from
+   the dispatch payload or `gh api .../heads/<branch>`. Each variant
+   gets its own concrete branch fallback. Solves both the caching bug
+   and the wrong-branch bug, plus makes algorithm-only rebuilds ~10x
+   faster.
+
+Don't go back to the single-layer design. The `ALGORITHMS_SHA`
+cache-buster will appear to work but won't fix the actual bug, because
+the bug isn't really about caching — it's about WHAT pip resolves.

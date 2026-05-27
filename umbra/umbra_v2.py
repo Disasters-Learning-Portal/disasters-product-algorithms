@@ -226,10 +226,18 @@ def apply_filter(input_tif, size=5, output_tif=None):
         img = src.read(1).astype(float)
         profile = src.profile.copy()
 
+    # preserve nodata mask
+    mask = np.isnan(img)
+
+    # percentile stretch
     if 'rcs' in input_tif:
-        img = np.clip(img, -40, 0)
+        out_min, out_max = -40, 0
     else:
-        img = np.clip(img, -25, 10)
+        out_min, out_max = -25, 10
+
+    p_low, p_high = np.nanpercentile(img, (2, 98))
+
+    img = np.interp(img, (p_low, p_high), (out_min, out_max))
 
     img_mean = uniform_filter(img, (size, size))
     img_sqr_mean = uniform_filter(img**2, (size, size))
@@ -243,7 +251,7 @@ def apply_filter(input_tif, size=5, output_tif=None):
     img_out = img_mean + weights * (img - img_mean)
 
     # restore nodata
-    img_out[np.isnan(img)] = np.nan
+    img_out[mask] = np.nan
 
     if output_tif is None:
         output_tif = input_tif.replace(".tif", "_filtered.tif")

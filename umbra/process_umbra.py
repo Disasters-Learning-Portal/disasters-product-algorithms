@@ -69,8 +69,20 @@ def main():
     parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
     parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
     parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
+    parser.add_argument(
+        '-dst_crs',
+        type=str,
+        default='native',
+        help=(
+            "Target CRS for COG output. 'native' (default) preserves the "
+            "source UTM projection; pass 'EPSG:3857' for Web Mercator "
+            "(required by veda-data-airflow build_stac)."
+        ),
+    )
 
     args = parser.parse_args()
+
+    dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
 
     print("Retrieving Umbra resources...")
     tifs = retrieve_umbra_resources(
@@ -131,6 +143,7 @@ def main():
         cog_path = convert_to_cog(
             outfile,
             nodata=args.nodata,
+            dst_crs=dst_crs_value,
             compression=args.compression,
             compression_level=args.compression_level
         )

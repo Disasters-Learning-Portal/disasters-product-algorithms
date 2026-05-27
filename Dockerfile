@@ -8,7 +8,12 @@ ADD environment.yml environment.yml
 
 # Accept GitHub PAT as build argument and configure git temporarily
 ARG GH_PAT
-RUN if [ -n "$GH_PAT" ]; then \
+# Cache-buster: when the algorithms repo dispatches a rebuild, this changes
+# per-SHA so the RUN layer below is re-executed and pip actually re-fetches
+# disasters-product-algorithms instead of reusing a cached layer.
+ARG ALGORITHMS_SHA=unknown
+RUN echo "Building with algorithms SHA: $ALGORITHMS_SHA" && \
+    if [ -n "$GH_PAT" ]; then \
         git config --global url."https://${GH_PAT}@github.com/".insteadOf "https://github.com/"; \
     fi && \
     conda env update --prefix /srv/conda/envs/notebook --file environment.yml && \

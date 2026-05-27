@@ -24,6 +24,7 @@ jobs:
           --image-name=${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image-dev:${GITHUB_SHA::12} \
           --cache-from=${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image-dev:latest \
           --build-arg GH_PAT=${{ secrets.GH_PAT }} \
+          --build-arg ALGORITHMS_SHA=${{ github.event.client_payload.sha || github.sha }} \
           .
 
         # Tag and push

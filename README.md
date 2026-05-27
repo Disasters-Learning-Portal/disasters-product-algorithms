@@ -268,6 +268,49 @@ from shared_utils import convert_to_cog, rename_with_event
 - **Installation:** Installed from GitHub via pip during build
 - **Documentation:** See [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) for deployment details
 
+### Adding Dependencies — Pip-First, with Auto-Sync for Conda
+
+`jupyter-repo2docker` only reads the `environment.yml` in the repo it is
+invoked on (the image repo). So we never put `environment.yml` here. The
+flow for adding a new dep depends on whether it's pip- or conda-installable:
+
+**Pip-installable dep (has a manylinux wheel) — preferred:**
+
+Add it to `[project] dependencies` in `pyproject.toml` and push to `main`.
+That's it. The image repo's `environment.yml` already has a
+`pip: - git+https://...algorithms.git` line; the dep flows in
+transitively on the next image build (which the `ALGORITHMS_SHA`
+cache-buster guarantees actually re-runs).
+
+**Conda-only dep (binary system lib, specific GDAL plugin, etc.):**
+
+Add a line to `hub-conda-deps.txt` at the repo root and push to `main`.
+The `.github/workflows/sync-conda-deps.yml` workflow auto-opens a PR in
+`pangeo-notebook-veda-image` that updates the managed conda-deps block
+in its `environment.yml`. Review the diff and click-merge that PR — the
+next image build picks the dep up. No manual editing of the image repo
+required.
+
+The conda-dep comment block at the top of `pyproject.toml` is for **local
+dev install** (what to `conda install` on your laptop), not for the hub
+image build.
+
+### Debugging Missing CLIs on the Hub
+
+If `process_landsat89` / `process_sentinel2` / `process_satellogic` are
+**missing on `$PATH`** in a fresh hub session, the cause is almost always
+an image-build issue, not a local install issue:
+
+1. Check `pangeo-notebook-veda-image/environment.yml` for the line
+   `pip: - git+https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git`.
+2. Check the most recent build log on GitHub Actions for the image repo —
+   a build that finishes in well under 5 minutes is suspicious (cache hit).
+3. Confirm the `ARG ALGORITHMS_SHA` cache-buster is wired into the
+   Dockerfile and the `build-and-push*.yaml` workflows.
+
+Reinstalling locally with `pip install -e .` is a single-session workaround,
+not a fix. See `docs/HUB_DEPLOYMENT.md` for the full debugging checklist.
+
 ## Development in JupyterHub
 
 If you want to modify and test the package code within a JupyterHub environment (where the package is pre-installed via Docker), you need to ensure your local edits are used instead of the pre-installed version.

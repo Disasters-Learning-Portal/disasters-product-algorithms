@@ -25,7 +25,12 @@ dependencies:
     - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
     - jupyter-sshd-proxy
     - jupyterlab-bxplorer
-    - git+https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+    # disasters-product-algorithms is intentionally NOT installed here. It's
+    # installed in a separate Dockerfile RUN layer so each image variant
+    # (prod/dev) can pin to its own branch/SHA via
+    # --build-arg ALGORITHMS_REF=<sha>, and so algorithm-only changes can
+    # re-run just that small layer instead of the full conda env update.
+    # See Dockerfile + .github/workflows/build-and-push*.yaml.
 variables:
   TITILER_STAC_ENDPOINT: 'https://openveda.cloud/api/stac'
   TITILER_ENDPOINT: 'https://openveda.cloud/api/raster'

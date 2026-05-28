@@ -43,8 +43,9 @@ Unified package for processing Landsat 8/9 and Sentinel-2 satellite imagery to g
 conda create -n disasters python=3.10
 conda activate disasters
 
-# Install required geospatial packages (MUST be installed via conda):
-conda install -c conda-forge gdal rasterio rio-cogeo geopandas pyproj numpy scipy requests boto3
+# Install required geospatial packages (MUST be installed via conda).
+# Single source of truth for the dep list is dev-conda-deps.txt:
+mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 ```
 
 **Why conda?** The GDAL Python bindings must match your system's libgdal version. Installing GDAL via pip will fail or cause version conflicts. Conda ensures all geospatial libraries are compatible.
@@ -210,18 +211,20 @@ Processed products are saved to an `output/` directory within the input director
 
 ## Dependencies
 
-- Python >= 3.8
-- GDAL (via conda)
-- rasterio (via conda)
-- rio-cogeo (via conda)
-- geopandas (via conda)
-- pyproj (via conda)
-- numpy (via conda)
-- scipy (via conda)
-- Pillow (pip)
-- lxml (pip)
-- requests (via conda)
-- boto3 (via conda)
+Python >= 3.8. The canonical dep lists live in three files, each with a
+distinct audience — see [docs/AUTOMATION.md](docs/AUTOMATION.md) for the
+full decision tree.
+
+| File | Audience |
+|---|---|
+| `pyproject.toml [project.dependencies]` | Pip-installable transitive deps (Pillow, lxml, psutil, fsspec, s3fs). Resolved by `pip install .`. |
+| `dev-conda-deps.txt` | Conda deps for local development + CI smoke tests (geospatial stack: GDAL, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy, etc.). |
+| `image/environment.yml` | Conda env shipped to the JupyterHub Docker image, layered on top of the Pangeo base. Build context is THIS repo (post-consolidation), so the env file lives here. |
+
+Adding a new dep — pick the right file:
+- Has a `manylinux` wheel? → `pyproject.toml [project.dependencies]`.
+- Conda-only AND only for local dev / CI? → `dev-conda-deps.txt`.
+- Conda-only AND needed in the hub image? → `image/environment.yml` under `dependencies:`.
 
 ## Package Structure
 
@@ -229,29 +232,157 @@ Processed products are saved to an `output/` directory within the input director
 disasters-product-algorithms/
 ├── landsat/              # Landsat 8/9 processing
 ├── sentinel2/            # Sentinel-2 processing
-└── shared_utils/         # Shared utilities (COG, GDAL, geotools)
+├── satellogic/           # Satellogic optical processing
+├── umbra/                # Umbra SAR processing
+├── capella/              # Capella SAR processing
+├── raster_tools/         # Sensor-agnostic raster utilities
+├── shared_utils/         # Shared library (COG conversion, S3, validation, metadata)
+├── notebooks/            # Operator-facing Jupyter templates (CLI-subprocess style)
+│   └── testing-notebooks/  # Import-based variants for local dev
+├── image/                # Docker image build context (Dockerfile + env)
+│   ├── Dockerfile        # FROM pangeo/pangeo-notebook:<tag> → conda env → algorithms
+│   ├── environment.yml   # Conda env layered on the Pangeo base
+│   └── scripts/          # Image-test harness (inherited from upstream)
+├── tools/                # Repo-management scripts (consistency lint, etc.)
+└── docs/                 # Deployment guides, automation reference, tutorials
 ```
+
+## Development workflow
+
+### Pre-push checks
+
+Before pushing changes that touch a sensor directory (`<sensor>/`),
+`pyproject.toml [project.scripts]`, or
+`[tool.setuptools.packages.find].include`, run the consistency lint locally:
+
+```bash
+python tools/check_sensor_consistency.py
+# OK: 5 sensor(s) consistent with pyproject.toml:
+#   - capella/, landsat/, satellogic/, sentinel2/, umbra/
+```
+
+The same script runs in CI via `.github/workflows/lint.yml`. PRs that break
+the pyproject ↔ sensor-dir consistency invariant fail the `sensor-consistency`
+job before merging.
+
+A second CI job, `cli-smoke`, installs the algorithms package in a clean conda
+env (deps from `dev-conda-deps.txt`), then runs two checks: a bare
+`python -c "import <sensor>"` for every sensor dir (forces the full
+module-load path — catches broken `__init__.py` star-imports that `--help`
+would short-circuit past), followed by `--help` on every registered
+console script. Together these catch the bug class where a console
+script is registered in `pyproject.toml` but its package isn't listed in
+`[tool.setuptools.packages.find].include` (`pip install` silently skips
+the package, leaving an unresolvable shim in `bin/`), plus broken
+re-exports that argparse-exit would mask.
+
+Full automation reference: see [docs/AUTOMATION.md](docs/AUTOMATION.md).
+
+### Pre-commit hook (optional)
+
+To run the consistency lint automatically at `git commit` time — instead of
+waiting on CI ~10 min later — install [`pre-commit`](https://pre-commit.com/)
+once per clone:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The repo ships `.pre-commit-config.yaml` with one local hook that runs
+`python tools/check_sensor_consistency.py` on every commit. Sub-second
+runtime; if the lint flags an inconsistency, the commit is aborted and
+you fix locally before pushing. CI still runs the same check as a backstop
+for contributors who haven't installed the hook.
+
+### Notebook conventions
+
+All workflow notebooks under `notebooks/` declare a `TARGET_CRS` variable
+near the top of their config cell:
+
+```python
+# Set CRS for COG output
+TARGET_CRS = None
+# TARGET_CRS = "EPSG:3857"
+```
+
+`None` (the default) preserves the source projection of the input rasters.
+The commented `"EPSG:3857"` line is provided for operators who need Web
+Mercator output for downstream consumers — most notably `veda-data-airflow`'s
+`build_stac` task, which trips on the WGS 84 ensemble + lat-first axis bug
+when input COGs are in `EPSG:4326`.
+
+The variable forwards into the CLI invocation:
+
+```python
+process_cmd = [
+    "process_capella",
+    ...
+    "-dst_crs", TARGET_CRS if TARGET_CRS else "native",
+]
+```
+
+`"native"` is the sentinel string every sensor CLI maps back to `None`.
+
+### Adding a new sensor
+
+Short version: run the scaffolder, then implement the calibration math.
+See [docs/ADDING_A_NEW_SENSOR.md](docs/ADDING_A_NEW_SENSOR.md) for the full
+guide, including notebook conventions and conda-dep decisions.
+
+```bash
+python tools/new_sensor.py spire
+# Creates spire/{__init__.py,cli.py,process_spire.py,spire_v2.py}
+# Updates pyproject.toml: process_spire script + "spire*" include glob
+# Creates notebooks/spire_workflow.ipynb + the testing variant
+# Runs tools/check_sensor_consistency.py as a post-condition
+
+# Implement the calibration math:
+$EDITOR spire/spire_v2.py
+```
+
+`tools/new_sensor.py` validates the sensor name, refuses to clobber an
+existing sensor, and rolls back all writes if the post-condition check
+fails — so the scaffolder either produces a fully-wired sensor or leaves
+the repo untouched. CI lint (`tools/check_sensor_consistency.py`) catches
+the same bugs at PR time as a backstop. For lower-level `shared_utils`
+contributions that aren't a full sensor pipeline, see
+[docs/ADDING_FUNCTIONS_TUTORIAL.md](docs/ADDING_FUNCTIONS_TUTORIAL.md).
 
 ## Docker Integration
 
-This package is automatically integrated into the [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) Docker image for use on VEDA JupyterHub instances.
+This repo builds the JupyterHub Docker image used on the Disasters Hub
+(`hub.disasters.2i2c.cloud`) via the two GitHub Actions workflows in
+`.github/workflows/build-and-push{,-dev}.yaml`. Pre-consolidation the image
+build lived in a separate `pangeo-notebook-veda-image` repo with cross-repo
+dispatch; the two repos were collapsed into this one via `git subtree`
+(history preserved under `image/`).
 
 ### Automatic Rebuilds
 
-When code is pushed to the `main` branch of this repository, the Docker image is automatically rebuilt to include the latest changes. This is accomplished through a GitHub Actions workflow that triggers the pangeo-notebook-veda-image build pipeline.
+Per-branch trigger:
 
-**Monitor build status:**
-- [pangeo-notebook-veda-image Actions](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions)
+| Push target | Workflow | Docker Hub tag |
+|---|---|---|
+| `main` | `build-and-push.yaml` | `klesinger/disasters-jupyterhub-docker-image:latest` (+ `:<sha-12>`) |
+| `dev` | `build-and-push-dev.yaml` | `klesinger/disasters-jupyterhub-docker-image-dev:latest` (+ `:<sha-12>`) |
+
+Doc-only changes (`docs/**`, `notebooks/**`, `tests/**`, `tools/**`, `**.md`)
+are filtered out via `paths-ignore` so they don't trigger unnecessary
+rebuilds. Use the `workflow_dispatch` button in the Actions UI to force a
+rebuild manually.
+
+**Monitor build status:** [Actions tab](https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/actions).
 
 ### Using in JupyterHub
 
-The package is pre-installed in VEDA JupyterHub environments. All CLI commands and Python APIs are available without additional installation:
+The package is pre-installed in Disasters Hub environments. All CLI commands and Python APIs are available without additional installation:
 
 ```bash
 # CLI commands available in terminal
 process_landsat89 --help
 process_sentinel2 --help
-download_sentinel2 --help
+process_capella --help
 ```
 
 ```python
@@ -263,66 +394,43 @@ from shared_utils import convert_to_cog, rename_with_event
 
 ### Docker Image Details
 
-- **Base Image:** `pangeo/pangeo-notebook:2025.08.14`
-- **Registry:** Docker Hub (`disasters-jupyterhub-docker-image`)
-- **Installation:** Installed from GitHub via pip during build
-- **Documentation:** See [pangeo-notebook-veda-image](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image) for deployment details
+- **Base Image:** `pangeo/pangeo-notebook:<tag>` (pinned in `image/Dockerfile` line 1). Bumping is a one-line PR.
+- **Registry:** Docker Hub (`klesinger/disasters-jupyterhub-docker-image{,-dev}`).
+- **Build context:** repo root. `image/Dockerfile` is referenced via `docker build -f image/Dockerfile .`. `.dockerignore` at the repo root strips `notebooks/`, `docs/`, `tests/`, `.github/`, etc.
+- **Algorithms install:** `pip install --no-deps /srv/repo/algorithms` where `/srv/repo/algorithms` is the COPYed local checkout (NOT cloned from GitHub — no `GH_PAT` needed).
 
-### Adding Dependencies — Pip-First, with Auto-Sync for Conda
+### Adding Dependencies — Pick One File
 
-`jupyter-repo2docker` only reads the `environment.yml` in the repo it is
-invoked on (the image repo). So we never put `environment.yml` here. The
-flow for adding a new dep depends on whether it's pip- or conda-installable:
+The Dependency section above lists three places. Quick decision tree:
 
-**Pip-installable dep (has a manylinux wheel) — preferred:**
+- **Pip-installable (has manylinux wheel):** `pyproject.toml [project.dependencies]`.
+- **Conda-only, only needed locally (CI smoke / your laptop):** `dev-conda-deps.txt`.
+- **Conda-only, needed in the hub image:** `image/environment.yml` under `dependencies:`.
 
-Add it to `[project] dependencies` in `pyproject.toml` and push to the
-branch that the relevant image variant tracks (prod=`main`, dev=`dev`).
-That's it — the dep flows in transitively on the next image build,
-because the image-repo `Dockerfile` has a dedicated algorithms install
-layer pinned to that branch's SHA via `--build-arg ALGORITHMS_REF`.
+The conda-dep comment block at the top of `pyproject.toml` is for **local dev install** convenience, not for the hub image build.
 
-**Conda-only dep (binary system lib, specific GDAL plugin, etc.):**
+### Pulling Upstream Image Changes
 
-Add a line to `hub-conda-deps.txt` at the repo root and push to `main`.
-The `.github/workflows/sync-conda-deps.yml` workflow auto-opens a PR in
-`pangeo-notebook-veda-image` that updates the managed conda-deps block
-in its `environment.yml`. Review the diff and click-merge that PR — the
-next image build picks the dep up. No manual editing of the image repo
-required.
+The `image/` subtree was originally imported from `NASA-IMPACT/pangeo-notebook-veda-image`. To pull future upstream commits (rare; ~3 commits in 5 months historically):
 
-The conda-dep comment block at the top of `pyproject.toml` is for **local
-dev install** (what to `conda install` on your laptop), not for the hub
-image build.
+```bash
+git subtree pull --prefix=image \
+  https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image.git main \
+  --squash
+```
+
+The archived `Disasters-Learning-Portal/pangeo-notebook-veda-image` fork's remote URL stays valid for this purpose. To upgrade the Pangeo base image, edit the `FROM pangeo/pangeo-notebook:<tag>` line in `image/Dockerfile` directly.
 
 ### Debugging Missing CLIs on the Hub
 
-If `process_landsat89` / `process_sentinel2` / `process_satellogic` are
-**missing on `$PATH`** in a fresh hub session, the cause is almost always
-"wrong branch on wrong image variant," not a local-install issue.
+If `process_<sensor>` is missing on `$PATH` in a fresh hub session, the cause is almost always a build failure or paths-ignore mismatch — NOT a local-install issue. Order of checks:
 
-Each hub image variant pins to a different algorithms branch:
+1. **Did the latest commit on the relevant branch trigger a build?** Doc-only changes are paths-ignored. If your CLI addition was in the same commit as a doc edit, the build still fires; if it was purely a doc commit, no rebuild.
+2. **Did the build workflow run pass?** `gh run list --branch <main|dev> --workflow=build-and-push.yaml --limit 3`. If it failed, fix the underlying issue (often a Dockerfile or env.yml problem); CI will rebuild on next push.
+3. **Did the lint workflow pass on the same commit?** `gh run list --branch <main|dev> --workflow=lint.yml --limit 3`. If the consistency lint or smoke test failed, the new sensor's pyproject wiring or imports are broken — fix in algorithms, push, the next build picks it up.
+4. **Is the entry point present in `pyproject.toml [project.scripts]`?** The consistency lint should have caught this, but worth checking on the specific branch.
 
-| Image variant | Algorithms branch installed |
-|---|---|
-| Prod (`disasters-jupyterhub-docker-image:latest`) | `main` HEAD |
-| Dev (`...-dev:latest`) | `dev` HEAD |
-
-Order of checks:
-
-1. **Which image variant is the hub spawning, and which branch has your CLI?**
-   If your CLI was added on `dev` and you're spawning the prod image, you
-   need to merge `dev` → `main` (and wait ~3 min for the rebuild) before
-   it shows up there.
-2. **Most recent build log on GitHub Actions for the image repo** — confirm
-   the right `ALGORITHMS_REF` was resolved (it's echoed in the "Resolve
-   algorithms ref" step) and that the pip install layer ran (look for
-   `Installing disasters-product-algorithms@<sha>` in the Dockerfile RUN).
-3. **Entry point present in `pyproject.toml` `[project.scripts]`** on the
-   relevant branch.
-
-Reinstalling locally with `pip install -e .` is a single-session workaround,
-not a fix. See `docs/HUB_DEPLOYMENT.md` for the full mechanics.
+Reinstalling locally with `pip install -e .` is a single-session workaround, not a fix. See `docs/HUB_DEPLOYMENT.md` for the full mechanics.
 
 ## Development in JupyterHub
 

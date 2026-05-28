@@ -1,0 +1,56 @@
+# =============================================================================
+# Canonical DEV-LOCAL conda dep list
+# =============================================================================
+# Single source of truth for the conda packages needed to develop / lint /
+# test this repo OUTSIDE the hub image (e.g. on a laptop or in CI).
+#
+# Used by:
+#   - .github/workflows/lint.yml (the cli-smoke job reads this file)
+#   - The "How to install for dev" instructions in pyproject.toml and README
+#
+# Format: one conda package spec per non-comment line, exactly as it would
+# appear to `mamba install -c conda-forge` (e.g. "gdal" or "rasterio>=1.3").
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# Adding a new dep:
+#   - Pip-installable (manylinux wheel) → prefer pyproject.toml [project.dependencies].
+#   - Conda-only / native lib / GDAL plugin → add a line here.
+#   - If the hub image also needs the new conda dep ON TOP of Pangeo base,
+#     ALSO add it to hub-conda-deps.txt (which is auto-synced to the image
+#     repo by .github/workflows/sync-conda-deps.yml). hub-conda-deps.txt
+#     covers deps that aren't already in Pangeo base — most things below
+#     ARE in Pangeo base, hence the difference between the two files.
+# =============================================================================
+
+# --- Geospatial stack (GDAL must come from conda, not pip — see hard rule #6) ---
+gdal
+rasterio
+rio-cogeo
+geopandas
+pyproj
+
+# --- Numerical / image processing ---
+numpy
+scipy
+pillow
+lxml
+
+# --- HTTP / AWS ---
+requests
+boto3
+botocore
+
+# --- Progress / utilities ---
+tqdm
+psutil
+fsspec
+s3fs
+
+# --- Scaffolder tooling (tools/new_sensor.py + notebook round-trip) ---
+tomlkit
+jupytext
+nbformat
+
+# --- Local pre-commit hook (runs tools/check_sensor_consistency.py on commit) ---
+# After install: `pre-commit install` wires .pre-commit-config.yaml into git.
+pre-commit

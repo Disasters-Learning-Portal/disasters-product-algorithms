@@ -2,6 +2,18 @@
 
 Complete reference for all functions in the `shared_utils` package.
 
+> **Library vs notebook CRS defaults:** the *library* (`cog_utils.convert_to_cog`,
+> `main_processor.convert_to_cog`, `SimpleProcessor`) defaults to `EPSG:3857`
+> (Web Mercator) because that's the projection `veda-data-airflow`'s
+> `build_stac` accepts without tripping on the WGS 84 ensemble + lat-first
+> axis bug. The *notebook templates* default to `TARGET_CRS = None`
+> (preserve source projection) with a commented `# TARGET_CRS = "EPSG:3857"`
+> hint, so operators consciously opt in to Web Mercator when targeting
+> `build_stac`. Examples in this doc default to `None` because that's what
+> an operator running a notebook will see; pass `'EPSG:3857'` (or just
+> rely on the library default) when piping through `build_stac`. See
+> [CLAUDE.md](../CLAUDE.md) "Critical Constraints" for the full rationale.
+
 ## Table of Contents
 
 - [High-Level Interfaces](#high-level-interfaces)
@@ -87,7 +99,10 @@ results = quick_process({
     'bucket': 'nasa-disasters',
     'source_path': 'drcs_activations/202510_Flood_AK/sentinel2',
     'destination_base': 'drcs_activations_new',
-    'target_crs': 'EPSG:4326',   # or None to keep original CRS
+    'target_crs': None,          # preserve source CRS (notebook default).
+                                  # Use 'EPSG:3857' if the output COG will be
+                                  # consumed by veda-data-airflow's build_stac
+                                  # (which trips on the EPSG:4326 ensemble).
     'overwrite': False,
 })
 ```

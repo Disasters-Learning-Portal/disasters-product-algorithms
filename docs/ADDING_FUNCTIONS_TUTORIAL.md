@@ -335,9 +335,47 @@ matching this repo.
 - [ ] Entry point added to `[project.scripts]` and package included
       in `[tool.setuptools.packages.find]`.
 - [ ] `pip install -e .` re-run; `<command> --help` works.
+- [ ] Local lint passes: `python tools/check_sensor_consistency.py`
+      (skips files that aren't sensor pipelines; runs in <1s).
+- [ ] CI expected to pass: `lint.yml` runs `sensor-consistency` +
+      `cli-smoke` on every PR. Confirm green before requesting review.
 - [ ] Public API entry added to
       [docs/SHARED_UTILS_API.md](SHARED_UTILS_API.md) so the next
       contributor finds it.
 
 That last item is the easiest one to skip and the one operators will
 thank you for most.
+
+---
+
+## Part 5 — CI safety net
+
+Once your branch is pushed, `.github/workflows/lint.yml` runs two CI jobs
+automatically:
+
+1. **`sensor-consistency`** — runs `python tools/check_sensor_consistency.py`,
+   which asserts that every top-level dir containing `cli.py` + `process_*.py`
+   has matching `[project.scripts]` and `[tool.setuptools.packages.find].include`
+   entries. If your contribution is a new sensor pipeline (not just a
+   `shared_utils` function), this job catches the missing-entry bug class.
+2. **`cli-smoke`** — bootstraps a conda env from `dev-conda-deps.txt`,
+   `pip install .`, then runs `--help` on every registered console script.
+   Catches the class of bugs where a script is registered in `pyproject.toml`
+   but its package isn't importable (the `ModuleNotFoundError` that broke
+   the initial capella rollout — see
+   [docs/AUTOMATION.md §Post-mortems](AUTOMATION.md#post-mortems)).
+
+Run the same consistency check locally before pushing:
+
+```bash
+python tools/check_sensor_consistency.py
+```
+
+For non-sensor `shared_utils` contributions (the worked example above),
+neither lint job needs anything special — `cli-smoke` exercises any code
+path your new function is called from via the existing console scripts.
+
+If you're adding a full sensor pipeline rather than a `shared_utils`
+function, follow [ADDING_A_NEW_SENSOR.md](ADDING_A_NEW_SENSOR.md) instead;
+this tutorial focuses on the lower-level case (a new helper inside
+`shared_utils/`).

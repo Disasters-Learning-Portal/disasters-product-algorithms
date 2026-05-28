@@ -4,7 +4,21 @@ This document explains how to configure automatic Docker image rebuilds when cod
 
 ## Overview
 
-When code is pushed to the `main` branch, a GitHub Actions workflow automatically triggers a rebuild of the `pangeo-notebook-veda-image` Docker image. This ensures the JupyterHub environment always has the latest version of the `disasters-product-algorithms` package.
+When code is pushed to the `main` or `dev` branch, a **single** GitHub Actions
+workflow (`.github/workflows/trigger-docker-rebuild.yml`) automatically
+triggers a rebuild of the `pangeo-notebook-veda-image` Docker image. This
+ensures the JupyterHub environment always has the latest version of the
+`disasters-product-algorithms` package.
+
+The same workflow file handles both branches. At dispatch time it selects:
+
+| Branch | Token secret | `repository_dispatch` event type | Image variant |
+|---|---|---|---|
+| `main` | `PANGEO_REBUILD_TOKEN` | `algorithm-updated` | Prod (`disasters-jupyterhub-docker-image:latest`) |
+| `dev` | `PANGEO_REBUILD_TOKEN_DEV` | `algorithm-updated-dev` | Dev (`...-dev:latest`) |
+
+**Both secrets are required.** They were two separate workflows historically
+(Rec 2 of the automation audit, May 2026, collapsed them into one).
 
 ## Prerequisites
 
@@ -31,41 +45,44 @@ When code is pushed to the `main` branch, a GitHub Actions workflow automaticall
 
 5. **IMPORTANT:** Copy the token immediately - you won't be able to see it again!
 
-### Step 2: Add Secret to disasters-product-algorithms Repository
+### Step 2: Add BOTH Secrets to disasters-product-algorithms Repository
+
+The consolidated workflow uses **two** secrets — one per branch. You can use
+the same PAT for both, or generate two PATs and scope them differently for
+audit clarity. Both names must match exactly:
 
 1. Navigate to the repository settings:
    - https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/settings/secrets/actions
 
-2. Click **"New repository secret"**
-
-3. Configure the secret:
+2. Click **"New repository secret"** and add:
    - **Name:** `PANGEO_REBUILD_TOKEN`
    - **Value:** Paste the Personal Access Token from Step 1
+   - Used by the workflow when `github.ref == 'refs/heads/main'`.
 
-4. Click **"Add secret"**
+3. Click **"New repository secret"** again and add:
+   - **Name:** `PANGEO_REBUILD_TOKEN_DEV`
+   - **Value:** Same PAT (or a separate one) — needs the same `repo` scope.
+   - Used by the workflow when `github.ref == 'refs/heads/dev'`.
 
-### Step 3: Update pangeo-notebook-veda-image Workflow
+4. Click **"Add secret"** for each.
 
-The `pangeo-notebook-veda-image` repository needs to accept `repository_dispatch` triggers.
+### Step 3: pangeo-notebook-veda-image Workflows
 
-1. Navigate to: https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image
+The `pangeo-notebook-veda-image` repository must accept `repository_dispatch`
+triggers for **both** event types — this is already configured on the image-
+repo side. The prod build (`build-and-push.yaml`) listens for
+`algorithm-updated`; the dev build (`build-and-push-dev.yaml`) listens for
+`algorithm-updated-dev`. The on-block looks like:
 
-2. Edit `.github/workflows/build-and-push.yaml`
+```yaml
+on:
+  push:
+  repository_dispatch:
+    types: [algorithm-updated]      # or algorithm-updated-dev for the dev build
+```
 
-3. Change the trigger from:
-   ```yaml
-   on: [push]
-   ```
-
-   To:
-   ```yaml
-   on:
-     push:
-     repository_dispatch:
-       types: [algorithm-updated]
-   ```
-
-4. Commit the changes
+No further action needed here unless the image-repo side breaks. If you're
+setting this up from scratch on a new image repo, mirror that shape.
 
 ### Step 4: Test the Integration
 
@@ -101,11 +118,15 @@ sequenceDiagram
 
 ### Workflow Details
 
-1. **Push to main** triggers `.github/workflows/trigger-docker-rebuild.yml`
-2. **Workflow sends API request** to `pangeo-notebook-veda-image` repository
-3. **repository_dispatch event** triggers the Docker build
-4. **Docker image is built** with the latest code from GitHub
-5. **Image is pushed** to Docker Hub with tags `latest` and commit SHA
+1. **Push to `main` or `dev`** triggers `.github/workflows/trigger-docker-rebuild.yml`.
+2. **Workflow picks token + event_type** based on `github.ref`:
+   `main` → `PANGEO_REBUILD_TOKEN` + `algorithm-updated`;
+   `dev` → `PANGEO_REBUILD_TOKEN_DEV` + `algorithm-updated-dev`.
+3. **API request** sent to `pangeo-notebook-veda-image` repository.
+4. **`repository_dispatch` event** triggers the matching Docker build
+   (prod or dev variant).
+5. **Docker image is built** with the latest code from GitHub.
+6. **Image is pushed** to Docker Hub with tags `latest` and commit SHA.
 
 ### Files Excluded from Triggers
 
@@ -124,7 +145,9 @@ Only changes to actual source code (`landsat/`, `sentinel/`, `shared_utils/`) tr
 **Cause:** The PAT is invalid, expired, or not set correctly
 
 **Solution:**
-1. Verify the secret is named exactly `PANGEO_REBUILD_TOKEN`
+1. Verify the secret is named exactly `PANGEO_REBUILD_TOKEN` (for `main`
+   pushes) or `PANGEO_REBUILD_TOKEN_DEV` (for `dev` pushes). The workflow
+   selects between them based on `github.ref`.
 2. Check the PAT hasn't expired
 3. Ensure the PAT has `repo` scope
 4. Regenerate the PAT if needed
@@ -136,7 +159,8 @@ Only changes to actual source code (`landsat/`, `sentinel/`, `shared_utils/`) tr
 **Solution:**
 1. Verify Step 3 was completed
 2. Check the workflow file includes `repository_dispatch` trigger
-3. Ensure the event type matches: `algorithm-updated`
+3. Ensure the event type matches: `algorithm-updated` (for `main` pushes)
+   or `algorithm-updated-dev` (for `dev` pushes).
 
 ### Build triggers but fails
 
@@ -197,4 +221,4 @@ For issues or questions:
 
 ---
 
-Last updated: January 2025
+Last updated: May 2026 (Rec 2 — consolidated single workflow handles both `main` and `dev`).

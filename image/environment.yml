@@ -1,0 +1,44 @@
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - ipykernel
+  # Dependencies for sentintel-2 scripts
+  - p7zip==16.02
+  - libgdal-jp2openjpeg==3.10.3
+  # Dependencies for VS Code IDE
+  - code-server>=3.2
+  - jupyter-vscode-proxy
+  - openssh
+  - pre_commit
+  # Remove once Pangeo has upstream.
+  - virtualizarr>=2.0.0
+  - icechunk
+  # Working around https://github.com/holoviz/geoviews/pull/794
+  - geoviews-core==1.14.1
+  # Working around https://github.com/stac-utils/pystac/issues/1575
+  - pystac==1.14.1
+  # Add new conda-only packages here. Pre-consolidation, packages ON TOP of
+  # Pangeo base were tracked in `hub-conda-deps.txt` at the algorithms repo
+  # root + auto-synced into a managed block in this file via the
+  # `sync-conda-deps.yml` workflow. Both are gone after the image-repo
+  # consolidation — this file is now the single source of truth for
+  # hub-image conda deps. The Pangeo base image (pangeo/pangeo-notebook:<tag>)
+  # provides GDAL, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy,
+  # boto3, etc., so most things don't need a line here.
+  - pip
+  - pip:
+    - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
+    - jupyter-sshd-proxy
+    - jupyterlab-bxplorer
+    # disasters-product-algorithms is intentionally NOT installed here. It's
+    # installed in a separate Dockerfile RUN layer via
+    # `pip install --no-deps /srv/repo/algorithms`, which uses the local
+    # checkout (the algorithms repo IS the build context post-consolidation).
+    # See image/Dockerfile.
+variables:
+  TITILER_STAC_ENDPOINT: 'https://openveda.cloud/api/stac'
+  TITILER_ENDPOINT: 'https://openveda.cloud/api/raster'
+  STAC_CATALOG_NAME: 'VEDA STAC'
+  STAC_CATALOG_URL: 'https://openveda.cloud/api/stac'
+  STAC_BROWSER_URL: 'https://openveda.cloud/'

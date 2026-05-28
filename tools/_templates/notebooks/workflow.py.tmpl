@@ -1,0 +1,197 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# ---
+# title: ${Name} Processing Workflow
+# description: ${description}
+# author:
+#   - TBD (Editor, Affiliation)
+# date: TBD
+# execute:
+#    freeze: true
+# ---
+
+# %% [markdown]
+# # Run This Notebook
+
+# %% [markdown]
+# <h3><a href="https://hub.disasters.2i2c.cloud/hub/user-redirect/git-pull?repo=https://github.com/Disasters-Learning-Portal/disasters-docs&urlpath=lab/tree/disasters-docs/Jupyterhub/simple_disaster_template.ipynb&branch=main">Launch in Disasters-Hub JupyterHub (requires access)</a></h3>
+#
+# <h4> To obtain credentials to VEDA Hub, <a href = "https://docs.openveda.cloud/user-guide/scientific-computing/getting-access.html"> follow this link for more information.</a></h4>
+
+# %% [markdown]
+# <div class="alert alert-block" style="
+#      background-color: #f8d7da;
+#      color: #721c24;
+#      border-left: 4px solid #28a745;
+#   ">
+# Disclaimer: it is highly recommended to run a tutorial within NASA VEDA JupyterHub, which already includes functions for processing and visualizing data specific to VEDA stories. Running the tutorial outside of the VEDA JupyterHub may lead to errors, specifically related to EarthData authentication. Additionally, it is recommended to use the Pangeo workspace within the VEDA JupyterHub, since certain packages relevant to this tutorial are already installed. </div>
+
+# %% [markdown]
+# ## Table of Contents
+# - [${Name} Processing Workflow](#${name}-processing-workflow)
+# - [Environment Setup](#environment-setup)
+# - [Process ${Name} Data](#process-${name}-data)
+# - [View Results](#view-results)
+# - [Next Steps](#next-steps)
+
+# %% [markdown]
+# # ${Name} Processing Workflow #
+#
+# This notebook demonstrates the complete workflow for retrieving and processing ${Name} imagery using the `disasters-product-algorithms` package.
+#
+# ## Workflow Steps
+# 1. **Configure Environment Variables** - Set processing parameters
+# 2. **Process ${Name} Data** - Generate products with COG conversion and optional filtering
+# 3. **View Results** - Examine the generated outputs
+
+# %% [markdown]
+# # Environment Setup #
+#
+# Configure all processing parameters as environment variables for easy modification.
+
+# %%
+import os
+import subprocess
+
+# ${Name} date format
+DATE = "20260418193305"  # YYYYMMDDHHMMSS
+
+# Products to generate (extend as the ${name} pipeline grows)
+PRODUCTS = {
+    "sigma": True,
+}
+
+# Filter control
+FILTERS = {
+    "sigma": False,
+}
+
+FILTER_SIZE = 3
+
+OUTPUT_DIR = "/tmp/s3_temp"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# COG options
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 22
+NODATA = 0
+
+# Target CRS for the output COG.
+# None preserves the source projection (fastest, no warp).
+# Uncomment the EPSG:3857 line if you plan to push the COG through
+# veda-data-airflow's build_stac, which trips on the EPSG:4326 ensemble.
+TARGET_CRS = None
+# TARGET_CRS = "EPSG:3857"
+
+print("Configuration:")
+print(f"  Date: {DATE}")
+print(f"  Product: {PRODUCTS}")
+print(f"  Output Directory: {OUTPUT_DIR}")
+
+# %% [markdown]
+# # Process ${Name} Data #
+#
+# Process the downloaded imagery to generate various products with COG conversion and event naming.
+
+# %%
+process_cmd = [
+    "process_${name}",
+    "-h",
+]
+
+help_flags = subprocess.run(process_cmd, cwd=os.getcwd())
+print(help_flags)
+
+# %%
+for PRODUCT, ENABLED in PRODUCTS.items():
+
+    if not ENABLED:
+        continue
+
+    process_cmd = [
+        "process_${name}",
+        "--product", PRODUCT,
+        "--date", DATE,
+        "--output", OUTPUT_DIR,
+        "-compression", COMPRESSION,
+        "-compression_level", str(COMPRESSION_LEVEL),
+        "-dst_crs", TARGET_CRS if TARGET_CRS else "native",
+    ]
+
+    if NODATA is not None:
+        process_cmd.extend(["-nodata", str(NODATA)])
+
+    if FILTERS.get(PRODUCT, False):
+        process_cmd.append("--apply_filter")
+        process_cmd.extend(["--filter_size", str(FILTER_SIZE)])
+
+    print(f"Processing ${Name} data: {PRODUCT}...")
+    print(f"Command: {' '.join(process_cmd)}\n")
+
+    process = subprocess.Popen(
+        process_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        bufsize=1,
+    )
+
+    for line in process.stdout:
+        print(line, end="")
+
+    return_code = process.wait()
+
+    if return_code == 0:
+        print("\n${Name} processing completed successfully.\n")
+    else:
+        print(f"\n${Name} processing failed with return code {return_code}\n")
+
+# %% [markdown]
+# # View Results #
+#
+# Examine the generated output files.
+
+# %%
+import glob
+import rasterio
+import matplotlib.pyplot as plt
+import numpy as np
+
+output_dir = os.path.abspath(OUTPUT_DIR)
+
+tif_files = sorted([
+    f for f in glob.glob(os.path.join(output_dir, "**/*.tif"), recursive=True)
+    if not f.endswith(".tmp.tif")
+])
+
+for tif_file in tif_files:
+    print(f"\nDisplaying: {os.path.basename(tif_file)}")
+    with rasterio.open(tif_file) as src:
+        arr = src.read(1).astype(float)
+        plt.figure(figsize=(8, 8))
+        vmin, vmax = np.nanpercentile(arr, (2, 98))
+        plt.imshow(arr, cmap="gray", vmin=vmin, vmax=vmax)
+        plt.colorbar()
+        plt.title(os.path.basename(tif_file))
+        plt.axis("off")
+        plt.show()
+
+# %% [markdown]
+# # Next Steps #
+#
+# You can now:
+# 1. Load and visualize the GeoTIFF files using libraries like `rasterio` or `GDAL`.
+# 2. Upload the COG files to cloud storage (S3, GCS, etc.).
+# 3. Process additional dates by modifying the configuration variables.

@@ -1,0 +1,129 @@
+name: Lint
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  sensor-consistency:
+    name: Sensor ↔ pyproject consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run consistency lint
+        run: python tools/check_sensor_consistency.py
+
+  cli-smoke:
+    name: pip install + every CLI --help
+    runs-on: ubuntu-latest
+    # Mirror the hub image's setup: conda for GDAL, then `pip install .`.
+    # See .clinerules.md hard rule #6 — pip-only GDAL breaks dylib loads.
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: '3.12'
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: smoke
+      - name: Install GDAL + core deps from conda
+        # Single source of truth: dev-conda-deps.txt at repo root. Add new
+        # conda deps there and the next CI run picks them up automatically.
+        run: |
+          deps=$(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
+          echo "Installing: $deps"
+          mamba install -y -c conda-forge $deps
+      - name: Install algorithms package
+        # No --no-deps: lets pip realise [project.dependencies] are already
+        # satisfied by the conda install above, and installs the package itself.
+        run: pip install .
+      - name: Import-test every sensor package
+        # Catches the bug class where `<sensor>/__init__.py` star-imports a
+        # symbol that doesn't exist (or pulls in a module that fails to load)
+        # but `--help` short-circuits past it via argparse-exit. A bare
+        # `import <sensor>` forces the full module-load path to execute.
+        # Mirrors the per-script smoke loop's style: explicit rc capture,
+        # `bash {0}` to drop errexit, manual conda activation.
+        shell: bash {0}
+        run: |
+          set -uo pipefail
+          source /usr/share/miniconda3/etc/profile.d/conda.sh || \
+            source "$CONDA/etc/profile.d/conda.sh"
+          conda activate smoke
+          # Find sensor dirs the same way tools/check_sensor_consistency.py does:
+          # top-level dirs (non-hidden, non-underscore-prefixed) containing
+          # cli.py + at least one process_*.py.
+          sensors=$(python -c "
+          from pathlib import Path
+          for p in sorted(Path('.').iterdir()):
+              if p.is_dir() and not p.name.startswith(('.', '_')) \
+                 and (p/'cli.py').exists() \
+                 and any(p.glob('process_*.py')):
+                  print(p.name)
+          ")
+          failed=0
+          for sensor in $sensors; do
+            echo ""
+            echo "--- import $sensor ---"
+            output=$(python -c "import $sensor" 2>&1)
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "$output"
+              echo "::error::import $sensor failed (exit $rc)"
+              failed=1
+            else
+              echo "(... ok)"
+            fi
+          done
+          echo ""
+          echo "===== Import-test summary: failed=$failed ====="
+          exit $failed
+      - name: Smoke-test every registered console script
+        # Disable errexit so per-script failures don't kill the loop silently.
+        # We capture rc + output explicitly per iteration — the previous
+        # `if ! cmd > /dev/null 2>&1` pattern interacted badly with
+        # `bash -el` and swallowed all error output.
+        shell: bash {0}
+        run: |
+          set -uo pipefail
+          # Source of truth for which scripts exist: [project.scripts] in pyproject.toml.
+          # We don't hardcode the list here — adding a new sensor must also add it
+          # to pyproject, which is enforced by the sensor-consistency job above.
+          scripts=$(python -c "
+          import tomllib, pathlib
+          p = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          for name in p['project']['scripts']:
+              print(name)
+          ")
+          # Activate the conda env (lost when we override `shell:` above).
+          source /usr/share/miniconda3/etc/profile.d/conda.sh || \
+            source "$CONDA/etc/profile.d/conda.sh"
+          conda activate smoke
+          failed=0
+          for script in $scripts; do
+            echo ""
+            echo "─── $script --help ───"
+            output=$("$script" --help 2>&1)
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "$output"
+              echo "::error::$script --help failed (exit $rc)"
+              failed=1
+            else
+              # Print first 2 lines of help so the log shows what passed
+              echo "$output" | head -2
+              echo "(... ok, exit 0)"
+            fi
+          done
+          echo ""
+          echo "===== Summary: failed=$failed ====="
+          exit $failed

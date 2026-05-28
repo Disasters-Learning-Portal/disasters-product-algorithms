@@ -47,7 +47,13 @@ jobs:
         # satisfied by the conda install above, and installs the package itself.
         run: pip install .
       - name: Smoke-test every registered console script
+        # Disable errexit so per-script failures don't kill the loop silently.
+        # We capture rc + output explicitly per iteration — the previous
+        # `if ! cmd > /dev/null 2>&1` pattern interacted badly with
+        # `bash -el` and swallowed all error output.
+        shell: bash {0}
         run: |
+          set -uo pipefail
           # Source of truth for which scripts exist: [project.scripts] in pyproject.toml.
           # We don't hardcode the list here — adding a new sensor must also add it
           # to pyproject, which is enforced by the sensor-consistency job above.
@@ -57,14 +63,26 @@ jobs:
           for name in p['project']['scripts']:
               print(name)
           ")
+          # Activate the conda env (lost when we override `shell:` above).
+          source /usr/share/miniconda3/etc/profile.d/conda.sh || \
+            source "$CONDA/etc/profile.d/conda.sh"
+          conda activate smoke
           failed=0
           for script in $scripts; do
+            echo ""
             echo "─── $script --help ───"
-            if ! $script --help > /dev/null 2>&1; then
-              # Re-run to show the actual error for the CI log
-              $script --help || true
-              echo "::error::$script --help failed"
+            output=$("$script" --help 2>&1)
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "$output"
+              echo "::error::$script --help failed (exit $rc)"
               failed=1
+            else
+              # Print first 2 lines of help so the log shows what passed
+              echo "$output" | head -2
+              echo "(... ok, exit 0)"
             fi
           done
+          echo ""
+          echo "===== Summary: failed=$failed ====="
           exit $failed

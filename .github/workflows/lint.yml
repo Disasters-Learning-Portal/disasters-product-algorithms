@@ -36,12 +36,16 @@ jobs:
           channel-priority: strict
           activate-environment: smoke
       - name: Install GDAL + core deps from conda
+        # Canonical conda-install spec mirrors the "DEV-LOCAL conda-install
+        # spec" comment block in pyproject.toml. Keep these two in sync.
         run: |
           mamba install -y -c conda-forge \
-            gdal rasterio rio-cogeo numpy scipy pyproj \
-            geopandas shapely boto3 pillow psutil fsspec s3fs
+            gdal rasterio rio-cogeo geopandas pyproj \
+            numpy scipy pillow lxml requests boto3 botocore tqdm psutil fsspec s3fs
       - name: Install algorithms package
-        run: pip install . --no-deps
+        # No --no-deps: lets pip realise [project.dependencies] are already
+        # satisfied by the conda install above, and installs the package itself.
+        run: pip install .
       - name: Smoke-test every registered console script
         run: |
           # Source of truth for which scripts exist: [project.scripts] in pyproject.toml.

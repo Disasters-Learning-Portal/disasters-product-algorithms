@@ -10,6 +10,7 @@ import tempfile
 import rasterio
 import numpy as np
 from typing import Optional, Union, Tuple
+import shutil
 
 
 def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = None) -> Union[int, float]:
@@ -449,7 +450,9 @@ def convert_to_cog(
         if temp_output != output_cog:
             if os.path.exists(output_cog):
                 os.remove(output_cog)
-            os.rename(temp_output, output_cog)
+            shutil.copy(temp_output, output_cog)
+            os.remove(temp_output)
+            #os.rename(temp_output, output_cog)
 
         # Clean up warped temp file if it was created
         if warped_file and os.path.exists(warped_file):

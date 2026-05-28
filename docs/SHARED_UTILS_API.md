@@ -504,11 +504,9 @@ from shared_utils.reprojection import (
 Returns False for the 99% regional-raster case → no behavior change for sensor pipelines.
 Returns True for global Mollweide, polar stereographic, and similar world-extent sources targeting Web Mercator. `cog_utils.convert_to_cog` consults this automatically when `clip_to_webmerc=None`.
 
-CRS reprojection and COG overview creation.
-
 #### `calculate_transform_parameters(src, dst_crs='EPSG:4326') -> Tuple[transform, width, height]`
 
-Calculate reprojection transform parameters.
+Thin wrapper over `rasterio.warp.calculate_default_transform`. Legacy helper — the `EPSG:4326` parameter default is just this function's signature default and does **not** reflect the project's `EPSG:3857` library default (see `cog_utils.convert_to_cog` / `main_processor.convert_to_cog`). Pass `dst_crs` explicitly when calling.
 
 #### `process_whole_file(src, dst, src_crs, dst_crs, transform, width, height, src_nodata, dst_nodata=None)`
 

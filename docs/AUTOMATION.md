@@ -11,6 +11,8 @@ What's automated today:
 | Concern | Tool | Source |
 |---|---|---|
 | pyproject ↔ sensor-dir consistency | `tools/check_sensor_consistency.py` | Runs locally + in CI |
+| Notebook cell-0 conformance (per-sensor) | `tools/check_sensor_consistency.py` | Runs locally + in CI |
+| New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
 | CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job | CI only |
 | Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild*.yml` | Push to `dev` / `main` |
 | Conda-dep sync to hub image | `.github/workflows/sync-conda-deps.yml` | Push to `main` touching `hub-conda-deps.txt` |
@@ -19,9 +21,8 @@ What's automated today:
 
 What's **not** yet automated (see [Roadmap](#roadmap)):
 
-- Generating a new sensor pipeline from a template (today: `cp -r capella/ <sensor>/`).
-- Notebook conformance lint (header block, `TARGET_CRS` block, no copy-paste leftovers).
 - Pre-commit hook running the consistency lint at `git commit` time.
+- Import smoke (`python -c "import <sensor>"`) on top of the `--help` smoke.
 
 The bug that motivated most of this guide: the [Capella `ModuleNotFoundError` rollout](#capella-modulenotfounderror-cdd1c23--be6693c).
 
@@ -272,41 +273,61 @@ constant change at line ~50.
 These items are planned but not yet shipped. They came out of an
 independent simplicity audit; same end-state, more granular planning.
 
-### Rec 1 — `tools/new_sensor.py` scaffolder (~1 day)
+### Rec 1 — `tools/new_sensor.py` scaffolder — SHIPPED
 
 One command replaces ~8 manual edits:
 
 ```
 $ python tools/new_sensor.py spire
-✓ Created spire/__init__.py
-✓ Created spire/spire_v2.py (stub)
-✓ Created spire/process_spire.py (argparse skeleton, imports from spire.spire_v2)
-✓ Updated pyproject.toml: added "spire*" to packages.find.include
-✓ Updated pyproject.toml: added process_spire to [project.scripts]
-✓ Created notebooks/spire_workflow.ipynb (rendered from template, frontmatter says "Spire")
-✓ Created notebooks/testing-notebooks/spire_workflow.ipynb
-✓ Ran tools/check_sensor_consistency.py: PASS
+  Created spire/__init__.py
+  Created spire/cli.py
+  Created spire/process_spire.py
+  Created spire/spire_v2.py
+  Updated pyproject.toml: added 'spire*' to [tool.setuptools.packages.find].include
+  Updated pyproject.toml: added process_spire = "spire.cli:process_spire_cli" to [project.scripts]
+  Created notebooks/spire_workflow.ipynb
+  Created notebooks/testing-notebooks/spire_workflow.ipynb
+
+Running tools/check_sensor_consistency.py ...
+OK: 6 sensor(s) consistent with pyproject.toml:
+  - capella/, landsat/, satellogic/, sentinel2/, spire/, umbra/
 
 Next steps:
-  1. Edit spire/spire_v2.py — implement retrieve_spire_resources() etc.
+  1. Edit spire/spire_v2.py — implement retrieve_spire_resources(), sigmaCalib(), apply_filter().
   2. Add conda deps to dev-conda-deps.txt if needed.
   3. git add -A && git commit -m "feat(spire): scaffold new sensor"
-  4. Open PR: feature/spire → dev
+  4. Open PR: feat/spire -> dev
 ```
 
-Implementation plan:
+Implementation:
 
-- `tools/new_sensor.py` (~150 lines, stdlib + `tomlkit` for comment-preserving
-  pyproject mutation).
-- `templates/sensor/{__init__.py.jinja, cli.py.jinja, process_<NAME>.py.jinja, <NAME>_v2.py.jinja}`.
-- `templates/sensor/workflow.py.jinja` (jupytext-paired notebook source;
-  `jupytext --to ipynb` after substitution renders the two `.ipynb` files).
-- Extend `tools/check_sensor_consistency.py` to assert `notebooks/<sensor>_workflow.ipynb`
-  exists, parse cell 0 JSON, assert the sensor name appears AND no other
-  sensor names do (catches the Capella "Sentinel-2"/"Umbra" copy-paste leftover
-  bug — see [Post-mortems](#post-mortems)).
+- `tools/new_sensor.py` (~280 lines, stdlib + `tomlkit` for comment-preserving
+  pyproject mutation, `nbformat` for direct `.ipynb` writing).
+- `tools/_templates/sensor/{__init__.py.tmpl, cli.py.tmpl, process_name.py.tmpl, name_v2.py.tmpl}` —
+  rendered via `string.Template` (`${name}` / `${Name}` / `${NAME}` / `${bucket}`).
+- `tools/_templates/notebooks/{workflow.py.tmpl, testing_workflow.py.tmpl}` —
+  jupytext py:percent source. Parsed into `nbformat` cells directly (no
+  jupytext runtime dep, but `jupytext` is in `dev-conda-deps.txt` for
+  contributors who want to round-trip the templates).
+- `tools/check_sensor_consistency.py` extended with notebook conformance:
+  asserts both `notebooks/<sensor>_workflow.ipynb` and the testing variant
+  exist, the sensor name appears in cell 0, and no other sensor name
+  appears in cell 0 (catches the Capella "Sentinel-2"/"Umbra" copy-paste
+  leftover — see [Post-mortems](#post-mortems)).
 
-Bugs 1, 2, and 3 become **structurally impossible** rather than just CI-caught.
+Error paths covered (all exit 1 with no partial writes):
+
+- Sensor directory already exists.
+- `process_<sensor>` or `<sensor>*` already in `pyproject.toml`.
+- Invalid sensor name (non-identifier, hyphen, leading digit, leading
+  underscore, uppercase).
+- Reserved repo dir (`tools`, `shared_utils`, `notebooks`, `docs`, `tests`,
+  `raster_tools`, etc.).
+- Post-condition `check_sensor_consistency.py` fails — the scaffolder
+  rolls back the four sensor files, both notebooks, and the two
+  `pyproject.toml` mutations.
+
+Bugs 1, 2, and 3 are now **structurally impossible** rather than just CI-caught.
 
 ### Rec 2 — Consolidate governance workflows (~2 hours)
 
@@ -401,9 +422,10 @@ mechanism caught the residual references.
 
 **Fix:** bulk-edit during the TARGET_CRS standardization session (`cdd1c23`).
 
-**Prevention:** planned as Rec 1 (`tools/new_sensor.py` + extended
-notebook-conformance check in `tools/check_sensor_consistency.py`).
-Until then, manual review is the only defense.
+**Prevention (shipped):** `tools/new_sensor.py` renders both notebooks
+from a templated, sensor-name-substituted source; the extended
+`tools/check_sensor_consistency.py` (cell-0 conformance check) fails CI
+when any sensor's notebook frontmatter leaks another sensor's name.
 
 ---
 

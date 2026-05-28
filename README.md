@@ -301,33 +301,27 @@ process_cmd = [
 
 ### Adding a new sensor
 
-Short version: copy the freshest sensor pipeline (`capella/`) as a template
-and run the consistency lint. See
-[docs/ADDING_A_NEW_SENSOR.md](docs/ADDING_A_NEW_SENSOR.md) for the full guide,
-including notebook conventions and conda-dep decisions.
+Short version: run the scaffolder, then implement the calibration math.
+See [docs/ADDING_A_NEW_SENSOR.md](docs/ADDING_A_NEW_SENSOR.md) for the full
+guide, including notebook conventions and conda-dep decisions.
 
 ```bash
-cp -r capella/ spire/
-# Edit spire/{__init__.py,cli.py,process_spire.py,spire_v2.py} — replace
-# the literal string "capella" with "spire" throughout, then implement
-# your sensor-specific S3 retrieval + calibration math.
+python tools/new_sensor.py spire
+# Creates spire/{__init__.py,cli.py,process_spire.py,spire_v2.py}
+# Updates pyproject.toml: process_spire script + "spire*" include glob
+# Creates notebooks/spire_workflow.ipynb + the testing variant
+# Runs tools/check_sensor_consistency.py as a post-condition
 
-# Wire pyproject.toml: add `process_spire = "spire.cli:process_spire_cli"`
-# to [project.scripts] AND `"spire*"` to [tool.setuptools.packages.find].include.
-
-# Validate:
-python tools/check_sensor_consistency.py
-# OK: 6 sensor(s) consistent with pyproject.toml
-
-# Create the notebook pair:
-cp notebooks/capella_workflow.ipynb notebooks/spire_workflow.ipynb
-cp notebooks/testing-notebooks/capella_workflow.ipynb notebooks/testing-notebooks/spire_workflow.ipynb
-# Edit each to swap "capella" → "spire" in titles, subprocess commands, etc.
+# Implement the calibration math:
+$EDITOR spire/spire_v2.py
 ```
 
-The CI lint catches the most common scaffolding bugs (missing pyproject
-entries, console-script-without-installed-package). For lower-level
-`shared_utils` contributions that aren't a full sensor pipeline, see
+`tools/new_sensor.py` validates the sensor name, refuses to clobber an
+existing sensor, and rolls back all writes if the post-condition check
+fails — so the scaffolder either produces a fully-wired sensor or leaves
+the repo untouched. CI lint (`tools/check_sensor_consistency.py`) catches
+the same bugs at PR time as a backstop. For lower-level `shared_utils`
+contributions that aren't a full sensor pipeline, see
 [docs/ADDING_FUNCTIONS_TUTORIAL.md](docs/ADDING_FUNCTIONS_TUTORIAL.md).
 
 ## Docker Integration

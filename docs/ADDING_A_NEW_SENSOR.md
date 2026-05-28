@@ -8,39 +8,46 @@ For lower-level `shared_utils` function additions (not a full sensor
 pipeline), see [ADDING_FUNCTIONS_TUTORIAL.md](ADDING_FUNCTIONS_TUTORIAL.md).
 For the automation that backs this guide, see [AUTOMATION.md](AUTOMATION.md).
 
-> **Coming soon:** a `python tools/new_sensor.py <sensor>` scaffolder will
-> replace step 2-7 below with one command. See [AUTOMATION.md §Roadmap](AUTOMATION.md#roadmap)
-> for the design. Until then, the `cp -r capella/ <sensor>/` flow is current.
-
 ---
 
 ## tl;dr
+
+The scaffolder writes all four sensor files, both notebooks, and both
+`pyproject.toml` entries in one command:
 
 ```bash
 # 1. Clone & branch
 git checkout -b feat/<sensor>
 
-# 2. Copy the freshest sensor as your template (capella as of 2026-05)
-cp -r capella/ <sensor>/
+# 2. Scaffold the sensor (writes ~6 files + 2 pyproject mutations).
+python tools/new_sensor.py <sensor>
 
-# 3. Rename / implement: edit the four files (next section)
+# 3. Implement the calibration math in <sensor>/<sensor>_v2.py.
+#    The other three files (__init__.py, cli.py, process_<sensor>.py) work
+#    out of the box; you'll rarely need to edit them.
 
-# 4. Wire pyproject.toml (two lines, both required)
-
-# 5. Validate locally
-python tools/check_sensor_consistency.py
-
-# 6. Create the notebook pair
-cp notebooks/capella_workflow.ipynb notebooks/<sensor>_workflow.ipynb
-cp notebooks/testing-notebooks/capella_workflow.ipynb \
-   notebooks/testing-notebooks/<sensor>_workflow.ipynb
-# Edit each to swap "capella" → "<sensor>" throughout
-
-# 7. Push; CI runs lint.yml automatically; merge to dev when green.
+# 4. Push; CI runs lint.yml automatically; merge to dev when green.
 git add -A && git commit -m "feat(<sensor>): add sensor pipeline"
 git push -u origin feat/<sensor>
 gh pr create --base dev
 ```
+
+The scaffolder runs `tools/check_sensor_consistency.py` as a post-condition
+check and rolls back all file changes if it fails — so the only state that
+can leak out is a sensor whose template renders cleanly.
+
+If you need to customise the default S3 bucket or the notebook description
+up-front:
+
+```bash
+python tools/new_sensor.py spire \
+    --bucket csda-spire-delivery \
+    --description "Workflow for Spire RO / GNSS-R imagery."
+```
+
+For when the scaffolder can't be used (no Python env, exotic sensor name,
+unusual file layout), the manual flow is still documented at the bottom
+under [Manual fallback](#manual-fallback).
 
 ---
 
@@ -405,3 +412,46 @@ example. Files to study:
 - `notebooks/testing-notebooks/capella_workflow.ipynb` — import-based dev variant.
 - `pyproject.toml` lines 60 (`[project.scripts]`) and 67 (`packages.find.include`).
 - Post-mortem of the rollout bugs: [AUTOMATION.md §Post-mortems](AUTOMATION.md#post-mortems).
+
+---
+
+## Manual fallback
+
+For when `tools/new_sensor.py` can't be used (you're scripting outside a
+Python env, you need an unusual sensor name the validator rejects, or you
+want to copy a sensor that diverged from the template). This is the old
+flow, preserved for completeness.
+
+```bash
+# 1. Clone & branch
+git checkout -b feat/<sensor>
+
+# 2. Copy the freshest sensor as your template (capella as of 2026-05)
+cp -r capella/ <sensor>/
+
+# 3. Rename / implement: edit the four files (see "What you need to write" above)
+
+# 4. Wire pyproject.toml (two lines, both required) — see "pyproject.toml wiring"
+
+# 5. Validate locally
+python tools/check_sensor_consistency.py
+
+# 6. Create the notebook pair
+cp notebooks/capella_workflow.ipynb notebooks/<sensor>_workflow.ipynb
+cp notebooks/testing-notebooks/capella_workflow.ipynb \
+   notebooks/testing-notebooks/<sensor>_workflow.ipynb
+# Edit each to swap "capella" → "<sensor>" throughout, INCLUDING the
+# Quarto frontmatter description. The cell-0 conformance check in
+# tools/check_sensor_consistency.py fails if any other sensor's name
+# leaks into cell 0.
+
+# 7. Push; CI runs lint.yml automatically; merge to dev when green.
+git add -A && git commit -m "feat(<sensor>): add sensor pipeline"
+git push -u origin feat/<sensor>
+gh pr create --base dev
+```
+
+The manual flow is more error-prone — the original Capella rollout shipped
+with three different copy-paste bugs that the scaffolder would have made
+structurally impossible. Prefer `tools/new_sensor.py` unless you have a
+specific reason not to.

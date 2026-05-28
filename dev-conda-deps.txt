@@ -45,3 +45,8 @@ tqdm
 psutil
 fsspec
 s3fs
+
+# --- Scaffolder tooling (tools/new_sensor.py + notebook round-trip) ---
+tomlkit
+jupytext
+nbformat

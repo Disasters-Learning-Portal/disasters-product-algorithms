@@ -19,6 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # setuptools-scm reads tags via `git describe`; default checkout
+          # is a shallow clone with no tag history.
+          fetch-depth: 0
+
+      - name: Compute version from git tags
+        id: ver
+        # pyproject.toml uses setuptools-scm with a dynamic version derived
+        # from the latest tag. The Dockerfile build context excludes .git/
+        # (via .dockerignore — it'd bloat the image), so setuptools-scm
+        # can't discover the version inside the container. We compute it
+        # here (where .git/ is present) and pass it through as a build-arg.
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --user setuptools-scm
+          VERSION=$(python -c "from setuptools_scm import get_version; print(get_version(root='.'))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Computed package version: $VERSION"
 
       - name: Log in to Docker Hub
         run: |
@@ -35,6 +53,7 @@ jobs:
             -f image/Dockerfile \
             -t "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12}" \
             --cache-from "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest" \
+            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS="${{ steps.ver.outputs.version }}" \
             .
 
       - name: Tag & push

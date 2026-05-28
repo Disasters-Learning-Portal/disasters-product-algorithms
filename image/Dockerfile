@@ -19,6 +19,18 @@ RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.y
 # cross-repo dispatch. .dockerignore at the repo root keeps the COPY
 # tight (no notebooks/, docs/, tests/, .git/ etc.). Re-runs ~30s when
 # any algorithms file (matched by .dockerignore rules) changes.
+#
+# Version handling: pyproject.toml uses setuptools-scm with dynamic
+# version derived from git tags. .git/ is excluded from the build
+# context (it'd be heavy and cache-busting), so setuptools-scm can't
+# discover the tag here. The workflow computes the version once via
+# `git describe` (it has .git/ access) and passes it as the build-arg
+# below; we then set the canonical PRETEND env var that setuptools-scm
+# checks before falling back to .git. Per setuptools-scm docs:
+# https://setuptools-scm.readthedocs.io/en/latest/usage/#environment-variables
+ARG SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS=0.0.0+local
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS}
+
 COPY --chown=${NB_USER}:${NB_USER} . /srv/repo/algorithms
 RUN /srv/conda/envs/notebook/bin/pip install --no-deps /srv/repo/algorithms
 

@@ -1,0 +1,84 @@
+name: Release · Tag + publish
+
+# Step 2 of 2 in the release flow.
+#
+# Trigger: automatic — fires when a PR titled "Release vX.Y.Z" merges into main.
+# (That PR is created by release-open-pr.yaml, which is admin-gated, so this
+# step is already protected upstream — by the time we get here, an admin has
+# approved AND merged the release.)
+#
+# What this does:
+#   1. Parses the version out of the PR title.
+#   2. Verifies RELEASE_NOTES_<version>.md exists at the merge commit on main.
+#   3. Tags the merge commit as <version> and pushes the tag.
+#      (setuptools-scm uses that tag for the package version.)
+#   4. Creates a GitHub Release pointing at the tag, with notes from the file.
+#
+# Side effect: pushing to main also triggers build-and-push.yaml, which rebuilds
+# the prod Docker image with the new code. That happens in parallel and is
+# independent of this workflow.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  tag-and-release:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Release v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Extract version from PR title
+        id: version
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          VERSION="${TITLE#Release }"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not parse vX.Y.Z from PR title: $TITLE"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main at the merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Verify release notes file present on main
+        run: |
+          FILE="RELEASE_NOTES_${{ steps.version.outputs.version }}.md"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::$FILE missing on main after merge. Cannot publish release."
+            exit 1
+          fi
+          echo "RELEASE_NOTES_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Verify tag does not already exist
+        run: |
+          git fetch --tags
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ steps.version.outputs.version }} already exists. Aborting."
+            exit 1
+          fi
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag the merge commit
+        run: |
+          git tag -a "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --notes-file "$RELEASE_NOTES_FILE" \
+            --target "${{ github.event.pull_request.merge_commit_sha }}"

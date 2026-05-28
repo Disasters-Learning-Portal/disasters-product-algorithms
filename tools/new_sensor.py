@@ -48,6 +48,26 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "_templates"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 CONSISTENCY_LINT = Path(__file__).resolve().parent / "check_sensor_consistency.py"
 
+# ---------------------------------------------------------------------------
+# Pretty-print helpers
+# ---------------------------------------------------------------------------
+# All output is plain Unicode + box-drawing characters. No ANSI colors —
+# they break CI logs, get stripped by some terminals, and obscure copy-paste.
+# Section banners use ─, success banners use ═. Indentation is 4-space.
+
+BAR = "─" * 72
+DBL = "═" * 72
+
+
+def section(title: str) -> None:
+    """Heading for a phase of the run (e.g. 'Sensor package files')."""
+    print(f"\n▸ {title}")
+
+
+def step(msg: str) -> None:
+    """A single completed step inside a section."""
+    print(f"    ✓ {msg}")
+
 # Top-level dirs the scaffolder must never overwrite.
 RESERVED_NAMES = {
     "tools", "shared_utils", "notebooks", "docs", "tests",
@@ -111,6 +131,124 @@ def check_doesnt_exist(name: str) -> None:
             f"[tool.setuptools.packages.find].include. The sensor appears "
             f"to be partially wired."
         )
+
+
+def find_orphaned_sensor_dirs() -> list[str]:
+    """Sensor dirs (cli.py + process_*.py) that aren't wired into pyproject.
+
+    Returns sorted list of orphan directory names; empty list means clean.
+    An "orphan" is a top-level dir that LOOKS like a sensor pipeline (has
+    cli.py + at least one process_*.py / download_*.py) but isn't fully
+    registered in BOTH [project.scripts] AND
+    [tool.setuptools.packages.find].include.
+
+    The script-name check matches tools/check_sensor_consistency.py: we
+    look up each verb-prefixed file's STEM in [project.scripts] (e.g.
+    landsat's `process_landsat89.py` -> script key `process_landsat89`,
+    NOT `process_landsat`). At least one of the dir's verb-prefixed files
+    must have a matching script entry to count as wired.
+
+    Common trigger: a previous scaffolder run was rolled back (or the user
+    ran `git restore .`, which reverts pyproject.toml but doesn't `git clean`
+    the new untracked sensor dir). The next scaffolder run then trips the
+    post-condition consistency check on those leftovers.
+    """
+    pyproject = tomllib.loads(PYPROJECT.read_text())
+    scripts = pyproject.get("project", {}).get("scripts", {})
+    include = (
+        pyproject.get("tool", {}).get("setuptools", {})
+        .get("packages", {}).get("find", {}).get("include", [])
+    )
+
+    VERB_PREFIXES = ("process_", "download_")
+
+    orphans: list[str] = []
+    for child in sorted(REPO_ROOT.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith((".", "_")):
+            continue
+        if child.name in RESERVED_NAMES:
+            continue
+        if not (child / "cli.py").exists():
+            continue
+        verb_files = [
+            p for p in child.glob("*.py")
+            if any(p.stem.startswith(v) for v in VERB_PREFIXES)
+        ]
+        if not verb_files:
+            continue
+        # Looks like a sensor dir. Is it fully wired in pyproject?
+        name = child.name
+        glob_ok = f"{name}*" in include
+        any_script_ok = any(p.stem in scripts for p in verb_files)
+        if not (glob_ok and any_script_ok):
+            orphans.append(name)
+    return orphans
+
+
+def check_no_orphans() -> None:
+    """Block the scaffolder run if any unrelated sensor dirs are partially wired.
+
+    Prints a loud, copy-pasteable remediation script. We refuse to scaffold
+    on top of an orphan because the post-condition consistency check would
+    fail and roll our work back — wasting the user's time and obscuring the
+    real fix (clean up the orphan).
+    """
+    orphans = find_orphaned_sensor_dirs()
+    if not orphans:
+        return
+
+    bar = "=" * 72
+    print(f"\n{bar}", file=sys.stderr)
+    print("ABORT: orphaned sensor directories detected", file=sys.stderr)
+    print(bar, file=sys.stderr)
+    print(
+        "\nThe following directories LOOK like sensor pipelines (cli.py + "
+        "process_*.py)\nbut are not wired into pyproject.toml. The scaffolder "
+        "won't run until\nthe baseline is clean — otherwise its post-condition "
+        "consistency lint\nwill fail and roll back your new sensor too.\n",
+        file=sys.stderr,
+    )
+    for n in orphans:
+        print(f"  - {n}/", file=sys.stderr)
+
+    nb_paths = " ".join(
+        f"notebooks/{n}_workflow.ipynb "
+        f"notebooks/testing-notebooks/{n}_workflow.ipynb"
+        for n in orphans
+    )
+    dirs_str = " ".join(orphans)
+
+    print(
+        f"\n{bar}\n"
+        "FIX — pick ONE of the two options below and paste it into your shell.\n"
+        f"{bar}\n",
+        file=sys.stderr,
+    )
+    print(
+        "  # Option A — surgical: remove only the orphan(s) listed above.\n"
+        f"  rm -rf {dirs_str}\n"
+        f"  rm -f {nb_paths}\n"
+        "  git restore pyproject.toml\n",
+        file=sys.stderr,
+    )
+    print(
+        "  # Option B — nuclear: drop ALL untracked files + revert tracked changes.\n"
+        "  # Use this when you're not sure what's clean and want a fresh start.\n"
+        "  git status --untracked-files=all   # preview first\n"
+        "  git clean -fd                       # delete untracked files\n"
+        "  git restore .                       # revert tracked changes\n",
+        file=sys.stderr,
+    )
+    print(
+        f"{bar}\n"
+        "Then re-run:\n"
+        f"  python tools/new_sensor.py <name>\n"
+        f"{bar}\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # ----------------------------------------------------------------------------
@@ -305,28 +443,42 @@ def main() -> int:
 
     validate_name(name)
     check_doesnt_exist(name)
+    check_no_orphans()
+
+    # Banner — what we're doing + the source-of-truth files we'll touch.
+    print(f"\n{BAR}")
+    print(f"  Scaffolding sensor: {name}")
+    print(f"{BAR}")
+    print(f"  package dir     {name}/")
+    print(f"  notebook (cli)  notebooks/{name}_workflow.ipynb")
+    print(f"  notebook (dev)  notebooks/testing-notebooks/{name}_workflow.ipynb")
+    print(f"  pyproject       process_{name} = \"{name}.cli:process_{name}_cli\"")
+    print(f"  pyproject       \"{name}*\" -> [tool.setuptools.packages.find].include")
 
     written: list[Path] = []
     pyproject_original: str | None = None
 
     try:
         # 1. Sensor package files.
+        section("Sensor package files")
         sensor_dir = REPO_ROOT / name
         sensor_dir.mkdir()
         written.append(sensor_dir)
         for dest, content in render_sensor_files(name, bucket).items():
             dest.write_text(content)
-            print(f"  Created {dest.relative_to(REPO_ROOT)}")
+            step(f"{dest.relative_to(REPO_ROOT)}")
 
         # 2. pyproject.toml mutations.
+        section("pyproject.toml")
         pyproject_original = update_pyproject(name)
-        print(f"  Updated pyproject.toml: added '{name}*' to "
-              f"[tool.setuptools.packages.find].include")
-        print(f"  Updated pyproject.toml: added "
-              f"process_{name} = \"{name}.cli:process_{name}_cli\" "
-              f"to [project.scripts]")
+        step(f"added '{name}*' to [tool.setuptools.packages.find].include")
+        step(
+            f"added process_{name} = \"{name}.cli:process_{name}_cli\" "
+            f"to [project.scripts] (alphabetical)"
+        )
 
         # 3. Notebooks.
+        section("Workflow notebooks")
         mapping = {
             "name": name,
             "Name": name.capitalize(),
@@ -339,22 +491,22 @@ def main() -> int:
         nb_test = REPO_ROOT / "notebooks" / "testing-notebooks" / f"{name}_workflow.ipynb"
         render_notebook(TEMPLATES_DIR / "notebooks" / "workflow.py.tmpl", mapping, nb_main)
         written.append(nb_main)
-        print(f"  Created {nb_main.relative_to(REPO_ROOT)}")
+        step(f"{nb_main.relative_to(REPO_ROOT)}")
         render_notebook(TEMPLATES_DIR / "notebooks" / "testing_workflow.py.tmpl", mapping, nb_test)
         written.append(nb_test)
-        print(f"  Created {nb_test.relative_to(REPO_ROOT)}")
+        step(f"{nb_test.relative_to(REPO_ROOT)}")
 
         # 4. Post-condition: the consistency lint must now pass.
-        print()
-        print("Running tools/check_sensor_consistency.py ...")
+        section("Post-condition check (tools/check_sensor_consistency.py)")
         result = subprocess.run(
             [sys.executable, str(CONSISTENCY_LINT)],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
         )
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
+        # Re-indent the lint's own output so it visually nests under the section.
+        for line in (result.stdout + result.stderr).rstrip().splitlines():
+            print(f"    {line}")
         if result.returncode != 0:
             raise RuntimeError(
                 "Post-condition check FAILED — the scaffold left the repo "
@@ -362,18 +514,41 @@ def main() -> int:
             )
 
     except Exception as exc:  # noqa: BLE001 — broad on purpose for rollback
-        print(f"\nERROR: {exc}\n", file=sys.stderr)
+        print(f"\n{DBL}", file=sys.stderr)
+        print(f"  ✗ ABORT — {exc}", file=sys.stderr)
+        print(f"{DBL}", file=sys.stderr)
         rollback(written, pyproject_original)
-        print("Rolled back all scaffolder changes.", file=sys.stderr)
+        print("Rolled back all scaffolder changes. The repo is in the state it was in", file=sys.stderr)
+        print("before this run.", file=sys.stderr)
+        print("\nIf orphan sensor dirs from earlier partial runs are blocking you,", file=sys.stderr)
+        print("the simplest cleanup is:", file=sys.stderr)
+        print("\n    git status --untracked-files=all   # preview", file=sys.stderr)
+        print("    git clean -fd                       # delete untracked files", file=sys.stderr)
+        print("    git restore .                       # revert tracked changes\n", file=sys.stderr)
         return 1
 
+    # --- SUCCESS banner + next steps ---
+    print(f"\n{DBL}")
+    print(f"  ✓ SUCCESS — '{name}' is scaffolded. Next steps:")
+    print(f"{DBL}\n")
+    print(f"  1. Implement sensor logic")
+    print(f"       Edit:  {name}/{name}_v2.py")
+    print(f"       Implement retrieve_{name}_resources(), sigmaCalib(), apply_filter().")
     print()
-    print("Next steps:")
-    print(f"  1. Edit {name}/{name}_v2.py — implement "
-          f"retrieve_{name}_resources(), sigmaCalib(), apply_filter().")
-    print( "  2. Add conda deps to dev-conda-deps.txt if needed.")
-    print(f"  3. git add -A && git commit -m \"feat({name}): scaffold new sensor\"")
-    print(f"  4. Open PR: feat/{name} -> dev")
+    print(f"  2. Add conda deps (only if your sensor needs new libraries)")
+    print(f"       Local dev / CI:  dev-conda-deps.txt")
+    print(f"       Hub image:       image/environment.yml")
+    print()
+    print(f"  3. Commit + push")
+    print(f"       git checkout -b feat/{name}")
+    print(f"       git add -A")
+    print(f"       git commit -m \"feat({name}): scaffold new sensor\"")
+    print(f"       git push -u origin feat/{name}")
+    print()
+    print(f"  4. Open PR")
+    print(f"       gh pr create --base dev --title \"Add {name} sensor pipeline\"")
+    print()
+    print(DBL)
     return 0
 
 

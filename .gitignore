@@ -23,9 +23,8 @@ build/
 *.tiff
 !tests/fixtures/*.tif
 
-# AWS cost and EC2 scripts (internal only)
+# AWS cost scripts (internal only)
 aws-cost/
-ec2/
 aws_credentials.example.py
 
 # Notebooks

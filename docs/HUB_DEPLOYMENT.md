@@ -69,6 +69,29 @@ git+https://...@$ALGORITHMS_REF` keyed on a SHA the workflow resolved
 via `gh api .../heads/<branch>`. That mechanism is gone; the algorithms
 SHA is implicit in the build context.
 
+### Dockerfile gotcha: `ADD --chown=` for files NB_USER will later delete
+
+The Pangeo base image declares `USER ${NB_USER}` before our `RUN` steps,
+so everything in `image/Dockerfile` runs as the non-root notebook user.
+`ADD` and `COPY` default to creating files owned by `root` — fine for
+files that just need to be read by NB_USER, but **fatal if NB_USER later
+needs to delete them**. The first post-consolidation build failed at:
+
+```
+rm: cannot remove '/tmp/environment.yml': Operation not permitted
+```
+
+Fix: pass `--chown=${NB_USER}:${NB_USER}` to the ADD so NB_USER owns the
+file. The current `image/Dockerfile` line 11 reflects this:
+
+```dockerfile
+ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
+```
+
+Rule of thumb: if a RUN step downstream of an ADD/COPY removes or
+mutates the same file, add `--chown=${NB_USER}:${NB_USER}` to the
+ADD/COPY directive.
+
 ## Source of truth files
 
 | File | Lives in | Role |

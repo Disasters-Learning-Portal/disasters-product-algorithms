@@ -142,6 +142,17 @@ re-add them, the markers are literally:
 Don't reach for `pip install -e .` first — that masks the real problem.
 Order of checks:
 
+0. **Did CI pass on the algorithms commit that pinned the image?**
+   `.github/workflows/lint.yml` runs `sensor-consistency` + `cli-smoke`
+   on every push to `dev` and `main`. If those jobs failed and the image
+   built anyway (e.g. someone bypassed branch protection), the pod will
+   show `ModuleNotFoundError: No module named '<sensor>'` even though
+   the console-script shim exists in `/srv/conda/envs/notebook/bin/`.
+   Fix in algorithms (`tools/check_sensor_consistency.py` shows the
+   exact pyproject.toml edit needed), push, wait for the rebuild. This
+   check was added after the capella rollout exhibited exactly this
+   failure mode — see [AUTOMATION.md §Post-mortems](AUTOMATION.md#post-mortems).
+
 1. **Which image variant did the hub spawn, and which algorithms branch
    has the CLI?** Prod image installs from `main` HEAD; dev image from
    `dev` HEAD. If your CLI lives on `dev` and you're on the prod image,

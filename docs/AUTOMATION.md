@@ -1,0 +1,420 @@
+# Automation guide
+
+Canonical reference for the CI / lint / dependency-management surface in
+`disasters-product-algorithms`. Read this before adding a new sensor,
+adding a new conda dep, or wondering why a hub pod is missing a CLI.
+
+## Overview
+
+What's automated today:
+
+| Concern | Tool | Source |
+|---|---|---|
+| pyproject ↔ sensor-dir consistency | `tools/check_sensor_consistency.py` | Runs locally + in CI |
+| CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job | CI only |
+| Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild*.yml` | Push to `dev` / `main` |
+| Conda-dep sync to hub image | `.github/workflows/sync-conda-deps.yml` | Push to `main` touching `hub-conda-deps.txt` |
+| Branch protection (dev → main only) | `.github/workflows/enforce-dev-to-main.yml` | PR to `main` |
+| Branch convention enforcement | `.github/workflows/enforce-branch-protection.yml` | PR to `dev` |
+
+What's **not** yet automated (see [Roadmap](#roadmap)):
+
+- Generating a new sensor pipeline from a template (today: `cp -r capella/ <sensor>/`).
+- Notebook conformance lint (header block, `TARGET_CRS` block, no copy-paste leftovers).
+- Pre-commit hook running the consistency lint at `git commit` time.
+
+The bug that motivated most of this guide: the [Capella `ModuleNotFoundError` rollout](#capella-modulenotfounderror-cdd1c23--be6693c).
+
+---
+
+## CI lint (`.github/workflows/lint.yml`)
+
+Triggers on every `push` and `pull_request` to `dev` or `main`. Two independent jobs:
+
+### Job 1: `sensor-consistency`
+
+Runs `python tools/check_sensor_consistency.py`. The script walks every
+top-level directory in the repo, identifies "sensor directories" (those
+containing both `cli.py` and at least one `process_*.py`), and asserts
+three invariants per sensor:
+
+1. **Package discovery includes the sensor**: `"<sensor>*"` appears in
+   `pyproject.toml [tool.setuptools.packages.find].include`. Missing this
+   is what broke the initial capella rollout — `pip install` silently
+   skipped the package while the `process_capella` console-script shim
+   still made it into `bin/`.
+2. **Console script registered**: for every `<sensor>/process_<verb>.py` (and
+   `<sensor>/download_<verb>.py`), there's a matching `[project.scripts]`
+   entry. Sensors with multiple entrypoints (sentinel2 has both
+   `process_sentinel2` and `download_sentinel2`) are handled correctly.
+3. **Script target shape**: the entry value matches `<sensor>.cli:<verb>_cli`,
+   the canonical shape used by every existing sensor.
+
+Failure output is actionable. Example after manually removing `"capella*"`:
+
+```
+Sensor consistency check FAILED:
+
+  1. capella/ exists (has cli.py + process_*.py) but `capella*` is not in
+     [tool.setuptools.packages.find].include. pip install would skip the
+     package — the console script will crash with ModuleNotFoundError.
+     Add `"capella*"` to pyproject.toml.
+
+Found 5 sensor dir(s): capella, landsat, satellogic, sentinel2, umbra
+```
+
+Exit code 0 on pass, 1 on any failure. Stdlib + `tomllib` only — no install
+required to run.
+
+#### Running locally
+
+```bash
+python tools/check_sensor_consistency.py
+# OK: 5 sensor(s) consistent with pyproject.toml:
+#   - capella/, landsat/, satellogic/, sentinel2/, umbra/
+```
+
+Under one second. Run it before pushing if you've touched a sensor
+directory, `[project.scripts]`, or `[tool.setuptools.packages.find].include`.
+
+### Job 2: `cli-smoke`
+
+Catches a different bug class: when the consistency check passes (every
+pyproject entry looks right) but the sensor still fails to import because
+of a missing transitive dependency, broken `__init__.py`, or wrong-symbol
+import. The `sensor-consistency` job is a static check on file contents;
+`cli-smoke` is a runtime check.
+
+Steps:
+
+1. Set up miniconda (conda-forge, Python 3.12) via `conda-incubator/setup-miniconda@v3`.
+2. **Install conda deps from `dev-conda-deps.txt`** (single source of truth):
+   ```bash
+   deps=$(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
+   mamba install -y -c conda-forge $deps
+   ```
+3. `pip install .` (no `--no-deps`, so `[project.dependencies]` resolve
+   against the conda env).
+4. **Iterate `pyproject.toml [project.scripts]` and run `--help` on each**:
+   ```bash
+   scripts=$(python -c "import tomllib, pathlib;
+                        p = tomllib.loads(pathlib.Path('pyproject.toml').read_text());
+                        print('\n'.join(p['project']['scripts']))")
+   for script in $scripts; do
+       $script --help > /dev/null || exit 1
+   done
+   ```
+
+The script list is **not hardcoded** — it's introspected from pyproject.toml,
+so adding a new sensor automatically gets it exercised. Combined with
+`sensor-consistency`, this means a green CI = your CLIs at least import
+cleanly in a fresh env that matches the hub image's dep stack.
+
+#### When `cli-smoke` fails
+
+| Symptom | Likely cause |
+|---|---|
+| `ModuleNotFoundError: No module named '<sensor>'` | `<sensor>*` missing from `packages.find.include`. (sensor-consistency should have caught this first.) |
+| `ModuleNotFoundError: No module named '<dep>'` | Missing line in `dev-conda-deps.txt` (or `[project.dependencies]` for pip wheels). |
+| `ImportError: cannot import name 'X' from '<sensor>.<sensor>_v2'` | `__init__.py` star-imports a symbol that doesn't exist in `_v2`. |
+| `--help` succeeds but exits non-zero | Argparse misconfiguration; rare. |
+
+---
+
+## Dependency source-of-truth files
+
+Three files, three audiences, three lifecycles. The semantic distinction is
+real and the contributor decision tree is small enough to be manageable —
+but it's brittle, so it's worth being explicit.
+
+### Three files
+
+| File | Audience | Format | Lifecycle |
+|---|---|---|---|
+| `pyproject.toml [project.dependencies]` | `pip install .` transitive | pip spec (e.g. `"Pillow"`, `"requests>=2.30"`) | Per-PR |
+| `dev-conda-deps.txt` | Local dev + CI smoke | one conda spec per line (e.g. `gdal`, `rasterio>=1.3`) | Per-PR |
+| `hub-conda-deps.txt` | Hub image conda deps ON TOP of Pangeo base | one conda spec per line | Per-PR + auto-sync to image repo |
+
+### What goes where — decision tree
+
+```
+Need to add a new Python dependency?
+│
+├─ Does it have a manylinux wheel? (pip install <pkg> works on a clean Linux box)
+│   └─ YES → pyproject.toml [project.dependencies]. Done.
+│
+└─ Conda-only (GDAL plugin, native lib, pinning required):
+    │
+    ├─ Is it already in the Pangeo base image?
+    │  (gdal, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy, boto3, etc.)
+    │   └─ YES → dev-conda-deps.txt only. Hub already has it.
+    │
+    └─ NOT in Pangeo base:
+        └─ BOTH dev-conda-deps.txt AND hub-conda-deps.txt.
+           The sync-conda-deps workflow handles the image-repo side.
+```
+
+### `hub-conda-deps.txt` auto-sync
+
+The `.github/workflows/sync-conda-deps.yml` workflow:
+
+1. Fires on **push to `main`** that touches `hub-conda-deps.txt`.
+2. Clones `pangeo-notebook-veda-image` (using `PANGEO_REBUILD_TOKEN`).
+3. Rewrites the managed block in that repo's `environment.yml` with the
+   current contents of `hub-conda-deps.txt`.
+4. Opens a PR in `pangeo-notebook-veda-image` via `peter-evans/create-pull-request`.
+5. Reviewer merges. Next image build picks up the new conda dep.
+
+No manual editing of `pangeo-notebook-veda-image` needed. The PR title and
+body are auto-generated and reference the algorithms-repo commit.
+
+### Verifying dep state locally
+
+```bash
+# What dev-conda-deps.txt actually resolves to:
+grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$'
+
+# What pyproject [project.dependencies] resolves to:
+python -c "import tomllib, pathlib;
+           print('\n'.join(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['dependencies']))"
+
+# Re-create the dev env from scratch:
+mamba create -n disasters-dev python=3.12 -y
+mamba activate disasters-dev
+mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
+pip install -e .
+```
+
+---
+
+## Cross-repo image-rebuild dispatch
+
+### Today's workflow
+
+Two near-identical workflows, one per branch / image variant:
+
+- `.github/workflows/trigger-docker-rebuild.yml` — `on: push: branches: [main]`. Sends `repository_dispatch event_type=algorithm-updated` to `pangeo-notebook-veda-image` using `PANGEO_REBUILD_TOKEN`. Payload includes the pushed commit SHA.
+- `.github/workflows/trigger-docker-rebuild-dev.yml` — same, for `dev` branch. Uses `PANGEO_REBUILD_TOKEN_DEV`, event type `algorithm-updated-dev`.
+
+The image-repo workflows (`build-and-push.yaml` / `build-and-push-dev.yaml`)
+listen for those dispatch events. Each resolves `ALGORITHMS_REF` from the
+dispatch payload's commit SHA (or falls back to live branch HEAD if invoked
+on its own), then runs `docker build --build-arg ALGORITHMS_REF=<sha> .`.
+
+### Two-layer Dockerfile (image repo)
+
+The image-repo Dockerfile is split into two RUN layers:
+
+- **Layer 1** (slow, ~2-3 min): `pangeo/pangeo-notebook` base + `environment.yml`
+  updates. Cached on the content of `environment.yml`, which is itself
+  derived from `hub-conda-deps.txt` via the sync workflow.
+- **Layer 2** (fast, ~30s): `pip install --force-reinstall --no-deps git+https://...@<ALGORITHMS_REF>`.
+  Cached per algorithms SHA.
+
+Why two layers: algorithm-only changes (the common case) invalidate only
+the small pip layer, not the heavy conda update. This is the design that
+shipped after the per-variant pinning refactor in `a9cf2ea`.
+
+### Image variants on Docker Hub
+
+| Variant | Tag pattern | Tracks |
+|---|---|---|
+| Prod | `klesinger/disasters-jupyterhub-docker-image:latest` (+ `:<sha-12>` per commit) | Algorithms `main` HEAD |
+| Dev | `klesinger/disasters-jupyterhub-docker-image-dev:latest` (+ `:<sha-12>`) | Algorithms `dev` HEAD |
+
+A stale `disasters-jupyterhub-docker-image-testmerge` repo may still exist
+on Docker Hub from earlier experiments. The build pipeline no longer
+produces it; safe to delete via the Docker Hub UI.
+
+---
+
+## Branch protection workflows
+
+Two GitHub Actions workflows enforce policy on top of repo branch protection
+rules:
+
+- `.github/workflows/enforce-dev-to-main.yml` — fires on PRs targeting `main`.
+  Fails the PR if the source branch is anything other than `dev`. The
+  goal: every change must flow through `dev` first, so it's exercised in
+  the dev image variant before reaching production.
+- `.github/workflows/enforce-branch-protection.yml` — fires on PRs targeting
+  `dev`. Validates PR title/description conventions and suggests
+  `feature/`, `fix/`, etc. branch prefixes. Warning-only, not blocking.
+
+(Both are flagged in the roadmap as candidates to replace with native
+GitHub rulesets — see [Audit-flagged simplifications](#audit-flagged-simplifications-not-yet-actioned).)
+
+---
+
+## What `tools/check_sensor_consistency.py` does
+
+Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
+
+- **Sensor-directory detection** (lines 32-45): top-level dirs (sorted,
+  non-hidden) containing both `cli.py` and at least one `process_*.py`.
+  Skips `.`-prefixed and `_`-prefixed dirs.
+- **Per-sensor validation** (lines 76-108):
+  - `<sensor>*` glob in `[tool.setuptools.packages.find].include`.
+  - For every `process_*.py` and `download_*.py` in the sensor dir, expect
+    a matching console script in `[project.scripts]` with target shape
+    `<sensor>.cli:<verb>_cli`.
+- **Output**: stderr-listed failures with remediation suggestions; stdout
+  "OK" with sensor count on success.
+- **Exit codes**: 0 OK, 1 failure.
+
+Adding new "verb prefixes" (today: `process_`, `download_`) is a one-line
+constant change at line ~50.
+
+---
+
+## Roadmap
+
+These items are planned but not yet shipped. They came out of an
+independent simplicity audit; same end-state, more granular planning.
+
+### Rec 1 — `tools/new_sensor.py` scaffolder (~1 day)
+
+One command replaces ~8 manual edits:
+
+```
+$ python tools/new_sensor.py spire
+✓ Created spire/__init__.py
+✓ Created spire/spire_v2.py (stub)
+✓ Created spire/process_spire.py (argparse skeleton, imports from spire.spire_v2)
+✓ Updated pyproject.toml: added "spire*" to packages.find.include
+✓ Updated pyproject.toml: added process_spire to [project.scripts]
+✓ Created notebooks/spire_workflow.ipynb (rendered from template, frontmatter says "Spire")
+✓ Created notebooks/testing-notebooks/spire_workflow.ipynb
+✓ Ran tools/check_sensor_consistency.py: PASS
+
+Next steps:
+  1. Edit spire/spire_v2.py — implement retrieve_spire_resources() etc.
+  2. Add conda deps to dev-conda-deps.txt if needed.
+  3. git add -A && git commit -m "feat(spire): scaffold new sensor"
+  4. Open PR: feature/spire → dev
+```
+
+Implementation plan:
+
+- `tools/new_sensor.py` (~150 lines, stdlib + `tomlkit` for comment-preserving
+  pyproject mutation).
+- `templates/sensor/{__init__.py.jinja, cli.py.jinja, process_<NAME>.py.jinja, <NAME>_v2.py.jinja}`.
+- `templates/sensor/workflow.py.jinja` (jupytext-paired notebook source;
+  `jupytext --to ipynb` after substitution renders the two `.ipynb` files).
+- Extend `tools/check_sensor_consistency.py` to assert `notebooks/<sensor>_workflow.ipynb`
+  exists, parse cell 0 JSON, assert the sensor name appears AND no other
+  sensor names do (catches the Capella "Sentinel-2"/"Umbra" copy-paste leftover
+  bug — see [Post-mortems](#post-mortems)).
+
+Bugs 1, 2, and 3 become **structurally impossible** rather than just CI-caught.
+
+### Rec 2 — Consolidate governance workflows (~2 hours)
+
+- **`trigger-docker-rebuild.yml` + `trigger-docker-rebuild-dev.yml`** are 95%
+  duplicate. Collapse to one workflow keyed on `github.ref`:
+  ```yaml
+  env:
+    TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PANGEO_REBUILD_TOKEN || secrets.PANGEO_REBUILD_TOKEN_DEV }}
+    EVENT_TYPE: ${{ github.ref == 'refs/heads/main' && 'algorithm-updated' || 'algorithm-updated-dev' }}
+  ```
+- **`enforce-dev-to-main.yml` + `enforce-branch-protection.yml`** (~117 lines
+  of bash combined) replicate work that GitHub **rulesets** can express
+  natively. Replace with rulesets configured via the UI or Terraform, plus
+  a `PULL_REQUEST_TEMPLATE.md` for shape conventions.
+
+### Rec 3 — Pre-commit hook + import smoke (~1 hour)
+
+- Add `.pre-commit-config.yaml` with one local hook that runs
+  `python tools/check_sensor_consistency.py`. Bug class fails at
+  `git commit`, not at CI ~10 min later.
+- Extend `cli-smoke` to also run `python -c "import <sensor>"` for every
+  sensor in the include list. `--help`-only catches argparse-time imports,
+  but a wrong-symbol import inside `main()` only would slip through.
+  Adding the bare `import` closes that gap.
+
+### Audit-flagged simplifications (not yet actioned)
+
+These came out of the same simplicity audit but require team discussion:
+
+- **The `cli.py` `exec(compile(...))` trick** in every sensor dir is bizarre.
+  Console scripts can point directly at `<sensor>.process_<sensor>:main`
+  if `process_<sensor>.py` follows the standard
+  `if __name__ == "__main__": main()` pattern. Three `cli.py` files could
+  be deleted, the `[project.scripts]` entries simplified.
+- **The three conda-dep files** could potentially consolidate to one
+  (`conda-deps.txt` with section markers + a `pangeo-base.lock` for
+  diffing). The current design forces contributors to maintain two lists
+  with the relationship documented only in file headers.
+
+---
+
+## Post-mortems
+
+### Capella `ModuleNotFoundError` (`cdd1c23` → `be6693c`)
+
+**Symptom in fresh hub pod:**
+
+```
+$ process_capella -h
+Traceback (most recent call last):
+  File "/srv/conda/envs/notebook/bin/process_capella", line 3, in <module>
+    from capella.cli import process_capella_cli
+ModuleNotFoundError: No module named 'capella'
+```
+
+**Root cause:** `pyproject.toml [tool.setuptools.packages.find].include`
+whitelist omitted `"capella*"`. The `[project.scripts] process_capella = "capella.cli:..."`
+entry was present, so the console-script shim got installed into
+`/srv/conda/envs/notebook/bin/`; but `pip install`'s setuptools step
+silently skipped the `capella/` directory entirely because it didn't match
+any glob in the include list.
+
+**Affected variants:** both prod and dev image variants — the broken
+pyproject.toml was on both `main` and `dev` (`main` is auto-synced from
+`dev` and was 5 commits ahead of `dev` at the time of the bug).
+
+**Fix:** one-line addition to the include list (`be6693c`):
+
+```diff
+-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "shared_utils*", "raster_tools*"]
++include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
+```
+
+**Prevention:** `tools/check_sensor_consistency.py` (committed in `44eaa98`)
+would have failed the PR before the broken state reached production.
+Verified locally by removing `"capella*"` from include and re-running the
+script — it produces exactly the diagnostic message a contributor needs.
+
+**Cost:** two image variants shipped broken; required a separate fix commit
+and a full rebuild cycle. ~30 minutes of triage and 5+ minutes of image
+rebuild before the bug was visible-to-fixed.
+
+### Capella copy-paste leftovers (`feat/capella` merge)
+
+**Symptom:** `notebooks/capella_workflow.ipynb` shipped with frontmatter
+claiming the notebook was about Sentinel-2 imagery, a section heading that
+read "Process Umbra Data", and a typo "Sigmna" in the product list.
+
+**Root cause:** the notebook was hand-authored by duplicating the umbra
+template and not fully relabeling. No linter or template-substitution
+mechanism caught the residual references.
+
+**Fix:** bulk-edit during the TARGET_CRS standardization session (`cdd1c23`).
+
+**Prevention:** planned as Rec 1 (`tools/new_sensor.py` + extended
+notebook-conformance check in `tools/check_sensor_consistency.py`).
+Until then, manual review is the only defense.
+
+---
+
+## See also
+
+- [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md) — the cross-repo image build flow,
+  debug checklist when CLIs are missing on a fresh pod.
+- [ADDING_A_NEW_SENSOR.md](ADDING_A_NEW_SENSOR.md) — operator-facing guide
+  for shipping a new sensor product.
+- [ADDING_FUNCTIONS_TUTORIAL.md](ADDING_FUNCTIONS_TUTORIAL.md) — adding a
+  `shared_utils` function (lower level than a full sensor pipeline).
+- [SHARED_UTILS_API.md](SHARED_UTILS_API.md) — function-signature reference.
+- The plan file the audit came from: `/Users/klesinger/.claude/plans/yes-commit-iterative-muffin.md`
+  (local-only; not committed).

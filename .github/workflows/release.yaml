@@ -1,0 +1,95 @@
+name: Release
+
+# One-click release flow.
+#
+# Trigger: manual, from the Actions tab UI ("Run workflow" button).
+# Admin-gated by the `release` environment, so only an admin can approve.
+#
+# What this does (after admin approval):
+#   1. Fast-forwards main from dev.
+#   2. Tags the new main HEAD as <version>.
+#   3. Pushes the tag — setuptools-scm uses it as the package version.
+#   4. Creates a GitHub Release at the tag, with notes auto-generated from
+#      PRs / commits since the previous tag (GitHub's free built-in feature,
+#      no AI / Copilot required).
+#
+# Side effect: pushing to main triggers build-and-push.yaml, which rebuilds
+# the prod Docker image with the new code.
+#
+# ONE-TIME SETUP (must be done in the GitHub UI, can't be done from a workflow):
+#
+#   A. Environment approval gate (so only admin can release):
+#      Settings → Environments → New environment → name: `release`
+#      → "Required reviewers" → add the admin user(s).
+#
+#   B. Branch protection bypass (so the workflow can push to main):
+#      Settings → Rules → Rulesets → edit the rule that protects `main`
+#      (or Settings → Branches → main protection rule on legacy UI)
+#      → "Bypass list" → add `Repository admin` AND/OR add this workflow
+#      as a bypass actor via "GitHub Actions" with the appropriate role.
+#      Without bypass, `git push origin main` will be rejected.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0). Must match vX.Y.Z.'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match vX.Y.Z (got: ${{ inputs.version }})"
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify tag does not already exist
+        run: |
+          git fetch --tags
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fast-forward main from dev
+        run: |
+          git fetch origin dev
+          # --ff-only refuses to merge if dev has diverged from main. Safe by
+          # default: a divergent state means a human needs to look at it,
+          # not the workflow.
+          git merge --ff-only origin/dev
+          git push origin main
+
+      - name: Tag and push
+        run: |
+          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - name: Create GitHub release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ inputs.version }}" \
+            --title "${{ inputs.version }}" \
+            --target main \
+            --generate-notes

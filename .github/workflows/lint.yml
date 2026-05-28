@@ -1,0 +1,66 @@
+name: Lint
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  sensor-consistency:
+    name: Sensor ↔ pyproject consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run consistency lint
+        run: python tools/check_sensor_consistency.py
+
+  cli-smoke:
+    name: pip install + every CLI --help
+    runs-on: ubuntu-latest
+    # Mirror the hub image's setup: conda for GDAL, then `pip install .`.
+    # See .clinerules.md hard rule #6 — pip-only GDAL breaks dylib loads.
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: '3.12'
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: smoke
+      - name: Install GDAL + core deps from conda
+        run: |
+          mamba install -y -c conda-forge \
+            gdal rasterio rio-cogeo numpy scipy pyproj \
+            geopandas shapely boto3 pillow psutil fsspec s3fs
+      - name: Install algorithms package
+        run: pip install . --no-deps
+      - name: Smoke-test every registered console script
+        run: |
+          # Source of truth for which scripts exist: [project.scripts] in pyproject.toml.
+          # We don't hardcode the list here — adding a new sensor must also add it
+          # to pyproject, which is enforced by the sensor-consistency job above.
+          scripts=$(python -c "
+          import tomllib, pathlib
+          p = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          for name in p['project']['scripts']:
+              print(name)
+          ")
+          failed=0
+          for script in $scripts; do
+            echo "─── $script --help ───"
+            if ! $script --help > /dev/null 2>&1; then
+              # Re-run to show the actual error for the CI log
+              $script --help || true
+              echo "::error::$script --help failed"
+              failed=1
+            fi
+          done
+          exit $failed

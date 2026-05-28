@@ -1,0 +1,229 @@
+name: Release
+
+# One-click release flow.
+#
+# Trigger: manual, from the Actions tab UI ("Run workflow" button).
+# Admin-gated by the `release` environment, so only an admin can approve.
+#
+# What this does (after admin approval):
+#   1. Fast-forwards main from dev.
+#   2. Tags the new main HEAD as <version>.
+#   3. Pushes the tag — setuptools-scm uses it as the package version.
+#   4. Creates a GitHub Release at the tag, with notes auto-generated from
+#      PRs / commits since the previous tag (GitHub's free built-in feature,
+#      no AI / Copilot required).
+#
+# Side effect: pushing to main triggers build-and-push.yaml, which rebuilds
+# the prod Docker image with the new code.
+#
+# ONE-TIME SETUP (must be done in the GitHub UI, can't be done from a workflow):
+#
+#   A. Environment approval gate (so only admin can release):
+#      Settings → Environments → New environment → name: `release`
+#      → "Required reviewers" → add the admin user(s).
+#
+#   B. Branch protection bypass (so the workflow can push to main):
+#      Settings → Rules → Rulesets → branch ruleset targeting `main`
+#      with "Require a pull request before merging" → Bypass list →
+#      add `Repository admin` (covers the PAT-as-admin path below).
+#      "GitHub Actions" was not selectable as a bypass actor on this
+#      org, which is why we go through a PAT instead of GITHUB_TOKEN.
+#
+#   C. Personal Access Token (so the workflow pushes AS the admin,
+#      which is in the bypass list):
+#      Fine-grained PAT on the admin account, scoped to this repo,
+#      with Contents + PRs + Workflows = Read & write. Stored as a
+#      repo secret named `DISASTERS_RELEASE_PAT`. The workflow uses
+#      it instead of the default GITHUB_TOKEN for both the checkout
+#      and the gh release call.
+#
+# ⚠️ PAT EXPIRY IS THE #1 FAILURE MODE OF THIS WORKFLOW ⚠️
+# Fine-grained PATs expire on the date set when they were created.
+# Once expired, the workflow fails fast at the "Pre-flight — validate
+# DISASTERS_RELEASE_PAT" step with an explicit "how to fix" block in
+# the log (≈5-minute fix: regenerate the PAT, update the secret,
+# re-run the workflow). Put the PAT expiration date on your calendar
+# with a reminder a week before.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0). Must match vX.Y.Z.'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must match vX.Y.Z (got: ${{ inputs.version }})"
+            exit 1
+          fi
+
+      # Pre-flight token check. Catches the #1 failure mode of this workflow:
+      # the DISASTERS_RELEASE_PAT secret has expired (fine-grained PATs expire
+      # on the date set at creation time). Without this step, the workflow
+      # would fail later with a generic 401 / "remote rejected" error and the
+      # log wouldn't tell you the actual fix. This step makes the failure
+      # mode unmissable.
+      - name: Pre-flight — validate DISASTERS_RELEASE_PAT
+        env:
+          GH_TOKEN: ${{ secrets.DISASTERS_RELEASE_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error title=DISASTERS_RELEASE_PAT is empty or unset::See HOW TO FIX in the step log."
+            cat >&2 <<'EOF'
+
+          ============================================================
+          ❌ DISASTERS_RELEASE_PAT secret is empty or not configured.
+          ============================================================
+
+          This workflow needs a fine-grained Personal Access Token to
+          push to main, because:
+            • The default GITHUB_TOKEN runs as github-actions[bot]
+            • github-actions[bot] is NOT in main's ruleset bypass list
+            • Only the Repository admin role can bypass — and the PAT
+              authenticates the workflow AS the admin.
+
+          HOW TO FIX:
+            1. Repo → Settings → Secrets and variables → Actions
+            2. Check whether the secret DISASTERS_RELEASE_PAT exists.
+            3. If missing, follow the "Personal Access Token" steps in
+               the comment block at the top of:
+               .github/workflows/release.yaml
+            4. Re-run this workflow.
+
+          ============================================================
+          EOF
+            exit 1
+          fi
+          if ! gh api user --jq .login >/dev/null 2>&1; then
+            echo "::error title=DISASTERS_RELEASE_PAT does not authenticate (likely EXPIRED)::See HOW TO FIX in the step log."
+            cat >&2 <<'EOF'
+
+          ============================================================
+          ❌ DISASTERS_RELEASE_PAT is set but rejected by GitHub.
+          ============================================================
+
+          MOST LIKELY CAUSE: the PAT has EXPIRED.
+            Fine-grained PATs expire on the date set when created.
+            Once expired, every API call returns 401 Unauthorized.
+
+          OTHER POSSIBLE CAUSES:
+            • Token was manually revoked
+            • Token was auto-revoked by GitHub's secret-leak detection
+            • Token's repo scope was edited to exclude this repo
+            • Token's permissions were narrowed (need Contents=R/W,
+              Pull requests=R/W, Workflows=R/W)
+
+          HOW TO FIX (5 minutes):
+            1. Go to https://github.com/settings/personal-access-tokens
+            2. Find the PAT that backs DISASTERS_RELEASE_PAT.
+               If it shows "Expired", click Regenerate (or create new).
+            3. Required settings on the new PAT:
+                 Resource owner:    Disasters-Learning-Portal
+                 Repository access: ONLY disasters-product-algorithms
+                 Permissions:       Contents      → Read and write
+                                    Pull requests → Read and write
+                                    Workflows     → Read and write
+                                    Metadata      → Read (auto)
+                 Expiration:        pick a date + put it on your calendar
+            4. Copy the new token.
+            5. Repo → Settings → Secrets and variables → Actions →
+               DISASTERS_RELEASE_PAT → Update → paste → Save.
+            6. Re-run this workflow.
+
+          ============================================================
+          EOF
+            exit 1
+          fi
+          USER=$(gh api user --jq .login)
+          echo "::notice title=PAT authenticated::Workflow will push to main as @${USER}."
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # PAT so the subsequent `git push origin main` is authenticated
+          # as the admin user (who is in the ruleset bypass list). The
+          # default GITHUB_TOKEN runs as github-actions[bot], which is
+          # NOT in the bypass list on this repo.
+          token: ${{ secrets.DISASTERS_RELEASE_PAT }}
+
+      - name: Verify tag does not already exist
+        run: |
+          git fetch --tags
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge dev into main
+        run: |
+          git fetch origin dev
+          # --no-ff creates a merge commit even when fast-forward is possible.
+          # Matches the historical "Merge pull request" pattern (main's lineage
+          # going back to PR #1 is all merge commits, not linear fast-forwards).
+          # If origin/dev is already merged in (e.g. a manual sync ran beforehand),
+          # git prints "Already up to date" and skips the commit — the subsequent
+          # push is then a no-op, and the workflow proceeds to tagging.
+          git merge --no-ff origin/dev -m "Release ${{ inputs.version }}"
+          if ! git push origin main; then
+            echo "::error title=Push to main was rejected::See HOW TO FIX in the step log."
+            cat >&2 <<'EOF'
+
+          ============================================================
+          ❌ git push origin main was rejected by the remote.
+          ============================================================
+
+          If the PAT pre-flight passed earlier in this run, the PAT
+          itself is valid. So the rejection is from main's ruleset.
+
+          MOST LIKELY CAUSE:
+            The Repository admin role is not in main's ruleset bypass
+            list (or a classic branch protection rule is still active
+            alongside the ruleset and doesn't exempt admins).
+
+          HOW TO FIX:
+            1. Settings → Rules → Rulesets → open the ruleset targeting main.
+            2. Bypass list → verify "Repository admin" is checked.
+            3. If a CLASSIC branch protection rule on main is also
+               active (Settings → Branches), delete it — the most
+               restrictive rule wins, and the classic rule may still
+               reject the push even when the ruleset permits it.
+            4. Re-run this workflow.
+
+          ============================================================
+          EOF
+            exit 1
+          fi
+
+      - name: Tag and push
+        run: |
+          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+
+      - name: Create GitHub release with auto-generated notes
+        env:
+          # Use the PAT here too so the release is attributed to the
+          # admin user rather than github-actions[bot] (consistency,
+          # not strictly required for this step).
+          GH_TOKEN: ${{ secrets.DISASTERS_RELEASE_PAT }}
+        run: |
+          gh release create "${{ inputs.version }}" \
+            --title "${{ inputs.version }}" \
+            --target main \
+            --generate-notes

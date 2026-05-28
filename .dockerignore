@@ -1,0 +1,58 @@
+# Build context for image/Dockerfile. Build context is the repo root;
+# .dockerignore lives here, NOT in image/. Pre-consolidation this didn't
+# matter because the image repo had its own context.
+
+# Git internals
+.git/
+.gitignore
+.gitattributes
+
+# CI / governance / dev-only configs (image doesn't need any of this)
+.github/
+.clinerules.md
+.pre-commit-config.yaml
+.claude/
+.cline/
+.cursor/
+
+# Notebooks — operators clone them into their pod workspace via the
+# Disasters-Learning-Portal/disasters-docs git-pull link, not from the
+# baked-in copy. Stripping them keeps the image ~15-20 MB lighter.
+notebooks/
+
+# Local docs site / tutorials
+docs/
+
+# Test fixtures + pytest output
+tests/
+.pytest_cache/
+
+# The scaffolder + lint scripts are dev-time. The image already has
+# the consistency lint via CI; no need to ship the tooling.
+tools/
+bin/
+
+# Python build artifacts
+*.pyc
+__pycache__/
+*.egg-info/
+*.egg
+dist/
+build/
+venv/
+env/
+.venv/
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# NOT excluded: the image/ subtree. Its environment.yml and scripts/ are
+# needed by the Dockerfile, and .dockerignore exclusions can't be
+# per-COPY. Letting image/ ride along inside /srv/repo/algorithms/ is
+# harmless (a few KB of dead weight; pyproject.toml's
+# [tool.setuptools.packages.find].include glob doesn't list "image*", so
+# it isn't treated as a Python package by `pip install`).

@@ -82,7 +82,7 @@ today, but the planned notebook conformance lint will.
 Verbatim copy from `capella/cli.py` with one string change. The pattern
 uses `exec(compile(...))` so that running `python <sensor>/process_<sensor>.py`
 directly and invoking the console script `process_<sensor>` produce the
-same result. (See [AUTOMATION.md](AUTOMATION.md#audit-flagged-simplifications-not-yet-actioned)
+same result. (See [AUTOMATION.md](AUTOMATION.md#audit-flagged-simplifications)
 for an open question about whether this trick is necessary.)
 
 ```python
@@ -320,16 +320,18 @@ If your sensor introduces new Python libraries, see
 for the full decision tree. Short version:
 
 - **Pip-installable wheel** → `pyproject.toml [project.dependencies]`.
+  Picked up by the hub image's Layer 2 `pip install --no-deps` on the
+  next build.
 - **Conda-only, already in Pangeo base** (the case for most geospatial
   libraries: gdal, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy,
   boto3, etc.) → `dev-conda-deps.txt` only.
-- **Conda-only, NOT in Pangeo base** → BOTH `dev-conda-deps.txt` AND
-  `hub-conda-deps.txt`.
+- **Conda-only, NOT in Pangeo base** → add to `image/environment.yml`
+  under `dependencies:` (and also to `dev-conda-deps.txt` if you want
+  laptop / CI-smoke parity).
 
-The `sync-conda-deps.yml` workflow auto-opens a PR in
-`pangeo-notebook-veda-image` to sync `hub-conda-deps.txt` into its
-`environment.yml`. Review and merge that PR; next image build picks up
-the new dep.
+`image/environment.yml` is read by `image/Dockerfile` Layer 1 — editing
+it invalidates the conda env cache and triggers a ~2-3 min rebuild on
+the next push.
 
 ---
 
@@ -394,16 +396,15 @@ locally before pushing.
 
 ## After merge
 
-1. **CI on `dev` triggers `trigger-docker-rebuild.yml`**, which selects the
-   dev token + `algorithm-updated-dev` event type based on `github.ref`
-   and dispatches to `pangeo-notebook-veda-image`. Watch the action
-   complete (<1 min). The same workflow handles `main` pushes (with the
-   prod token + `algorithm-updated` event) — there is no separate `-dev`
-   workflow anymore.
-2. **Image rebuild** in `pangeo-notebook-veda-image` takes ~3-5 min: ~30s
-   for the algorithms pip-install layer (the common case if you only
-   added Python code) or ~2-3 min if `hub-conda-deps.txt` changed and
-   the env update layer invalidated.
+1. **CI on `dev` triggers `.github/workflows/build-and-push-dev.yaml`**
+   directly — single-repo flow, no cross-repo dispatch. The same shape
+   exists for `main` (`build-and-push.yaml`). Both filter `paths-ignore`
+   on docs/notebooks/tests/tools/markdown, so a sensor-code push always
+   fires a rebuild.
+2. **Image build** takes ~1-1.5 min if you only added Python code
+   (Layer 2 pip install ~30s + ~1 min of runner overhead) or ~3-4 min
+   if `image/environment.yml` changed (Layer 1 conda env update ~2-3 min).
+   Watch the run via `gh run list --branch dev --workflow=build-and-push-dev.yaml`.
 3. **Spawn a fresh pod** from `klesinger/disasters-jupyterhub-docker-image-dev:latest`
    (or `:<sha-12>` for a specific commit pin).
 4. **Smoke test:**
@@ -421,13 +422,13 @@ locally before pushing.
    (`.github/PULL_REQUEST_TEMPLATE.md`) reminds you of the
    `feature/* → dev → main` flow; native branch protection on `main`
    (see `.github/RULESETS.md`) is the authoritative gate. On merge,
-   `trigger-docker-rebuild.yml` rebuilds the prod image.
+   `build-and-push.yaml` rebuilds the prod image.
 
 If `process_<sensor>` is missing on a fresh pod after a green CI + image
 rebuild, see the debug checklist in
-[HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md). The most common cause is
-"wrong branch on wrong image variant" — e.g. testing against the prod
-image after only merging to `dev`.
+[HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md). Most common causes now: the
+build workflow didn't fire (push was doc-only, hit `paths-ignore`) or
+you spawned the prod pod (`...image:latest`) before merging `dev` → `main`.
 
 ---
 

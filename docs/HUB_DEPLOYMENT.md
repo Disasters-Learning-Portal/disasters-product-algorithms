@@ -1,90 +1,85 @@
 # Disasters JupyterHub Deployment
 
-How this package reaches the VEDA JupyterHub image, and the cache-buster
-pattern that makes algorithm updates actually land.
+How this package reaches the VEDA JupyterHub image. As of 2026-05-28 the
+image build lives in this repo — `image/` is a checked-in subtree of the
+former `pangeo-notebook-veda-image` fork and the build workflows fire
+directly on pushes to `dev` / `main`.
 
-## Two-repo build flow
+## Single-repo build flow
 
 ```
 disasters-product-algorithms (this repo)
   push to <branch>
         │
-        │ .github/workflows/trigger-docker-rebuild*.yml
-        │ fires repository_dispatch with client_payload.sha
+        │ .github/workflows/build-and-push{,-dev}.yaml
+        │   on: push: branches: [<branch>]
+        │   paths-ignore: docs/**, notebooks/**, tests/**, tools/**, **.md
         ▼
-pangeo-notebook-veda-image (Disasters-Learning-Portal)
-  .github/workflows/build-and-push*.yaml runs
+  docker build -f image/Dockerfile .   (build context = repo root)
         │
-        ├─ Step 1: resolve algorithms ref to a concrete SHA
-        │    - dispatch trigger    → use client_payload.sha
-        │    - direct image push   → gh api .../git/ref/heads/<branch>
-        │      where <branch> = main (prod variant) or dev (dev variant)
+        ├─ Layer 1: ADD image/environment.yml + conda env update
+        │            (cached on environment.yml content; ~2-3 min cold)
         │
-        └─ Step 2: jupyter-repo2docker (uses repo's own Dockerfile)
-             │
-             ▼
-  Dockerfile (two RUN layers):
-    ADD environment.yml environment.yml
-    ARG GH_PAT
-    RUN conda env update ...                          ← Layer 1
-        (env.yml has NO disasters-product-algorithms line;
-         this layer is cached on env.yml contents only)
-    ARG ALGORITHMS_REF=main
-    RUN pip install                                   ← Layer 2
-        "git+https://...algorithms.git@$ALGORITHMS_REF"
-        (cached per unique SHA — algorithm-only changes
-         re-run JUST this small layer, ~30s)
+        └─ Layer 2: COPY . /srv/repo/algorithms + pip install --no-deps
+                     (cached on COPYed file content — .dockerignore at the
+                      repo root strips notebooks/, docs/, tests/, .git/,
+                      tools/, .github/ etc.; ~30s cold)
         │
         ▼
-  Image published to Docker Hub as
-    disasters-jupyterhub-docker-image[-dev]:latest
+  docker push klesinger/disasters-jupyterhub-docker-image[-dev]:{<sha-12>,latest}
 ```
 
-Two branch-specific variants in the image repo, each with its own
-default algorithms branch when triggered by a direct push (vs dispatch):
+Per-branch wiring:
 
-| Image variant | Workflow file | Default algorithms branch |
+| Branch | Workflow | Docker Hub tag |
 |---|---|---|
-| Prod (`...image`) | `build-and-push.yaml` | `main` |
-| Dev (`...image-dev`) | `build-and-push-dev.yaml` | `dev` |
+| `main` | `.github/workflows/build-and-push.yaml` | `klesinger/disasters-jupyterhub-docker-image:{<sha-12>,latest}` |
+| `dev` | `.github/workflows/build-and-push-dev.yaml` | `klesinger/disasters-jupyterhub-docker-image-dev:{<sha-12>,latest}` |
 
-When triggered by `repository_dispatch` (algorithm push), the SHA from
-`client_payload.sha` overrides the branch fallback. So your dev-branch
-push always lands in the dev image at that exact SHA; the prod image is
-unaffected until you merge to main.
+Both workflows expose `workflow_dispatch` for manual re-runs from the
+Actions UI. `--cache-from <DOCKER_USERNAME>/...:latest` pulls the previous
+image's layers as a remote registry cache — survives the move from the
+old image repo because Docker Hub doesn't care which CI built the layers.
 
-## How the two-layer install design fixes two old bugs
+## Two cache layers
 
-Before this design, the Dockerfile had a single `RUN conda env update`
-layer that included the algorithms install (via env.yml's pip block, with
-no `@ref`). Two consequences both bit us:
+The Dockerfile is intentionally split. Algorithm-only edits (the common
+case) invalidate only the small Layer 2; conda env changes invalidate
+Layer 1.
 
-1. **Docker cached the layer indefinitely.** `env.yml` rarely changed, so
-   Docker reused the cached layer across rebuilds. Algorithm pushes never
-   landed. Symptom: `process_satellogic` etc. missing on fresh hub pods,
-   workaround `pip install -e .` per session. Fixed by giving the
-   algorithms install its own RUN layer cache-keyed on `ALGORITHMS_REF`.
+- **Layer 1** — `ADD image/environment.yml /tmp/environment.yml` then
+  `conda env update`. Cache key is the SHA256 of `environment.yml`'s
+  contents. Cold runtime ~2-3 min. Re-runs only when somebody edits
+  `image/environment.yml`.
+- **Layer 2** — `COPY --chown=... . /srv/repo/algorithms` then
+  `pip install --no-deps /srv/repo/algorithms`. Cache key is the SHA256
+  of the COPYed file tree (post-`.dockerignore` filtering). Cold runtime
+  ~30s. Re-runs on any algorithms code change.
 
-2. **Both image variants installed the same code** (HEAD of algorithms
-   `main` — whatever `pip install git+https://.../algorithms.git`
-   resolves to without a ref). The "dev image" wasn't dev. Fixed by
-   passing per-variant `ALGORITHMS_REF` (`main` for prod, `dev` for dev),
-   resolved to a concrete SHA at workflow time.
+Why `--no-deps`: the Pangeo base image + Layer 1's conda env already
+provide everything `[project.dependencies]` resolves to. Letting pip
+walk the dep graph would either be a no-op (if conda already satisfies
+the requirement) or, worse, install a pip variant that shadows the
+conda binary build. Pip-installable deps that aren't in the Pangeo
+base + `image/environment.yml` should be added explicitly to the conda
+env, not relied on to come in via `pip install`.
 
-Bonus from the split: algorithm-only changes now rebuild a tiny pip-install
-layer (~30s) instead of the full conda env update (~2-3 min).
+Pre-consolidation this used `ARG ALGORITHMS_REF` + `pip install
+git+https://...@$ALGORITHMS_REF` keyed on a SHA the workflow resolved
+via `gh api .../heads/<branch>`. That mechanism is gone; the algorithms
+SHA is implicit in the build context.
 
 ## Source of truth files
 
 | File | Lives in | Role |
 |---|---|---|
-| `pyproject.toml` (comment block above `[project.optional-dependencies]`) | this repo | **DEV-LOCAL spec.** What to `conda install` for local development. Documentation only — not consumed by the image build. |
-| `pyproject.toml` (`[project] dependencies`) | this repo | **Pip-installable deps** that flow into the image transitively via the existing `pip: - git+https://...algorithms.git` line. **Prefer this path** for any new dep that ships a manylinux wheel — zero touch of the image repo required. |
-| `hub-conda-deps.txt` | this repo | **Conda-only deps** that the image must install ON TOP OF the Pangeo base. Empty by default. Source of truth for the managed block in image-repo `environment.yml`. Auto-syncs (see below). |
-| `pangeo-notebook-veda-image/environment.yml` | image repo | The file `repo2docker` actually reads. Contains the Pangeo extras, the `pip: - git+https://...algorithms.git` install line, **and** a managed block populated by the auto-sync workflow. |
+| `pyproject.toml` (`[project] dependencies`) | this repo | **Pip-installable deps.** Installed by Layer 2's `pip install --no-deps` from the local checkout. Prefer this path for any new dep with a manylinux wheel. |
+| `dev-conda-deps.txt` | this repo | **Local-dev + CI smoke spec.** Read by `cli-smoke` in `lint.yml` and by contributors setting up a laptop env. Does NOT flow into the hub image. |
+| `image/environment.yml` | this repo (subtree) | **Hub-image conda env.** The file Layer 1 actually reads. Add hub-image conda-only deps here. |
 
-**Do not create `environment.yml` in this repo.** repo2docker is invoked on
-the image repo's checkout, not this one, so any env file here is ignored.
+There is no longer a separate `hub-conda-deps.txt` (deleted in the
+consolidation — its auto-sync target was the old image repo's
+`environment.yml`, which is now `image/environment.yml` directly).
 
 ## Adding dependencies — decision flow
 
@@ -92,172 +87,170 @@ the image repo's checkout, not this one, so any env file here is ignored.
 Need a new dep?
     │
     ├── pip-installable (manylinux wheel exists)?
-    │      │
-    │      └── YES → add to `[project] dependencies` in pyproject.toml.
-    │                Push to main. Done. (Cache-buster + dispatch handle it.)
+    │      └── YES → add to [project.dependencies] in pyproject.toml.
+    │                Pushed to dev / main flows into the next image build
+    │                via Layer 2's pip install. Done.
     │
     └── conda-only (binary system lib, GDAL plugin, etc.)?
            │
-           └── add a line to hub-conda-deps.txt. Push to main.
-               The sync-conda-deps workflow opens an auto-PR in
-               pangeo-notebook-veda-image. Review + merge that PR;
-               the next image build picks up the new conda dep on
-               its own (the algorithms install layer is separate).
+           ├── Local-dev only?
+           │      └── add a line to dev-conda-deps.txt.
+           │
+           └── Hub image too?
+                  └── add a line to image/environment.yml's dependencies:
+                      section. (And also to dev-conda-deps.txt if you
+                      want laptop parity.)
 ```
 
-You only need to **interact with** the image repo when adding a conda-only
-dep — and even then, it's a one-click merge of an auto-opened PR, not
-manual editing.
+Three files, three audiences, no cross-repo PR ceremony.
 
-## How the auto-sync works
+## Pulling upstream image changes
 
-`.github/workflows/sync-conda-deps.yml` (in this repo):
+The `image/` subtree was added via
+`git subtree add --prefix=image https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image.git main` (non-squash, so the
+fork's full history is preserved in this repo's `git log`). To pull
+future upstream changes:
 
-1. Triggers on push to `main` that touches `hub-conda-deps.txt`.
-2. Checks out this repo + `pangeo-notebook-veda-image` (using
-   `secrets.PANGEO_REBUILD_TOKEN`, same PAT used by the dispatch trigger).
-3. Reads `hub-conda-deps.txt`, then replaces the contents of the
-   `# === BEGIN/END disasters-product-algorithms managed conda deps ===`
-   block in the image-repo `environment.yml`.
-4. Opens a PR in the image repo (`peter-evans/create-pull-request`)
-   for human review and merge.
-
-After that PR merges, the existing dispatch + cache-buster handles the
-rest: any subsequent push to algorithms `main` (or the merge itself, since
-the image-repo workflow runs on push) triggers a real rebuild that picks
-up both the new conda dep and the latest algorithms code.
-
-**One-time setup already done:** `pangeo-notebook-veda-image/environment.yml`
-has the BEGIN/END managed-block markers inserted between the workaround
-deps (`pystac`) and the `- pip` line. If you ever need to move them or
-re-add them, the markers are literally:
-
+```bash
+git subtree pull --prefix=image \
+    https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image.git \
+    main --squash
 ```
-  # === BEGIN disasters-product-algorithms managed conda deps (do not edit by hand) ===
-  # === END disasters-product-algorithms managed conda deps ===
-```
+
+The Disasters-Learning-Portal fork is archived but the remote URL
+remains valid for read-only fetches. NASA-IMPACT's `pangeo-notebook-veda-image`
+upstream-of-upstream is still active; pulls from there go through the
+archived fork unless you rewire the remote.
+
+Bumping the Pangeo base image: edit
+`image/Dockerfile`'s top line — `FROM pangeo/pangeo-notebook:<tag>` —
+to the new tag (see https://github.com/pangeo-data/pangeo-docker-images
+for release cadence). Push the change; Layer 1 invalidates cleanly,
+Layer 2 cache is preserved (different cache key).
 
 ## Debugging: `process_*` CLI missing in a fresh hub pod
 
-Don't reach for `pip install -e .` first — that masks the real problem.
+The cross-repo "wrong branch on wrong image variant" footgun is mostly
+gone — one repo, one push triggers one build per branch — but a few
+failure modes remain.
+
 Order of checks:
 
-0. **Did CI pass on the algorithms commit that pinned the image?**
-   `.github/workflows/lint.yml` runs `sensor-consistency` + `cli-smoke`
-   on every push to `dev` and `main`. If those jobs failed and the image
-   built anyway (e.g. someone bypassed branch protection), the pod will
-   show `ModuleNotFoundError: No module named '<sensor>'` even though
-   the console-script shim exists in `/srv/conda/envs/notebook/bin/`.
-   Fix in algorithms (`tools/check_sensor_consistency.py` shows the
-   exact pyproject.toml edit needed), push, wait for the rebuild. This
-   check was added after the capella rollout exhibited exactly this
-   failure mode — see [AUTOMATION.md §Post-mortems](AUTOMATION.md#post-mortems).
-
-1. **Which image variant did the hub spawn, and which algorithms branch
-   has the CLI?** Prod image installs from `main` HEAD; dev image from
-   `dev` HEAD. If your CLI lives on `dev` and you're on the prod image,
-   you need to merge `dev` → `main` (and wait for the rebuild) before
-   it shows up in prod.
-2. **Most recent build log on GitHub Actions for the image repo**:
-   - Confirm the "Resolve algorithms ref to a concrete SHA" step echoed
-     the SHA you expect (e.g. for the dev image, a SHA on the algorithms
-     `dev` branch).
-   - Confirm the Dockerfile Layer 2 RUN ran (`Installing
-     disasters-product-algorithms@<sha>`) and reported
-     `Successfully installed disasters-product-algorithms-<version>`.
-3. **The image's actually-installed version**:
+1. **Did the build workflow actually run?** Recent runs for the branch
+   the hub image variant tracks:
+   ```bash
+   gh run list --branch main --workflow=build-and-push.yaml --limit 3
+   gh run list --branch dev  --workflow=build-and-push-dev.yaml --limit 3
    ```
+   Look for a green run whose SHA matches the algorithms commit you
+   expect to be in the pod.
+
+2. **Was the push doc-only?** `paths-ignore` on both workflows excludes
+   `docs/**`, `notebooks/**`, `tests/**`, `tools/**`, `**.md`,
+   `.clinerules.md`, `.pre-commit-config.yaml`. A push touching ONLY
+   those paths fires no rebuild. Intentional — saves ~2-4 min per
+   doc-only push — but it does mean a CLI added in the same commit
+   as a README change won't ship until a subsequent code-touching
+   push lands.
+
+3. **Did `lint.yml` (`sensor-consistency` + `cli-smoke`) fail on the
+   same commit?** The build workflow doesn't gate on lint, so a broken
+   pyproject can in principle still publish an image. Confirm:
+   ```bash
+   gh run list --branch <branch> --workflow=lint.yml --limit 3
+   ```
+   If lint failed and the build went through anyway, the pod will show
+   `ModuleNotFoundError: No module named '<sensor>'` even though the
+   console-script shim exists in `/srv/conda/envs/notebook/bin/`. Fix
+   the lint failure (`tools/check_sensor_consistency.py` shows the
+   exact pyproject edit needed), push, wait for the rebuild. See
+   [AUTOMATION.md §Post-mortems](AUTOMATION.md#post-mortems) for the
+   original capella rollout that motivated this check.
+
+4. **The image's actually-installed version**:
+   ```bash
    docker pull <DOCKER_USERNAME>/disasters-jupyterhub-docker-image:latest
    docker run --rm <DOCKER_USERNAME>/disasters-jupyterhub-docker-image:latest \
      bash -lc 'which process_satellogic && \
                pip show disasters-product-algorithms | grep -E "Version|Location"'
    ```
-4. **`ALGORITHMS_REF` per-variant pinning is wired**: confirm
-   `pangeo-notebook-veda-image/Dockerfile` has the two-layer design
-   (separate `RUN pip install ...@$ALGORITHMS_REF`), `environment.yml`
-   does NOT have a `disasters-product-algorithms` line, and each
-   `build-and-push*.yaml` has a "Resolve algorithms ref" step + passes
-   `--build-arg ALGORITHMS_REF=${{ steps.algo.outputs.sha }}`.
+
+5. **Which image variant did the hub spawn?** Prod pods use
+   `...image:latest`; dev pods use `...image-dev:latest`. If your CLI
+   lives on `dev` and you spawned a prod pod, you'll need to merge
+   `dev` → `main` and wait for the `build-and-push.yaml` run.
 
 The `pip install -e .` workaround stays valid for hot-iterating local
-edits inside a single hub session (see [README.md](../README.md) "Development
-in JupyterHub" section), but should never be the answer to "the image is
-broken on every fresh pod."
+edits inside a single hub session (see README.md "Development in
+JupyterHub"), but should never be the answer to "the image is broken
+on every fresh pod."
 
-## Build duration expectations & diagnostic signals
+## Build duration expectations
 
-Empirical durations from the 27 May 2026 deployment of this two-layer
-design (cached `--cache-from=...:latest`, runs on `ubuntu-latest`):
+Empirical durations for the consolidated single-repo build (cached
+`--cache-from=...:latest`, GitHub `ubuntu-latest` runner):
 
-| Scenario | Conda env update layer | Algorithms install layer | Total wall-clock |
+| Scenario | Layer 1 (conda) | Layer 2 (algorithms) | Total wall-clock |
 |---|---|---|---|
-| Cache-cold (first build, or `env.yml` changed) | ~2-3 min | ~5s (with `--no-deps`) | ~3-4 min |
-| Algorithm-only change (`env.yml` unchanged, new `ALGORITHMS_REF`) | cached, <1s | ~5s | ~1-1.5 min |
+| Cache-cold (first build, or `image/environment.yml` changed) | ~2-3 min | ~30s | ~3-4 min |
+| Algorithm-only change (env.yml unchanged) | cached, <1s | ~30s | ~1-1.5 min |
 | No-op (re-trigger with same inputs) | cached, <1s | cached, <1s | ~30-60s |
 
-Wall-clock includes GitHub-runner setup, `pip install jupyter-repo2docker`,
-`docker login`, `cache-from` manifest import, and the final `docker push`
-to Docker Hub — typically ~1-1.5 min of overhead independent of the build
-itself.
+Wall-clock includes runner setup, `docker login`, `cache-from` manifest
+import, and `docker push` — typically ~1-1.5 min of overhead independent
+of the build itself.
 
 **Red flags in build logs:**
-- A build that finishes in **under 90 seconds** when you'd expect a real
-  rebuild → cache reused something that shouldn't have been. Check that
-  `ALGORITHMS_REF` differs from the previous successful build, and that
-  the Dockerfile actually references `$ALGORITHMS_REF` in a `RUN`.
-- "Resolve algorithms ref" step prints the wrong SHA (e.g., prod build
-  resolved a dev-branch SHA) → workflow's fallback branch is wrong, or
-  the dispatch payload SHA is bleeding across variants. Check
-  `github.event.client_payload.sha || gh api .../heads/<branch>`.
-- "Installing disasters-product-algorithms@..." line is **missing** from
-  the build log → Layer 2 was cached entirely. Means
-  `ALGORITHMS_REF` is identical to a previous build for this image variant.
-  This is correct behavior; the image content from that previous build
-  is still valid.
 
-## Known limitations / cleanup follow-ups
-
-1. **Image-repo `build-and-push*.yaml` workflows use `on: push:` with no
-   branch filter.** Any push to any branch (including transient PR branches
-   from auto-sync) fires every workflow. Today the auto-PR branch
-   `sync-conda-deps-from-algorithms` triggered 3 spurious builds and even
-   tagged a Docker Hub image off that branch. Fix: add
-   `on: push: branches: [main]` to all three workflows.
-2. **Sync-conda-deps script wipes any comment lines inside the BEGIN/END
-   managed block** in image-repo `environment.yml`. The script treats `#`
-   lines in `hub-conda-deps.txt` as comments-to-skip, so an empty deps
-   list writes a literally-empty block. Mitigation: explanatory comments
-   live OUTSIDE the markers; this is documented inline in `environment.yml`
-   so future contributors don't drop comments back in.
-3. **Stale `disasters-jupyterhub-docker-image-testmerge` Docker Hub repo.**
-   Workflow that built it was deleted in this session; the existing image
-   in Docker Hub will no longer receive updates. Delete manually via the
-   Docker Hub UI if no longer needed.
-4. **Stale `merge-aws-conversion` branch in this repo.** No longer tracked
-   by any trigger workflow. Delete with
-   `git push origin --delete merge-aws-conversion` if no longer needed
-   (destructive — confirm first).
+- A build that finishes in under 60 seconds when you'd expect a real
+  rebuild → check `paths-ignore`: maybe only doc files changed and the
+  build shouldn't have fired at all (in which case it didn't), or
+  Layer 2's COPY didn't actually pick up the file you expected (check
+  `.dockerignore` for an accidental over-exclusion).
+- "Successfully installed disasters-product-algorithms-..." line is
+  **missing** from the build log → Layer 2 was cached entirely. Means
+  the COPYed file tree post-`.dockerignore` was bit-identical to the
+  prior build. This is correct behavior; the image content from the
+  prior build is still valid.
+- Layer 1 ran when you didn't expect it to → somebody touched
+  `image/environment.yml`. Confirm via `git log -- image/environment.yml`.
 
 ## Design history (short)
 
-The fix landed in two iterations on 27 May 2026 because the first round
-exposed a deeper bug:
+The hub-image build mechanism has gone through three iterations:
 
-1. **First attempt: cache-buster `ARG ALGORITHMS_SHA`** on the single
-   `RUN conda env update` layer. Theory was that the Docker layer was
-   cached forever and pip never re-fetched. The buster did force the
-   layer to re-run — confirmed in build logs — but it still installed
-   algorithms `main` HEAD because the pip line in `environment.yml` had
-   no `@ref`. Every image variant (prod / dev / testmerge) silently
-   pulled the same `main` code regardless of which trigger fired.
-2. **Second attempt (current): two-layer Dockerfile + per-variant
-   `ALGORITHMS_REF`.** Algorithms install moves out of `environment.yml`
-   into its own `RUN` layer, pinned to a SHA the workflow resolves from
-   the dispatch payload or `gh api .../heads/<branch>`. Each variant
-   gets its own concrete branch fallback. Solves both the caching bug
-   and the wrong-branch bug, plus makes algorithm-only rebuilds ~10x
-   faster.
+1. **Single-layer `conda env update` (pre-2026-05-27).** `environment.yml`
+   contained a `pip: - git+https://.../algorithms.git` line with no `@ref`.
+   Docker cached the layer indefinitely, so algorithm pushes never
+   landed in fresh pods. Workaround was `pip install -e .` per session.
+   Bonus bug: every image variant (prod / dev / testmerge) installed
+   the same `main` HEAD because the pip line had no ref.
 
-Don't go back to the single-layer design. The `ALGORITHMS_SHA`
-cache-buster will appear to work but won't fix the actual bug, because
-the bug isn't really about caching — it's about WHAT pip resolves.
+2. **Two-layer + per-variant `ALGORITHMS_REF` (2026-05-27 to 2026-05-28).**
+   Split the algorithms install into its own RUN layer pinned to a SHA
+   the workflow resolved via `gh api .../heads/<branch>` (or from
+   `repository_dispatch` payload). Algorithm-only rebuilds dropped to
+   ~30s. The dev image actually installed dev code. This shipped as
+   commit `a9cf2ea` and required a cross-repo `repository_dispatch`
+   from this repo to `pangeo-notebook-veda-image` plus a separate
+   `sync-conda-deps.yml` workflow to mirror `hub-conda-deps.txt` into
+   the image repo's `environment.yml` via auto-PR.
+
+3. **Single-repo consolidation (2026-05-28, current).** An architecture
+   audit flagged that the two-repo split was paying ongoing complexity
+   tax — two PAT secrets (`PANGEO_REBUILD_TOKEN`,
+   `PANGEO_REBUILD_TOKEN_DEV`), a cross-repo dispatch contract, a
+   sync-conda-deps auto-PR flow, three dep files, and per-variant
+   `ALGORITHMS_REF` resolution — for what was effectively one team and
+   one release surface. The `pangeo-notebook-veda-image` fork was
+   imported into this repo as a `git subtree add --prefix=image`
+   (non-squash, full history preserved), the Dockerfile was rewritten
+   to `COPY . /srv/repo/algorithms` against the repo-root build context
+   (no more `ARG ALGORITHMS_REF` / `ARG GH_PAT`), and new in-repo
+   `build-and-push{,-dev}.yaml` workflows replaced the cross-repo
+   dispatch. `hub-conda-deps.txt`, `sync-conda-deps.yml`, and both
+   `trigger-docker-rebuild*.yml` workflows were deleted. Net effect:
+   one repo, one push triggers one build, three dep files collapsed
+   to the two with real semantic differences (pip wheels vs hub-image
+   conda env), and the "wrong branch on wrong variant" debug surface
+   shrank to "did the workflow run, and did lint pass."

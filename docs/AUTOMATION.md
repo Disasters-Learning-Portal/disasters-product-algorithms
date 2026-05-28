@@ -15,8 +15,8 @@ What's automated today:
 | Pre-commit enforcement of the consistency lint | `.pre-commit-config.yaml` (local hook) | Local, opt-in via `pre-commit install` |
 | New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
 | CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job (import-test + `--help`) | CI only |
-| Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild.yml` (single consolidated workflow) | Push to `dev` / `main` |
-| Conda-dep sync to hub image | `.github/workflows/sync-conda-deps.yml` | Push to `main` touching `hub-conda-deps.txt` |
+| Hub image build (prod) | `.github/workflows/build-and-push.yaml` | Push to `main` (code paths only) |
+| Hub image build (dev) | `.github/workflows/build-and-push-dev.yaml` | Push to `dev` (code paths only) |
 | PR shape conventions (target branch, test plan, checklist) | `.github/PULL_REQUEST_TEMPLATE.md` + `.github/RULESETS.md` (one-time setup doc) | Auto-populated on every PR |
 
 What's **not** yet automated (see [Roadmap](#roadmap)):
@@ -138,17 +138,18 @@ matches the hub image's dep stack.
 
 ## Dependency source-of-truth files
 
-Three files, three audiences, three lifecycles. The semantic distinction is
-real and the contributor decision tree is small enough to be manageable —
-but it's brittle, so it's worth being explicit.
+Three files, three audiences, three lifecycles. Down from four after the
+2026-05-28 image-repo consolidation (`hub-conda-deps.txt` was deleted; its
+target — the image repo's `environment.yml` — now lives in this repo as
+`image/environment.yml` and is edited directly).
 
 ### Three files
 
 | File | Audience | Format | Lifecycle |
 |---|---|---|---|
-| `pyproject.toml [project.dependencies]` | `pip install .` transitive | pip spec (e.g. `"Pillow"`, `"requests>=2.30"`) | Per-PR |
+| `pyproject.toml [project.dependencies]` | `pip install .` transitive (incl. hub image's Layer 2 pip install) | pip spec (e.g. `"Pillow"`, `"requests>=2.30"`) | Per-PR |
 | `dev-conda-deps.txt` | Local dev + CI smoke | one conda spec per line (e.g. `gdal`, `rasterio>=1.3`) | Per-PR |
-| `hub-conda-deps.txt` | Hub image conda deps ON TOP of Pangeo base | one conda spec per line | Per-PR + auto-sync to image repo |
+| `image/environment.yml` | Hub image's conda env (read by `image/Dockerfile` Layer 1) | conda `environment.yml` schema | Per-PR |
 
 ### What goes where — decision tree
 
@@ -157,6 +158,8 @@ Need to add a new Python dependency?
 │
 ├─ Does it have a manylinux wheel? (pip install <pkg> works on a clean Linux box)
 │   └─ YES → pyproject.toml [project.dependencies]. Done.
+│            (Flows into the hub image via Dockerfile Layer 2's
+│             `pip install --no-deps`.)
 │
 └─ Conda-only (GDAL plugin, native lib, pinning required):
     │
@@ -165,23 +168,9 @@ Need to add a new Python dependency?
     │   └─ YES → dev-conda-deps.txt only. Hub already has it.
     │
     └─ NOT in Pangeo base:
-        └─ BOTH dev-conda-deps.txt AND hub-conda-deps.txt.
-           The sync-conda-deps workflow handles the image-repo side.
+        └─ image/environment.yml (under `dependencies:`). And also
+           dev-conda-deps.txt if you want laptop / CI-smoke parity.
 ```
-
-### `hub-conda-deps.txt` auto-sync
-
-The `.github/workflows/sync-conda-deps.yml` workflow:
-
-1. Fires on **push to `main`** that touches `hub-conda-deps.txt`.
-2. Clones `pangeo-notebook-veda-image` (using `PANGEO_REBUILD_TOKEN`).
-3. Rewrites the managed block in that repo's `environment.yml` with the
-   current contents of `hub-conda-deps.txt`.
-4. Opens a PR in `pangeo-notebook-veda-image` via `peter-evans/create-pull-request`.
-5. Reviewer merges. Next image build picks up the new conda dep.
-
-No manual editing of `pangeo-notebook-veda-image` needed. The PR title and
-body are auto-generated and reference the algorithms-repo commit.
 
 ### Verifying dep state locally
 
@@ -202,42 +191,39 @@ pip install -e .
 
 ---
 
-## Cross-repo image-rebuild dispatch
+## Image build
 
-### Today's workflow (consolidated — Rec 2 shipped)
+The hub image is built in this repo from `image/Dockerfile`. Two per-branch
+workflows, one Docker Hub tag each.
 
-A **single** workflow handles both branches:
+### Workflows
 
-- `.github/workflows/trigger-docker-rebuild.yml` — `on: push: branches: [main, dev]`.
-  Picks the right token and `event_type` based on `github.ref`:
-  ```yaml
-  env:
-    PANGEO_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PANGEO_REBUILD_TOKEN || secrets.PANGEO_REBUILD_TOKEN_DEV }}
-    EVENT_TYPE: ${{ github.ref == 'refs/heads/main' && 'algorithm-updated' || 'algorithm-updated-dev' }}
-  ```
-  Both secrets remain required: `PANGEO_REBUILD_TOKEN` for prod (`main`),
-  `PANGEO_REBUILD_TOKEN_DEV` for dev (`dev`). The payload includes the
-  pushed commit SHA, ref, repository, and branch name. Dispatch contract
-  is preserved — image-repo listens for the same two event types as before.
+- `.github/workflows/build-and-push.yaml` — fires on push to `main`,
+  pushes `klesinger/disasters-jupyterhub-docker-image:{<sha-12>,latest}`.
+- `.github/workflows/build-and-push-dev.yaml` — fires on push to `dev`,
+  pushes `klesinger/disasters-jupyterhub-docker-image-dev:{<sha-12>,latest}`.
 
-The image-repo workflows (`build-and-push.yaml` / `build-and-push-dev.yaml`)
-listen for those dispatch events. Each resolves `ALGORITHMS_REF` from the
-dispatch payload's commit SHA (or falls back to live branch HEAD if invoked
-on its own), then runs `docker build --build-arg ALGORITHMS_REF=<sha> .`.
+Both expose `workflow_dispatch` for manual re-runs. Both filter
+`paths-ignore: [docs/**, notebooks/**, tests/**, tools/**, **.md,
+.clinerules.md, .pre-commit-config.yaml]` — doc-only pushes don't trigger
+a rebuild (saves ~2-4 min per push).
 
-### Two-layer Dockerfile (image repo)
+### Two cache layers (image/Dockerfile)
 
-The image-repo Dockerfile is split into two RUN layers:
+- **Layer 1** (slow, ~2-3 min cold): `ADD image/environment.yml /tmp/...`
+  then `conda env update`. Cached on `environment.yml` content. Re-runs
+  only when `image/environment.yml` changes.
+- **Layer 2** (fast, ~30s cold): `COPY . /srv/repo/algorithms` then
+  `pip install --no-deps /srv/repo/algorithms`. Cached on the COPYed
+  file tree (post-`.dockerignore` filtering). Re-runs on any algorithms
+  code change.
 
-- **Layer 1** (slow, ~2-3 min): `pangeo/pangeo-notebook` base + `environment.yml`
-  updates. Cached on the content of `environment.yml`, which is itself
-  derived from `hub-conda-deps.txt` via the sync workflow.
-- **Layer 2** (fast, ~30s): `pip install --force-reinstall --no-deps git+https://...@<ALGORITHMS_REF>`.
-  Cached per algorithms SHA.
+`.dockerignore` at the repo root strips `notebooks/`, `docs/`, `tests/`,
+`tools/`, `.github/`, `.git/`, etc. so Layer 2's COPY stays tight.
 
-Why two layers: algorithm-only changes (the common case) invalidate only
-the small pip layer, not the heavy conda update. This is the design that
-shipped after the per-variant pinning refactor in `a9cf2ea`.
+`--cache-from <DOCKER_USERNAME>/...:latest` pulls the previous image's
+layers as a remote registry cache — survives the move from the
+pre-consolidation image repo because Docker Hub is the source of truth.
 
 ### Image variants on Docker Hub
 
@@ -249,6 +235,9 @@ shipped after the per-variant pinning refactor in `a9cf2ea`.
 A stale `disasters-jupyterhub-docker-image-testmerge` repo may still exist
 on Docker Hub from earlier experiments. The build pipeline no longer
 produces it; safe to delete via the Docker Hub UI.
+
+Full design rationale + debug checklist when a CLI is missing on a fresh
+pod: [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md).
 
 ---
 
@@ -362,12 +351,12 @@ Bugs 1, 2, and 3 are now **structurally impossible** rather than just CI-caught.
 
 Two simplifications, both landed:
 
-- **Trigger workflows consolidated.** `trigger-docker-rebuild.yml` and
-  `trigger-docker-rebuild-dev.yml` collapsed into a single workflow keyed
-  on `github.ref`. The dispatch contract is unchanged — image-repo still
-  receives `algorithm-updated` (prod) and `algorithm-updated-dev` (dev)
-  events with the same payload shape. See
-  [Cross-repo image-rebuild dispatch](#cross-repo-image-rebuild-dispatch).
+- **Trigger workflows consolidated** (later superseded by Rec 4 —
+  the trigger workflow was deleted entirely when the image repo
+  was folded into this one). `trigger-docker-rebuild.yml` and
+  `trigger-docker-rebuild-dev.yml` were collapsed into a single workflow
+  keyed on `github.ref`, dispatching to the then-separate image repo.
+  See [Image build](#image-build) for the current in-repo flow.
 - **Bash-based branch governance removed.** `enforce-dev-to-main.yml` and
   `enforce-branch-protection.yml` (~117 lines of bash) deleted. Replaced
   by `.github/PULL_REQUEST_TEMPLATE.md` for shape conventions and
@@ -403,19 +392,55 @@ Two small additions, both landed:
   errors. Sensor list is disk-scanned (cli.py + process_*.py heuristic),
   so new sensors get exercised automatically.
 
-### Audit-flagged simplifications (not yet actioned)
+### Rec 4 — Image-repo consolidation — SHIPPED (2026-05-28)
 
-These came out of the same simplicity audit but require team discussion:
+The `pangeo-notebook-veda-image` fork was imported into this repo as a
+`git subtree add --prefix=image` (non-squash; the fork's full history is
+preserved in the algorithms repo's `git log`). The build now lives here,
+triggered directly by `build-and-push{,-dev}.yaml` on pushes to `dev` /
+`main`.
 
-- **The `cli.py` `exec(compile(...))` trick** in every sensor dir is bizarre.
-  Console scripts can point directly at `<sensor>.process_<sensor>:main`
-  if `process_<sensor>.py` follows the standard
-  `if __name__ == "__main__": main()` pattern. Three `cli.py` files could
-  be deleted, the `[project.scripts]` entries simplified.
-- **The three conda-dep files** could potentially consolidate to one
-  (`conda-deps.txt` with section markers + a `pangeo-base.lock` for
-  diffing). The current design forces contributors to maintain two lists
-  with the relationship documented only in file headers.
+What this collapsed:
+
+- **Two repos → one.** No more cross-repo `repository_dispatch`. No more
+  per-variant `ALGORITHMS_REF` build-arg resolved via `gh api .../heads/<branch>`.
+  The algorithms SHA is implicit in the build context (`COPY . /srv/repo/algorithms`).
+- **Two PAT secrets gone.** `PANGEO_REBUILD_TOKEN` and
+  `PANGEO_REBUILD_TOKEN_DEV` no longer needed (only Docker Hub creds
+  remain).
+- **Four files deleted.** `hub-conda-deps.txt`,
+  `.github/workflows/sync-conda-deps.yml`,
+  `.github/workflows/trigger-docker-rebuild.yml`,
+  `.github/workflows/trigger-docker-rebuild-dev.yml`. The auto-sync PR
+  flow into the image repo's `environment.yml` is gone — that file
+  (now `image/environment.yml`) is edited directly.
+- **Three conda-dep files → still three, but with real semantic
+  differences.** `pyproject.toml [project.dependencies]` (pip wheels),
+  `dev-conda-deps.txt` (local + CI smoke), `image/environment.yml`
+  (hub image conda env). No more `hub-conda-deps.txt` middleman.
+- **"Wrong branch on wrong variant" debug surface** shrank from a 4-step
+  cross-repo SHA-resolution check to "did the workflow run, and did lint
+  pass." See [HUB_DEPLOYMENT.md §Debugging](HUB_DEPLOYMENT.md#debugging-process_-cli-missing-in-a-fresh-hub-pod).
+
+The two audit items below — consolidating the trigger workflows and
+collapsing the three conda-dep files — were superseded by this work
+rather than executed as proposed. The end state is simpler than either
+proposal envisioned: one set of workflows in one repo, with the conda-dep
+files reduced to the three with non-overlapping semantics.
+
+### Audit-flagged simplifications
+
+- ~~**Consolidate the `trigger-docker-rebuild{,-dev}.yml` workflows.**~~
+  Superseded by Rec 4 — the trigger workflows were deleted outright in
+  the image-repo consolidation.
+- ~~**Three conda-dep files could potentially consolidate to one.**~~
+  Superseded by Rec 4 — `hub-conda-deps.txt` was deleted; the remaining
+  three files have distinct audiences.
+- **The `cli.py` `exec(compile(...))` trick** in every sensor dir is
+  still open. Console scripts could point directly at
+  `<sensor>.process_<sensor>:main` if `process_<sensor>.py` followed
+  the standard `if __name__ == "__main__": main()` pattern. Five `cli.py`
+  files could be deleted, the `[project.scripts]` entries simplified.
 
 ---
 
@@ -481,8 +506,9 @@ when any sensor's notebook frontmatter leaks another sensor's name.
 
 ## See also
 
-- [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md) — the cross-repo image build flow,
-  debug checklist when CLIs are missing on a fresh pod.
+- [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md) — the single-repo image build
+  flow, two-layer Dockerfile, debug checklist when CLIs are missing on
+  a fresh pod.
 - [ADDING_A_NEW_SENSOR.md](ADDING_A_NEW_SENSOR.md) — operator-facing guide
   for shipping a new sensor product.
 - [ADDING_FUNCTIONS_TUTORIAL.md](ADDING_FUNCTIONS_TUTORIAL.md) — adding a

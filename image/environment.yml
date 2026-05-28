@@ -18,6 +18,12 @@ dependencies:
   - geoviews-core==1.14.1
   # Working around https://github.com/stac-utils/pystac/issues/1575
   - pystac==1.14.1
+  # Required by tools/new_sensor.py at runtime. nbformat is part of Jupyter
+  # so usually already in Pangeo base, but listing both explicitly here
+  # guarantees the scaffolder runs on a fresh hub pod without a manual
+  # `pip install tomlkit nbformat` step.
+  - tomlkit
+  - nbformat
   # Add new conda-only packages here. Pre-consolidation, packages ON TOP of
   # Pangeo base were tracked in `hub-conda-deps.txt` at the algorithms repo
   # root + auto-synced into a managed block in this file via the

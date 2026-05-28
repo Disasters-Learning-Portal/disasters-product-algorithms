@@ -1,0 +1,46 @@
+name: Build & push hub image (prod)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'notebooks/**'
+      - 'tests/**'
+      - 'tools/**'
+      - '**.md'
+      - '.clinerules.md'
+      - '.pre-commit-config.yaml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & push klesinger/disasters-jupyterhub-docker-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Build image
+        # Build context is the repo root so the Dockerfile's `COPY .` picks
+        # up algorithms code directly. `.dockerignore` at the repo root
+        # strips notebooks/, docs/, .github/, etc. `--cache-from` against
+        # the Docker Hub `:latest` tag survives the move from the image
+        # repo (it's a remote registry cache, repo-agnostic).
+        run: |
+          docker build \
+            -f image/Dockerfile \
+            -t "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12}" \
+            --cache-from "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest" \
+            .
+
+      - name: Tag & push
+        run: |
+          docker tag \
+            "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12}" \
+            "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest"
+          docker push "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12}"
+          docker push "${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest"

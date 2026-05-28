@@ -22,25 +22,21 @@ dependencies = [
 # =============================================================================
 # DEV-LOCAL conda-install spec (not the hub-image spec)
 # =============================================================================
-# This block lists the conda packages you need for LOCAL development on a
-# laptop / VM. The Disasters Hub image gets its conda packages from a
-# different place — see hub-conda-deps.txt and docs/HUB_DEPLOYMENT.md.
+# This block describes conda packages you need for LOCAL development.
+# For the hub image's conda env, see image/environment.yml.
 #
-# For local dev (single source of truth for the dep list: dev-conda-deps.txt):
+# For local dev (single source of truth: dev-conda-deps.txt):
 #   mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 #   pip install -e .
 #
 # Why these aren't in pip dependencies: GDAL and friends require dylib
 # version coupling that pip can't safely manage.
 #
-# For the hub image: deps flow through one of two paths —
-#   1. Pip-installable deps → add to `[project] dependencies` below.
-#      Auto-picked-up by the algorithms install RUN layer in
-#      pangeo-notebook-veda-image/Dockerfile (pinned per variant via
-#      ARG ALGORITHMS_REF: prod→main, dev→dev).
-#   2. Conda-only deps → add to hub-conda-deps.txt at the repo root.
-#      The sync-conda-deps workflow auto-opens a PR in the image repo.
-# Full flow + per-variant pinning mechanics: docs/HUB_DEPLOYMENT.md.
+# Adding a new dep — three places, three audiences:
+#   1. Pip-installable wheel → [project.dependencies] below.
+#   2. Conda-only, local-dev only → dev-conda-deps.txt.
+#   3. Conda-only, hub image too → image/environment.yml.
+# Full reference: docs/AUTOMATION.md.
 # =============================================================================
 
 [project.optional-dependencies]

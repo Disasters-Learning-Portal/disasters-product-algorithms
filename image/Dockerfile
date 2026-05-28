@@ -1,48 +1,29 @@
 FROM pangeo/pangeo-notebook:2025.08.14
 
-LABEL org.opencontainers.image.source="https://github.com/nasa-impact/pangeo-notebook-veda-image"
+LABEL org.opencontainers.image.source="https://github.com/Disasters-Learning-Portal/disasters-product-algorithms"
 
 USER ${NB_USER}
 
-ADD environment.yml environment.yml
-
-# Accept GitHub PAT as build argument and configure git temporarily
-ARG GH_PAT
-
 # === Layer 1: conda env update ===
-# Cached on environment.yml contents. Re-runs only when env.yml changes.
-# Does NOT install disasters-product-algorithms (see env.yml comment).
-RUN if [ -n "$GH_PAT" ]; then \
-        git config --global url."https://${GH_PAT}@github.com/".insteadOf "https://github.com/"; \
-    fi && \
-    conda env update --prefix /srv/conda/envs/notebook --file environment.yml && \
-    if [ -n "$GH_PAT" ]; then \
-        git config --global --unset-all url."https://github.com/".insteadOf || true; \
-    fi
+# Cached on image/environment.yml content. Re-runs ~2-3 min only when env
+# changes. The build context is the algorithms repo root, so paths in this
+# Dockerfile are relative to that root (not image/).
+ADD image/environment.yml /tmp/environment.yml
+RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
+    && rm /tmp/environment.yml
 
-# === Layer 2: install disasters-product-algorithms at a pinned ref ===
-# ALGORITHMS_REF is set per image variant by the build-and-push*.yaml
-# workflows: prod -> algorithms main SHA, dev -> algorithms dev SHA.
-# Each workflow resolves the branch HEAD to a concrete SHA before passing
-# it in, so each unique algorithms commit gets its own cached layer
-# (~30s rebuild vs full conda env update). Default of "main" matches the
-# historical behavior for anyone running `docker build` locally without args.
-ARG ALGORITHMS_REF=main
-# --force-reinstall + --no-deps: we deliberately want this layer to ALWAYS
-# re-install algorithms when its cache key (ALGORITHMS_REF) changes, even
-# if the version string in pyproject.toml hasn't been bumped. Without
-# --force-reinstall, pip sees "disasters-product-algorithms-X.Y.Z already
-# satisfies the requirement" from a previous layer (in a multi-stage cache
-# scenario) and skips. --no-deps avoids re-resolving the dep tree on every
-# small algorithm change (transitive deps live in the conda env layer).
-RUN echo "Installing disasters-product-algorithms@$ALGORITHMS_REF" && \
-    if [ -n "$GH_PAT" ]; then \
-        git config --global url."https://${GH_PAT}@github.com/".insteadOf "https://github.com/"; \
-    fi && \
-    /srv/conda/envs/notebook/bin/pip install --force-reinstall --no-deps \
-        "git+https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git@$ALGORITHMS_REF" && \
-    if [ -n "$GH_PAT" ]; then \
-        git config --global --unset-all url."https://github.com/".insteadOf || true; \
-    fi
+# === Layer 2: install disasters-product-algorithms from local checkout ===
+# Pre-consolidation this was `pip install git+https://...@$ALGORITHMS_REF`
+# fetched per-build via a build-arg keyed cache. Post-consolidation the
+# algorithms code IS the build context — one repo, one CI flow, no
+# cross-repo dispatch. .dockerignore at the repo root keeps the COPY
+# tight (no notebooks/, docs/, tests/, .git/ etc.). Re-runs ~30s when
+# any algorithms file (matched by .dockerignore rules) changes.
+COPY --chown=${NB_USER}:${NB_USER} . /srv/repo/algorithms
+RUN /srv/conda/envs/notebook/bin/pip install --no-deps /srv/repo/algorithms
 
-COPY --chown=${NB_USER}:${NB_USER} scripts /srv/repo/scripts
+# Image-test harness inherited from NASA-IMPACT upstream. The script
+# references /srv/repo/image-tests/ which doesn't exist in our fork — kept
+# as a placeholder for future use rather than deleted, since the upstream
+# may eventually populate it via `git subtree pull`.
+COPY --chown=${NB_USER}:${NB_USER} image/scripts /srv/repo/scripts

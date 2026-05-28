@@ -8,7 +8,7 @@ USER ${NB_USER}
 # Cached on image/environment.yml content. Re-runs ~2-3 min only when env
 # changes. The build context is the algorithms repo root, so paths in this
 # Dockerfile are relative to that root (not image/).
-ADD image/environment.yml /tmp/environment.yml
+ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
 

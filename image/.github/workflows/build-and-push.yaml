@@ -1,0 +1,50 @@
+name: Build Notebook Container
+on:
+  push:
+  repository_dispatch:
+    types: [algorithm-updated]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: checkout files in repo
+      uses: actions/checkout@main
+
+    - name: Resolve algorithms ref to a concrete SHA
+      id: algo
+      env:
+        GH_TOKEN: ${{ secrets.GH_PAT }}
+      run: |
+        if [ -n "${{ github.event.client_payload.sha }}" ]; then
+          sha="${{ github.event.client_payload.sha }}"
+          echo "Using dispatch payload SHA: $sha"
+        else
+          # Direct push to image repo (or manual run): resolve algorithms main HEAD
+          sha=$(gh api repos/Disasters-Learning-Portal/disasters-product-algorithms/git/ref/heads/main --jq .object.sha)
+          echo "Resolved algorithms main HEAD: $sha"
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push Docker image with jupyter-repo2docker
+      run: |
+        pip install jupyter-repo2docker
+        docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+
+        # ALGORITHMS_REF pins the algorithms install layer to the SHA that
+        # triggered this build (dispatch payload) or the current main HEAD
+        # (direct image-repo push). Each unique SHA gets its own cached layer.
+        jupyter-repo2docker \
+          --no-run \
+          --user-name=jovyan \
+          --user-id=1000 \
+          --image-name=${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12} \
+          --cache-from=${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest \
+          --build-arg GH_PAT=${{ secrets.GH_PAT }} \
+          --build-arg ALGORITHMS_REF=${{ steps.algo.outputs.sha }} \
+          .
+
+        # Tag and push
+        docker tag ${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12} ${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest
+        docker push ${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:${GITHUB_SHA::12}
+        docker push ${{ secrets.DOCKER_USERNAME }}/disasters-jupyterhub-docker-image:latest

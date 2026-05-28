@@ -1,0 +1,45 @@
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - ipykernel
+  # Dependencies for sentintel-2 scripts
+  - p7zip==16.02
+  - libgdal-jp2openjpeg==3.10.3
+  # Dependencies for VS Code IDE
+  - code-server>=3.2
+  - jupyter-vscode-proxy
+  - openssh
+  - pre_commit
+  # Remove once Pangeo has upstream.
+  - virtualizarr>=2.0.0
+  - icechunk
+  # Working around https://github.com/holoviz/geoviews/pull/794
+  - geoviews-core==1.14.1
+  # Working around https://github.com/stac-utils/pystac/issues/1575
+  - pystac==1.14.1
+  # The block below is auto-managed by the sync-conda-deps workflow in the
+  # disasters-product-algorithms repo. Source of truth: hub-conda-deps.txt
+  # in that repo. To add a conda-only dep that needs to land in the image,
+  # edit hub-conda-deps.txt there and merge the auto-opened PR. The sync
+  # script REPLACES anything between BEGIN/END, so keep all explanatory
+  # comments OUTSIDE the markers like this one.
+  # === BEGIN disasters-product-algorithms managed conda deps (do not edit by hand) ===
+  # === END disasters-product-algorithms managed conda deps ===
+  - pip
+  - pip:
+    - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
+    - jupyter-sshd-proxy
+    - jupyterlab-bxplorer
+    # disasters-product-algorithms is intentionally NOT installed here. It's
+    # installed in a separate Dockerfile RUN layer so each image variant
+    # (prod/dev) can pin to its own branch/SHA via
+    # --build-arg ALGORITHMS_REF=<sha>, and so algorithm-only changes can
+    # re-run just that small layer instead of the full conda env update.
+    # See Dockerfile + .github/workflows/build-and-push*.yaml.
+variables:
+  TITILER_STAC_ENDPOINT: 'https://openveda.cloud/api/stac'
+  TITILER_ENDPOINT: 'https://openveda.cloud/api/raster'
+  STAC_CATALOG_NAME: 'VEDA STAC'
+  STAC_CATALOG_URL: 'https://openveda.cloud/api/stac'
+  STAC_BROWSER_URL: 'https://openveda.cloud/'

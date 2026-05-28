@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "disasters-product-algorithms"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Process Landsat 8/9 and Sentinel-2 satellite imagery to generate disaster response products, with COG conversion and AWS integration"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -60,6 +60,12 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
 include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
+
+[tool.setuptools_scm]
+# Single source of truth for version = the git tag.
+# `git tag v1.0.0` → wheel built as 1.0.0
+# Between tags, dev installs auto-version as 1.0.0.dev<N>+g<sha>
+# Runtime: `from importlib.metadata import version; version("disasters-product-algorithms")`
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

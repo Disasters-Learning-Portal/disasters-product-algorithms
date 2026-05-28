@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -12,77 +13,55 @@ on:
 
 jobs:
   trigger-rebuild:
-    name: Notify pangeo-notebook-veda-image
+    name: Notify pangeo-notebook-veda-image (${{ github.ref_name }})
     runs-on: ubuntu-latest
 
+    env:
+      PANGEO_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PANGEO_REBUILD_TOKEN || secrets.PANGEO_REBUILD_TOKEN_DEV }}
+      EVENT_TYPE: ${{ github.ref == 'refs/heads/main' && 'algorithm-updated' || 'algorithm-updated-dev' }}
+      TOKEN_NAME: ${{ github.ref == 'refs/heads/main' && 'PANGEO_REBUILD_TOKEN' || 'PANGEO_REBUILD_TOKEN_DEV' }}
+
     steps:
-      - name: Check if PANGEO_REBUILD_TOKEN is set
+      - name: Check if dispatch token is set
         run: |
-          if [ -z "${{ secrets.PANGEO_REBUILD_TOKEN }}" ]; then
-            echo "::error::PANGEO_REBUILD_TOKEN secret is not set!"
+          if [ -z "${PANGEO_TOKEN}" ]; then
+            echo "::error::${TOKEN_NAME} secret is not set for branch ${{ github.ref_name }}!"
             echo "Please follow the setup instructions in .github/DOCKER_REBUILD_SETUP.md"
             exit 1
           fi
-          echo "✓ Token is configured"
+          echo "✓ ${TOKEN_NAME} is configured"
 
-      - name: Trigger pangeo-notebook-veda-image rebuild (main branch)
+      - name: Trigger pangeo-notebook-veda-image rebuild (${{ github.ref_name }})
         run: |
-          echo "Sending repository_dispatch event to pangeo-notebook-veda-image (main branch)..."
+          echo "Sending repository_dispatch event_type=${EVENT_TYPE} to pangeo-notebook-veda-image..."
 
           response=$(curl -w "\n%{http_code}" -X POST \
             -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.PANGEO_REBUILD_TOKEN }}" \
+            -H "Authorization: token ${PANGEO_TOKEN}" \
             https://api.github.com/repos/Disasters-Learning-Portal/pangeo-notebook-veda-image/dispatches \
-            -d '{"event_type":"algorithm-updated","client_payload":{"sha":"${{ github.sha }}","ref":"${{ github.ref }}","repository":"${{ github.repository }}"}}')
+            -d "{\"event_type\":\"${EVENT_TYPE}\",\"client_payload\":{\"sha\":\"${{ github.sha }}\",\"ref\":\"${{ github.ref }}\",\"repository\":\"${{ github.repository }}\",\"branch\":\"${{ github.ref_name }}\"}}")
 
           http_code=$(echo "$response" | tail -n1)
 
           if [ "$http_code" = "204" ]; then
-            echo "✓ Successfully triggered rebuild on main branch!"
+            echo "✓ Successfully triggered rebuild for ${{ github.ref_name }} branch (event_type=${EVENT_TYPE})"
           else
-            echo "::error::Failed to trigger main branch build (HTTP $http_code)"
+            echo "::error::Failed to trigger ${{ github.ref_name }} branch build (HTTP $http_code)"
             exit 1
           fi
 
-      - name: Note about branch-specific builds
-        run: |
-          echo "::notice::repository_dispatch triggers the default branch (main)"
-          echo "::notice::To trigger <new branch>, you have two options:"
-          echo "::notice::1. Merge main → <new branch> to sync the changes"
-          echo "::notice::2. Manually trigger: https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions"
-
       - name: Workflow summary
         run: |
-          echo "### ✅ Docker Image Rebuild Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Docker Image Rebuild Triggered (${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Successfully triggered rebuild of pangeo-notebook-veda-image Docker image on **main branch**." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered Branch:** main (default branch)" >> $GITHUB_STEP_SUMMARY
+          echo "Successfully triggered rebuild of pangeo-notebook-veda-image Docker image on **${{ github.ref_name }} branch**." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Details:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Source Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Source Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Source Ref: \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Source Repository: \`${{ github.repository }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Dispatch Event Type: \`${EVENT_TYPE}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Monitor Build Progress:**" >> $GITHUB_STEP_SUMMARY
           echo "- [View Actions](https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image/actions)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📝 Note: Triggering <new branch>" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "GitHub's \`repository_dispatch\` only triggers workflows on the **default branch** (main)." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**To rebuild <new branch>, choose one option:**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **Merge main → <new branch>:**" >> $GITHUB_STEP_SUMMARY
-          echo "   \`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "   cd pangeo-notebook-veda-image" >> $GITHUB_STEP_SUMMARY
-          echo "   git checkout <new branch>" >> $GITHUB_STEP_SUMMARY
-          echo "   git merge main" >> $GITHUB_STEP_SUMMARY
-          echo "   git push" >> $GITHUB_STEP_SUMMARY
-          echo "   \`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "2. **Manual trigger:** Push an empty commit to <new branch> to trigger rebuild" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "3. **Make <new branch> the default branch** (if it should always be built)" >> $GITHUB_STEP_SUMMARY

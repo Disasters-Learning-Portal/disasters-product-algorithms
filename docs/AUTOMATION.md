@@ -14,10 +14,9 @@ What's automated today:
 | Notebook cell-0 conformance (per-sensor) | `tools/check_sensor_consistency.py` | Runs locally + in CI |
 | New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
 | CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job | CI only |
-| Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild*.yml` | Push to `dev` / `main` |
+| Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild.yml` (single consolidated workflow) | Push to `dev` / `main` |
 | Conda-dep sync to hub image | `.github/workflows/sync-conda-deps.yml` | Push to `main` touching `hub-conda-deps.txt` |
-| Branch protection (dev → main only) | `.github/workflows/enforce-dev-to-main.yml` | PR to `main` |
-| Branch convention enforcement | `.github/workflows/enforce-branch-protection.yml` | PR to `dev` |
+| PR shape conventions (target branch, test plan, checklist) | `.github/PULL_REQUEST_TEMPLATE.md` + `.github/RULESETS.md` (one-time setup doc) | Auto-populated on every PR |
 
 What's **not** yet automated (see [Roadmap](#roadmap)):
 
@@ -190,12 +189,21 @@ pip install -e .
 
 ## Cross-repo image-rebuild dispatch
 
-### Today's workflow
+### Today's workflow (consolidated — Rec 2 shipped)
 
-Two near-identical workflows, one per branch / image variant:
+A **single** workflow handles both branches:
 
-- `.github/workflows/trigger-docker-rebuild.yml` — `on: push: branches: [main]`. Sends `repository_dispatch event_type=algorithm-updated` to `pangeo-notebook-veda-image` using `PANGEO_REBUILD_TOKEN`. Payload includes the pushed commit SHA.
-- `.github/workflows/trigger-docker-rebuild-dev.yml` — same, for `dev` branch. Uses `PANGEO_REBUILD_TOKEN_DEV`, event type `algorithm-updated-dev`.
+- `.github/workflows/trigger-docker-rebuild.yml` — `on: push: branches: [main, dev]`.
+  Picks the right token and `event_type` based on `github.ref`:
+  ```yaml
+  env:
+    PANGEO_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PANGEO_REBUILD_TOKEN || secrets.PANGEO_REBUILD_TOKEN_DEV }}
+    EVENT_TYPE: ${{ github.ref == 'refs/heads/main' && 'algorithm-updated' || 'algorithm-updated-dev' }}
+  ```
+  Both secrets remain required: `PANGEO_REBUILD_TOKEN` for prod (`main`),
+  `PANGEO_REBUILD_TOKEN_DEV` for dev (`dev`). The payload includes the
+  pushed commit SHA, ref, repository, and branch name. Dispatch contract
+  is preserved — image-repo listens for the same two event types as before.
 
 The image-repo workflows (`build-and-push.yaml` / `build-and-push-dev.yaml`)
 listen for those dispatch events. Each resolves `ALGORITHMS_REF` from the
@@ -229,21 +237,27 @@ produces it; safe to delete via the Docker Hub UI.
 
 ---
 
-## Branch protection workflows
+## Branch protection (Rec 2 shipped — native config replaces bash workflows)
 
-Two GitHub Actions workflows enforce policy on top of repo branch protection
-rules:
+The two `enforce-*.yml` workflows that used to live here
+(`enforce-dev-to-main.yml`, `enforce-branch-protection.yml`, ~117 lines of
+bash) have been **deleted**. Their job is now done by:
 
-- `.github/workflows/enforce-dev-to-main.yml` — fires on PRs targeting `main`.
-  Fails the PR if the source branch is anything other than `dev`. The
-  goal: every change must flow through `dev` first, so it's exercised in
-  the dev image variant before reaching production.
-- `.github/workflows/enforce-branch-protection.yml` — fires on PRs targeting
-  `dev`. Validates PR title/description conventions and suggests
-  `feature/`, `fix/`, etc. branch prefixes. Warning-only, not blocking.
+- **`.github/PULL_REQUEST_TEMPLATE.md`** — auto-populates every PR with a
+  structured body: target-branch reminder (`feature/* → dev → main`),
+  summary, test plan, and a contributor checklist that includes the
+  `tools/check_sensor_consistency.py` reminder and the conda-deps
+  decision tree. Catches the same shape conventions as the deleted
+  warn-only bash checks, but at PR-write time instead of post-open.
+- **GitHub native branch protection rules** (configured in the repo
+  Settings UI, not in code). The required configuration is documented in
+  `.github/RULESETS.md` — including the equivalent `gh api` and Terraform
+  payloads for future automation.
 
-(Both are flagged in the roadmap as candidates to replace with native
-GitHub rulesets — see [Audit-flagged simplifications](#audit-flagged-simplifications-not-yet-actioned).)
+Why the change: bash-in-CI couldn't be bypassed for emergencies, ran
+post-PR-open (after the contributor had already done the work), and the
+"warn-only" portions provided no signal that wasn't reproducible with a PR
+template. See `.github/RULESETS.md` for the full migration rationale.
 
 ---
 
@@ -329,19 +343,24 @@ Error paths covered (all exit 1 with no partial writes):
 
 Bugs 1, 2, and 3 are now **structurally impossible** rather than just CI-caught.
 
-### Rec 2 — Consolidate governance workflows (~2 hours)
+### Rec 2 — Consolidate governance workflows — SHIPPED
 
-- **`trigger-docker-rebuild.yml` + `trigger-docker-rebuild-dev.yml`** are 95%
-  duplicate. Collapse to one workflow keyed on `github.ref`:
-  ```yaml
-  env:
-    TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PANGEO_REBUILD_TOKEN || secrets.PANGEO_REBUILD_TOKEN_DEV }}
-    EVENT_TYPE: ${{ github.ref == 'refs/heads/main' && 'algorithm-updated' || 'algorithm-updated-dev' }}
-  ```
-- **`enforce-dev-to-main.yml` + `enforce-branch-protection.yml`** (~117 lines
-  of bash combined) replicate work that GitHub **rulesets** can express
-  natively. Replace with rulesets configured via the UI or Terraform, plus
-  a `PULL_REQUEST_TEMPLATE.md` for shape conventions.
+Two simplifications, both landed:
+
+- **Trigger workflows consolidated.** `trigger-docker-rebuild.yml` and
+  `trigger-docker-rebuild-dev.yml` collapsed into a single workflow keyed
+  on `github.ref`. The dispatch contract is unchanged — image-repo still
+  receives `algorithm-updated` (prod) and `algorithm-updated-dev` (dev)
+  events with the same payload shape. See
+  [Cross-repo image-rebuild dispatch](#cross-repo-image-rebuild-dispatch).
+- **Bash-based branch governance removed.** `enforce-dev-to-main.yml` and
+  `enforce-branch-protection.yml` (~117 lines of bash) deleted. Replaced
+  by `.github/PULL_REQUEST_TEMPLATE.md` for shape conventions and
+  `.github/RULESETS.md` documenting the GitHub-native branch protection
+  rules the repo owner must configure in Settings → Branches. The
+  `RULESETS.md` doc includes equivalent `gh api` and Terraform payloads
+  for future automation, plus an optional Actions-based hard-enforcement
+  fallback if the honor-system approach proves insufficient.
 
 ### Rec 3 — Pre-commit hook + import smoke (~1 hour)
 

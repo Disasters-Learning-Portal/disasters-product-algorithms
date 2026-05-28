@@ -368,8 +368,12 @@ python tools/check_sensor_consistency.py
 
 ## After merge
 
-1. **CI on `dev` triggers `trigger-docker-rebuild-dev.yml`**, which dispatches
-   to `pangeo-notebook-veda-image`. Watch the action complete (<1 min).
+1. **CI on `dev` triggers `trigger-docker-rebuild.yml`**, which selects the
+   dev token + `algorithm-updated-dev` event type based on `github.ref`
+   and dispatches to `pangeo-notebook-veda-image`. Watch the action
+   complete (<1 min). The same workflow handles `main` pushes (with the
+   prod token + `algorithm-updated` event) — there is no separate `-dev`
+   workflow anymore.
 2. **Image rebuild** in `pangeo-notebook-veda-image` takes ~3-5 min: ~30s
    for the algorithms pip-install layer (the common case if you only
    added Python code) or ~2-3 min if `hub-conda-deps.txt` changed and
@@ -387,9 +391,11 @@ python tools/check_sensor_consistency.py
 5. **End-to-end test:** open `notebooks/<sensor>_workflow.ipynb` and run
    the cells against real data.
 
-6. **Promote to prod:** open a PR from `dev` → `main`. The
-   `enforce-dev-to-main.yml` workflow blocks any other source branch.
-   On merge, `trigger-docker-rebuild.yml` rebuilds the prod image.
+6. **Promote to prod:** open a PR from `dev` → `main`. The PR template
+   (`.github/PULL_REQUEST_TEMPLATE.md`) reminds you of the
+   `feature/* → dev → main` flow; native branch protection on `main`
+   (see `.github/RULESETS.md`) is the authoritative gate. On merge,
+   `trigger-docker-rebuild.yml` rebuilds the prod image.
 
 If `process_<sensor>` is missing on a fresh pod after a green CI + image
 rebuild, see the debug checklist in

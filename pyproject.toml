@@ -26,9 +26,8 @@ dependencies = [
 # laptop / VM. The Disasters Hub image gets its conda packages from a
 # different place — see hub-conda-deps.txt and docs/HUB_DEPLOYMENT.md.
 #
-# For local dev:
-#   conda install -c conda-forge gdal rasterio rio-cogeo geopandas pyproj \
-#     numpy scipy pillow lxml requests boto3 botocore tqdm psutil fsspec s3fs
+# For local dev (single source of truth for the dep list: dev-conda-deps.txt):
+#   mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 #   pip install -e .
 #
 # Why these aren't in pip dependencies: GDAL and friends require dylib

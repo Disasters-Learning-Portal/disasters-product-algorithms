@@ -36,12 +36,12 @@ jobs:
           channel-priority: strict
           activate-environment: smoke
       - name: Install GDAL + core deps from conda
-        # Canonical conda-install spec mirrors the "DEV-LOCAL conda-install
-        # spec" comment block in pyproject.toml. Keep these two in sync.
+        # Single source of truth: dev-conda-deps.txt at repo root. Add new
+        # conda deps there and the next CI run picks them up automatically.
         run: |
-          mamba install -y -c conda-forge \
-            gdal rasterio rio-cogeo geopandas pyproj \
-            numpy scipy pillow lxml requests boto3 botocore tqdm psutil fsspec s3fs
+          deps=$(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
+          echo "Installing: $deps"
+          mamba install -y -c conda-forge $deps
       - name: Install algorithms package
         # No --no-deps: lets pip realise [project.dependencies] are already
         # satisfied by the conda install above, and installs the package itself.

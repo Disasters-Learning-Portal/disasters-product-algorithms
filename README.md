@@ -43,8 +43,9 @@ Unified package for processing Landsat 8/9 and Sentinel-2 satellite imagery to g
 conda create -n disasters python=3.10
 conda activate disasters
 
-# Install required geospatial packages (MUST be installed via conda):
-conda install -c conda-forge gdal rasterio rio-cogeo geopandas pyproj numpy scipy requests boto3
+# Install required geospatial packages (MUST be installed via conda).
+# Single source of truth for the dep list is dev-conda-deps.txt:
+mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 ```
 
 **Why conda?** The GDAL Python bindings must match your system's libgdal version. Installing GDAL via pip will fail or cause version conflicts. Conda ensures all geospatial libraries are compatible.
@@ -210,18 +211,20 @@ Processed products are saved to an `output/` directory within the input director
 
 ## Dependencies
 
-- Python >= 3.8
-- GDAL (via conda)
-- rasterio (via conda)
-- rio-cogeo (via conda)
-- geopandas (via conda)
-- pyproj (via conda)
-- numpy (via conda)
-- scipy (via conda)
-- Pillow (pip)
-- lxml (pip)
-- requests (via conda)
-- boto3 (via conda)
+Python >= 3.8. The canonical dep lists live in three files, each with a
+distinct audience — see [docs/AUTOMATION.md](docs/AUTOMATION.md) for the
+full decision tree.
+
+| File | Audience |
+|---|---|
+| `pyproject.toml [project.dependencies]` | Pip-installable transitive deps (Pillow, lxml, psutil, fsspec, s3fs). Resolved by `pip install .`. |
+| `dev-conda-deps.txt` | Conda deps for local development + CI smoke tests (geospatial stack: GDAL, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy, etc.). |
+| `hub-conda-deps.txt` | Conda deps for the JupyterHub Docker image, on top of the Pangeo base. Auto-synced into `pangeo-notebook-veda-image`'s `environment.yml`. Currently empty (Pangeo base already ships everything we need). |
+
+Adding a new dep — pick the right file:
+- Has a `manylinux` wheel? → `pyproject.toml [project.dependencies]`.
+- Conda-only AND already in the Pangeo base image? → `dev-conda-deps.txt`.
+- Conda-only AND NOT in Pangeo base? → BOTH `dev-conda-deps.txt` AND `hub-conda-deps.txt`.
 
 ## Package Structure
 
@@ -229,8 +232,103 @@ Processed products are saved to an `output/` directory within the input director
 disasters-product-algorithms/
 ├── landsat/              # Landsat 8/9 processing
 ├── sentinel2/            # Sentinel-2 processing
-└── shared_utils/         # Shared utilities (COG, GDAL, geotools)
+├── satellogic/           # Satellogic optical processing
+├── umbra/                # Umbra SAR processing
+├── capella/              # Capella SAR processing
+├── raster_tools/         # Sensor-agnostic raster utilities
+├── shared_utils/         # Shared library (COG conversion, S3, validation, metadata)
+├── notebooks/            # Operator-facing Jupyter templates (CLI-subprocess style)
+│   └── testing-notebooks/  # Import-based variants for local dev
+├── tools/                # Repo-management scripts (consistency lint, etc.)
+└── docs/                 # Deployment guides, automation reference, tutorials
 ```
+
+## Development workflow
+
+### Pre-push checks
+
+Before pushing changes that touch a sensor directory (`<sensor>/`),
+`pyproject.toml [project.scripts]`, or
+`[tool.setuptools.packages.find].include`, run the consistency lint locally:
+
+```bash
+python tools/check_sensor_consistency.py
+# OK: 5 sensor(s) consistent with pyproject.toml:
+#   - capella/, landsat/, satellogic/, sentinel2/, umbra/
+```
+
+The same script runs in CI via `.github/workflows/lint.yml`. PRs that break
+the pyproject ↔ sensor-dir consistency invariant fail the `sensor-consistency`
+job before merging.
+
+A second CI job, `cli-smoke`, installs the algorithms package in a clean conda
+env (deps from `dev-conda-deps.txt`) and runs `--help` on every registered
+console script. This is the layer that catches the bug class where a console
+script is registered in `pyproject.toml` but its package isn't listed in
+`[tool.setuptools.packages.find].include` — `pip install` silently skips
+the package, leaving an unresolvable shim in `bin/`.
+
+Full automation reference: see [docs/AUTOMATION.md](docs/AUTOMATION.md).
+
+### Notebook conventions
+
+All workflow notebooks under `notebooks/` declare a `TARGET_CRS` variable
+near the top of their config cell:
+
+```python
+# Set CRS for COG output
+TARGET_CRS = None
+# TARGET_CRS = "EPSG:3857"
+```
+
+`None` (the default) preserves the source projection of the input rasters.
+The commented `"EPSG:3857"` line is provided for operators who need Web
+Mercator output for downstream consumers — most notably `veda-data-airflow`'s
+`build_stac` task, which trips on the WGS 84 ensemble + lat-first axis bug
+when input COGs are in `EPSG:4326`.
+
+The variable forwards into the CLI invocation:
+
+```python
+process_cmd = [
+    "process_capella",
+    ...
+    "-dst_crs", TARGET_CRS if TARGET_CRS else "native",
+]
+```
+
+`"native"` is the sentinel string every sensor CLI maps back to `None`.
+
+### Adding a new sensor
+
+Short version: copy the freshest sensor pipeline (`capella/`) as a template
+and run the consistency lint. See
+[docs/ADDING_A_NEW_SENSOR.md](docs/ADDING_A_NEW_SENSOR.md) for the full guide,
+including notebook conventions and conda-dep decisions.
+
+```bash
+cp -r capella/ spire/
+# Edit spire/{__init__.py,cli.py,process_spire.py,spire_v2.py} — replace
+# the literal string "capella" with "spire" throughout, then implement
+# your sensor-specific S3 retrieval + calibration math.
+
+# Wire pyproject.toml: add `process_spire = "spire.cli:process_spire_cli"`
+# to [project.scripts] AND `"spire*"` to [tool.setuptools.packages.find].include.
+
+# Validate:
+python tools/check_sensor_consistency.py
+# OK: 6 sensor(s) consistent with pyproject.toml
+
+# Create the notebook pair:
+cp notebooks/capella_workflow.ipynb notebooks/spire_workflow.ipynb
+cp notebooks/testing-notebooks/capella_workflow.ipynb notebooks/testing-notebooks/spire_workflow.ipynb
+# Edit each to swap "capella" → "spire" in titles, subprocess commands, etc.
+```
+
+The CI lint catches the most common scaffolding bugs (missing pyproject
+entries, console-script-without-installed-package). For lower-level
+`shared_utils` contributions that aren't a full sensor pipeline, see
+[docs/ADDING_FUNCTIONS_TUTORIAL.md](docs/ADDING_FUNCTIONS_TUTORIAL.md).
 
 ## Docker Integration
 

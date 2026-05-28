@@ -57,13 +57,15 @@ All sensor CLIs accept `-dst_crs <EPSG:xxxx | native>`. `native` (default on cap
 ## How to Run
 
 ```bash
-# Install (conda recommended for GDAL)
-conda install -c conda-forge gdal rasterio rio-cogeo geopandas numpy boto3
+# Install (conda recommended for GDAL). Single source of truth for the
+# dep list is dev-conda-deps.txt at the repo root:
+mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 pip install -e .
 
 # CLI usage
 process_landsat89 --help
 process_sentinel2 --help
+process_capella --help
 
 # Notebooks — run from notebooks/ directory
 jupyter notebook notebooks/
@@ -75,7 +77,41 @@ See `docs/SHARED_UTILS_API.md` for complete function signatures.
 
 ## Contributing
 
-See `docs/ADDING_FUNCTIONS_TUTORIAL.md` for the end-to-end walkthrough of adding a new `shared_utils` function and wiring it up as a CLI entry point (worked example: `summarize_raster`).
+- New `shared_utils` function: `docs/ADDING_FUNCTIONS_TUTORIAL.md` (worked example: `summarize_raster`).
+- New sensor pipeline (capella, umbra, satellogic-style): `docs/ADDING_A_NEW_SENSOR.md` — copy `capella/` as a template, run `python tools/check_sensor_consistency.py` to validate.
+
+## Automation
+
+### Pre-push / CI lint
+
+The `.github/workflows/lint.yml` workflow runs on every push and PR to `dev`/`main`:
+
+- **`sensor-consistency`**: runs `python tools/check_sensor_consistency.py`, which walks every top-level dir containing `cli.py` + `process_*.py` and asserts each is correctly wired into `pyproject.toml` (both `[tool.setuptools.packages.find].include` and `[project.scripts]`, with the canonical `<pkg>.cli:<verb>_cli` target shape).
+- **`cli-smoke`**: bootstraps a conda env from `dev-conda-deps.txt`, runs `pip install .`, then iterates `[project.scripts]` and runs `<script> --help` on each. Catches the bug class where a console script is registered but its package isn't installable (the failure mode that broke the initial capella rollout — `ModuleNotFoundError` on a fresh hub pod despite the shim being in `bin/`).
+
+Run locally before pushing:
+
+```bash
+python tools/check_sensor_consistency.py  # <1s
+```
+
+### Dependency source-of-truth files
+
+There are THREE dep files, each with a different audience:
+
+| File | Audience | Format |
+|---|---|---|
+| `pyproject.toml [project.dependencies]` | `pip install .` transitive deps | pip spec |
+| `dev-conda-deps.txt` | Local dev + CI smoke (geospatial stack) | one conda spec per line |
+| `hub-conda-deps.txt` | Hub image conda deps ON TOP of Pangeo base | one conda spec per line |
+
+`hub-conda-deps.txt` is auto-synced into `pangeo-notebook-veda-image`'s `environment.yml` via `.github/workflows/sync-conda-deps.yml`. Adding a new dep:
+
+- Has a manylinux wheel → `[project.dependencies]`.
+- Conda-only AND already in Pangeo base → `dev-conda-deps.txt` only.
+- Conda-only AND NOT in Pangeo base → BOTH `dev-conda-deps.txt` AND `hub-conda-deps.txt`.
+
+Full reference: [docs/AUTOMATION.md](docs/AUTOMATION.md).
 
 ## Disasters Hub deployment (`pangeo-notebook-veda-image`)
 

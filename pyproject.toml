@@ -64,7 +64,7 @@ summarize_raster = "raster_tools.cli:summarize_raster_cli"
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "shared_utils*", "raster_tools*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

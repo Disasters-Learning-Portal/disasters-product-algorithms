@@ -488,3 +488,46 @@ The manual flow is more error-prone — the original Capella rollout shipped
 with three different copy-paste bugs that the scaffolder would have made
 structurally impossible. Prefer `tools/new_sensor.py` unless you have a
 specific reason not to.
+
+## Recovering from a partial or rolled-back run
+
+The scaffolder is transactional: if the post-condition `check_sensor_consistency.py`
+fails, all writes are rolled back automatically. But `git restore .` after a
+*successful* scaffold only reverts tracked-file edits (e.g. `pyproject.toml`) —
+it doesn't remove the new **untracked** files (the sensor dir + the two
+notebooks). Re-running the scaffolder then trips its own pre-flight orphan
+check, which refuses to scaffold until the leftover is cleaned up.
+
+What you'll see:
+
+```
+========================================================================
+ABORT: orphaned sensor directories detected
+========================================================================
+
+The following directories LOOK like sensor pipelines (cli.py + process_*.py)
+but are not wired into pyproject.toml. ...
+
+  - <leftover-sensor-name>/
+```
+
+Two paths to recovery:
+
+```bash
+# Option A — surgical: remove just the orphan(s) listed above.
+rm -rf <leftover-name>
+rm -f notebooks/<leftover-name>_workflow.ipynb \
+      notebooks/testing-notebooks/<leftover-name>_workflow.ipynb
+git restore pyproject.toml
+
+# Option B — nuclear: drop ALL untracked + revert ALL tracked changes.
+# Use when you're not sure what's clean and want a true fresh start.
+git status --untracked-files=all   # preview what will be deleted
+git clean -fd                      # delete untracked files
+git restore .                      # revert tracked changes
+```
+
+After cleanup, re-run `python tools/new_sensor.py <name>` and the SUCCESS
+banner should appear. The orphan check exists specifically to prevent the
+silent-rollback footgun where the scaffolder's post-condition lint fails
+on an unrelated leftover and undoes the new (correct) work.

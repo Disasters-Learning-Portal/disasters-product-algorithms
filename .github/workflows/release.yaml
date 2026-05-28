@@ -23,11 +23,19 @@ name: Release
 #      → "Required reviewers" → add the admin user(s).
 #
 #   B. Branch protection bypass (so the workflow can push to main):
-#      Settings → Rules → Rulesets → edit the rule that protects `main`
-#      (or Settings → Branches → main protection rule on legacy UI)
-#      → "Bypass list" → add `Repository admin` AND/OR add this workflow
-#      as a bypass actor via "GitHub Actions" with the appropriate role.
-#      Without bypass, `git push origin main` will be rejected.
+#      Settings → Rules → Rulesets → branch ruleset targeting `main`
+#      with "Require a pull request before merging" → Bypass list →
+#      add `Repository admin` (covers the PAT-as-admin path below).
+#      "GitHub Actions" was not selectable as a bypass actor on this
+#      org, which is why we go through a PAT instead of GITHUB_TOKEN.
+#
+#   C. Personal Access Token (so the workflow pushes AS the admin,
+#      which is in the bypass list):
+#      Fine-grained PAT on the admin account, scoped to this repo,
+#      with Contents + PRs + Workflows = Read & write. Stored as a
+#      repo secret named `DISASTERS_RELEASE_PAT`. The workflow uses
+#      it instead of the default GITHUB_TOKEN for both the checkout
+#      and the gh release call. Rotate per the PAT expiration date.
 
 on:
   workflow_dispatch:
@@ -56,7 +64,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # PAT so the subsequent `git push origin main` is authenticated
+          # as the admin user (who is in the ruleset bypass list). The
+          # default GITHUB_TOKEN runs as github-actions[bot], which is
+          # NOT in the bypass list on this repo.
+          token: ${{ secrets.DISASTERS_RELEASE_PAT }}
 
       - name: Verify tag does not already exist
         run: |
@@ -87,7 +99,10 @@ jobs:
 
       - name: Create GitHub release with auto-generated notes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the PAT here too so the release is attributed to the
+          # admin user rather than github-actions[bot] (consistency,
+          # not strictly required for this step).
+          GH_TOKEN: ${{ secrets.DISASTERS_RELEASE_PAT }}
         run: |
           gh release create "${{ inputs.version }}" \
             --title "${{ inputs.version }}" \

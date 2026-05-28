@@ -10,18 +10,18 @@ What's automated today:
 
 | Concern | Tool | Source |
 |---|---|---|
-| pyproject ↔ sensor-dir consistency | `tools/check_sensor_consistency.py` | Runs locally + in CI |
-| Notebook cell-0 conformance (per-sensor) | `tools/check_sensor_consistency.py` | Runs locally + in CI |
+| pyproject ↔ sensor-dir consistency | `tools/check_sensor_consistency.py` | Runs locally + in CI + as pre-commit hook |
+| Notebook cell-0 conformance (per-sensor) | `tools/check_sensor_consistency.py` | Runs locally + in CI + as pre-commit hook |
+| Pre-commit enforcement of the consistency lint | `.pre-commit-config.yaml` (local hook) | Local, opt-in via `pre-commit install` |
 | New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
-| CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job | CI only |
+| CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job (import-test + `--help`) | CI only |
 | Cross-repo image rebuild on algorithms push | `.github/workflows/trigger-docker-rebuild.yml` (single consolidated workflow) | Push to `dev` / `main` |
 | Conda-dep sync to hub image | `.github/workflows/sync-conda-deps.yml` | Push to `main` touching `hub-conda-deps.txt` |
 | PR shape conventions (target branch, test plan, checklist) | `.github/PULL_REQUEST_TEMPLATE.md` + `.github/RULESETS.md` (one-time setup doc) | Auto-populated on every PR |
 
 What's **not** yet automated (see [Roadmap](#roadmap)):
 
-- Pre-commit hook running the consistency lint at `git commit` time.
-- Import smoke (`python -c "import <sensor>"`) on top of the `--help` smoke.
+- (none currently; Rec 3 — pre-commit + import-smoke — shipped.)
 
 The bug that motivated most of this guide: the [Capella `ModuleNotFoundError` rollout](#capella-modulenotfounderror-cdd1c23--be6693c).
 
@@ -95,7 +95,21 @@ Steps:
    ```
 3. `pip install .` (no `--no-deps`, so `[project.dependencies]` resolve
    against the conda env).
-4. **Iterate `pyproject.toml [project.scripts]` and run `--help` on each**:
+4. **Import-test every sensor package** (added in Rec 3):
+   ```bash
+   # Sensor dirs discovered the same way tools/check_sensor_consistency.py
+   # does — top-level dirs with cli.py + at least one process_*.py.
+   sensors=$(python -c "...sensor discovery...")
+   for sensor in $sensors; do
+       python -c "import $sensor" || failed=1
+   done
+   ```
+   Catches the bug class where `<sensor>/__init__.py` star-imports a symbol
+   that doesn't exist in `<sensor>_v2.py`, or pulls in a transitively
+   missing dep — but `--help` would short-circuit through argparse before
+   ever loading the broken module. A bare `import` forces the full
+   module-load path.
+5. **Iterate `pyproject.toml [project.scripts]` and run `--help` on each**:
    ```bash
    scripts=$(python -c "import tomllib, pathlib;
                         p = tomllib.loads(pathlib.Path('pyproject.toml').read_text());
@@ -105,10 +119,11 @@ Steps:
    done
    ```
 
-The script list is **not hardcoded** — it's introspected from pyproject.toml,
-so adding a new sensor automatically gets it exercised. Combined with
-`sensor-consistency`, this means a green CI = your CLIs at least import
-cleanly in a fresh env that matches the hub image's dep stack.
+Neither list is hardcoded — sensor dirs come from disk-scan, scripts come
+from pyproject. Adding a new sensor (via `tools/new_sensor.py`) gets both
+loops exercised automatically. Combined with `sensor-consistency`, this
+means a green CI = your CLIs at least import cleanly in a fresh env that
+matches the hub image's dep stack.
 
 #### When `cli-smoke` fails
 
@@ -362,15 +377,31 @@ Two simplifications, both landed:
   for future automation, plus an optional Actions-based hard-enforcement
   fallback if the honor-system approach proves insufficient.
 
-### Rec 3 — Pre-commit hook + import smoke (~1 hour)
+### Rec 3 — Pre-commit hook + import smoke — SHIPPED
 
-- Add `.pre-commit-config.yaml` with one local hook that runs
-  `python tools/check_sensor_consistency.py`. Bug class fails at
-  `git commit`, not at CI ~10 min later.
-- Extend `cli-smoke` to also run `python -c "import <sensor>"` for every
-  sensor in the include list. `--help`-only catches argparse-time imports,
-  but a wrong-symbol import inside `main()` only would slip through.
-  Adding the bare `import` closes that gap.
+Two small additions, both landed:
+
+- **`.pre-commit-config.yaml`** at the repo root with one local hook that
+  runs `python tools/check_sensor_consistency.py` at `git commit` time.
+  `language: system` + `always_run: true` + `pass_filenames: false` — no
+  framework deps beyond the `pre-commit` package itself, sub-second to
+  run, reads repo state directly. Setup is opt-in per-clone:
+
+  ```bash
+  pip install pre-commit && pre-commit install
+  ```
+
+  After that, every `git commit` runs the consistency lint locally before
+  the commit object is created. Same check still runs in CI as a backstop
+  for contributors who haven't installed the hook.
+- **`cli-smoke` job extended** with an import-test step that runs
+  `python -c "import <sensor>"` for every sensor dir BEFORE the `--help`
+  loop. `--help`-only catches argparse-time imports; a wrong-symbol
+  star-import inside `<sensor>/__init__.py` is invisible to `--help`
+  because argparse exits before the broken symbol is ever resolved. The
+  bare `import` forces the full module-load path and surfaces those
+  errors. Sensor list is disk-scanned (cli.py + process_*.py heuristic),
+  so new sensors get exercised automatically.
 
 ### Audit-flagged simplifications (not yet actioned)
 

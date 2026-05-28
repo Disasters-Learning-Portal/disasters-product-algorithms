@@ -50,3 +50,7 @@ s3fs
 tomlkit
 jupytext
 nbformat
+
+# --- Local pre-commit hook (runs tools/check_sensor_consistency.py on commit) ---
+# After install: `pre-commit install` wires .pre-commit-config.yaml into git.
+pre-commit

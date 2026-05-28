@@ -46,6 +46,47 @@ jobs:
         # No --no-deps: lets pip realise [project.dependencies] are already
         # satisfied by the conda install above, and installs the package itself.
         run: pip install .
+      - name: Import-test every sensor package
+        # Catches the bug class where `<sensor>/__init__.py` star-imports a
+        # symbol that doesn't exist (or pulls in a module that fails to load)
+        # but `--help` short-circuits past it via argparse-exit. A bare
+        # `import <sensor>` forces the full module-load path to execute.
+        # Mirrors the per-script smoke loop's style: explicit rc capture,
+        # `bash {0}` to drop errexit, manual conda activation.
+        shell: bash {0}
+        run: |
+          set -uo pipefail
+          source /usr/share/miniconda3/etc/profile.d/conda.sh || \
+            source "$CONDA/etc/profile.d/conda.sh"
+          conda activate smoke
+          # Find sensor dirs the same way tools/check_sensor_consistency.py does:
+          # top-level dirs (non-hidden, non-underscore-prefixed) containing
+          # cli.py + at least one process_*.py.
+          sensors=$(python -c "
+          from pathlib import Path
+          for p in sorted(Path('.').iterdir()):
+              if p.is_dir() and not p.name.startswith(('.', '_')) \
+                 and (p/'cli.py').exists() \
+                 and any(p.glob('process_*.py')):
+                  print(p.name)
+          ")
+          failed=0
+          for sensor in $sensors; do
+            echo ""
+            echo "--- import $sensor ---"
+            output=$(python -c "import $sensor" 2>&1)
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "$output"
+              echo "::error::import $sensor failed (exit $rc)"
+              failed=1
+            else
+              echo "(... ok)"
+            fi
+          done
+          echo ""
+          echo "===== Import-test summary: failed=$failed ====="
+          exit $failed
       - name: Smoke-test every registered console script
         # Disable errexit so per-script failures don't kill the loop silently.
         # We capture rc + output explicitly per iteration — the previous

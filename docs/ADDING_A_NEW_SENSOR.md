@@ -34,7 +34,10 @@ gh pr create --base dev
 
 The scaffolder runs `tools/check_sensor_consistency.py` as a post-condition
 check and rolls back all file changes if it fails — so the only state that
-can leak out is a sensor whose template renders cleanly.
+can leak out is a sensor whose template renders cleanly. If you have the
+pre-commit hook installed (`pip install pre-commit && pre-commit install`,
+see [CI / validation](#ci--validation)), the same lint fires at `git commit`
+time as a second safety net.
 
 If you need to customise the default S3 bucket or the notebook description
 up-front:
@@ -348,13 +351,25 @@ Runs `python tools/check_sensor_consistency.py`. Catches:
 ### `cli-smoke`
 
 Boots a fresh conda env from `dev-conda-deps.txt`, runs `pip install .`,
-then iterates `[project.scripts]` and runs `--help` on each. Catches:
+then runs two sub-loops:
+
+1. **Import-test:** `python -c "import <sensor>"` for every sensor dir
+   on disk. Forces the full module-load path — catches wrong-symbol
+   star-imports in `<sensor>/__init__.py` that `--help` would short-circuit
+   past (argparse exits before the broken symbol is ever resolved).
+2. **`--help` loop:** iterates `[project.scripts]` and runs `<script> --help`
+   on each. Catches argparse-time issues + the "shim without package"
+   class (script registered, package missing from `packages.find.include`).
+
+Both sub-loops together catch:
 
 - Missing transitive deps (broken `import` at module load).
 - Wrong-symbol imports in `__init__.py` (e.g. star-imports a function
-  that doesn't exist).
+  that doesn't exist in `<sensor>_v2`).
+- Console script registered without the package being installable.
+- Argparse misconfigurations.
 
-Both must pass before merge.
+All checks must pass before merge.
 
 ### Running locally
 
@@ -363,6 +378,17 @@ python tools/check_sensor_consistency.py
 # OK: 6 sensor(s) consistent with pyproject.toml:
 #   - capella/, landsat/, satellogic/, sentinel2/, <sensor>/, umbra/
 ```
+
+**Pre-commit hook (recommended):** install once per clone —
+
+```bash
+pip install pre-commit && pre-commit install
+```
+
+— and the consistency lint then fires automatically at `git commit` time,
+not just in CI. Same script, sub-second runtime, identical pass/fail
+output. If the hook flags a problem, `git commit` aborts and you fix
+locally before pushing.
 
 ---
 

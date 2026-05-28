@@ -262,13 +262,34 @@ the pyproject ↔ sensor-dir consistency invariant fail the `sensor-consistency`
 job before merging.
 
 A second CI job, `cli-smoke`, installs the algorithms package in a clean conda
-env (deps from `dev-conda-deps.txt`) and runs `--help` on every registered
-console script. This is the layer that catches the bug class where a console
+env (deps from `dev-conda-deps.txt`), then runs two checks: a bare
+`python -c "import <sensor>"` for every sensor dir (forces the full
+module-load path — catches broken `__init__.py` star-imports that `--help`
+would short-circuit past), followed by `--help` on every registered
+console script. Together these catch the bug class where a console
 script is registered in `pyproject.toml` but its package isn't listed in
-`[tool.setuptools.packages.find].include` — `pip install` silently skips
-the package, leaving an unresolvable shim in `bin/`.
+`[tool.setuptools.packages.find].include` (`pip install` silently skips
+the package, leaving an unresolvable shim in `bin/`), plus broken
+re-exports that argparse-exit would mask.
 
 Full automation reference: see [docs/AUTOMATION.md](docs/AUTOMATION.md).
+
+### Pre-commit hook (optional)
+
+To run the consistency lint automatically at `git commit` time — instead of
+waiting on CI ~10 min later — install [`pre-commit`](https://pre-commit.com/)
+once per clone:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The repo ships `.pre-commit-config.yaml` with one local hook that runs
+`python tools/check_sensor_consistency.py` on every commit. Sub-second
+runtime; if the lint flags an inconsistency, the commit is aborted and
+you fix locally before pushing. CI still runs the same check as a backstop
+for contributors who haven't installed the hook.
 
 ### Notebook conventions
 

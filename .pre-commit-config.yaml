@@ -1,0 +1,28 @@
+# Pre-commit hook config — runs the sensor-consistency lint at `git commit` time.
+#
+# Setup (one-time, per clone):
+#     pip install pre-commit && pre-commit install
+#
+# After install, every `git commit` runs tools/check_sensor_consistency.py.
+# Same check runs in CI via .github/workflows/lint.yml `sensor-consistency` job;
+# this hook just shifts the feedback from ~10 min (CI) to <1s (local).
+#
+# `language: system` keeps the hook framework-free — no isolated venv, no
+# extra deps beyond the `pre-commit` package itself. The script is stdlib +
+# tomllib only, so it runs against whatever Python is already on $PATH.
+#
+# `always_run: true` + `pass_filenames: false`: the script reads repo state
+# itself (walks sensor dirs, parses pyproject.toml, scans notebooks). It
+# doesn't accept file arguments, and scoping by changed-file globs is
+# fragile — a pyproject edit alone doesn't touch any sensor dir, but it can
+# still break consistency. Sub-second runtime, so always-run is the right
+# default.
+repos:
+  - repo: local
+    hooks:
+      - id: sensor-consistency
+        name: sensor <-> pyproject consistency
+        entry: python tools/check_sensor_consistency.py
+        language: system
+        pass_filenames: false
+        always_run: true

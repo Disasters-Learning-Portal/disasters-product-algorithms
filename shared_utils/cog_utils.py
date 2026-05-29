@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import rasterio
 import numpy as np
-from typing import Optional, Union, Tuple
+from typing import Dict, Optional, Union, Tuple
 
 
 def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = None) -> Union[int, float]:
@@ -208,6 +208,31 @@ def get_compression_profile(
     return profile
 
 
+def _build_cog_translate_profile(compression: str, compression_level: int) -> dict:
+    """
+    Build a rio_cogeo profile dict that matches what the subprocess
+    `rio cogeo create ... --co PREDICTOR=2 --co ZSTD_LEVEL=N` path produces.
+
+    Used only when `convert_to_cog` is invoked with `metadata`, because
+    embedding GeoTIFF tags requires the Python `cog_translate` API
+    (the CLI has no flag for arbitrary metadata). Empirical: post-step
+    `gdal.SetMetadata` on a finished COG breaks the COG layout in
+    GDAL 3.10+.
+    """
+    from rio_cogeo.profiles import cog_profiles
+
+    profile = dict(cog_profiles.get(compression.lower()))
+    if compression.upper() == 'DEFLATE':
+        profile['PREDICTOR'] = 2
+        profile['ZLEVEL'] = compression_level
+    elif compression.upper() == 'LZW':
+        profile['PREDICTOR'] = 2
+    elif compression.upper() == 'ZSTD':
+        profile['PREDICTOR'] = 2
+        profile['ZSTD_LEVEL'] = compression_level
+    return profile
+
+
 def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
@@ -220,6 +245,7 @@ def convert_to_cog(
     overview_levels: int = 5,
     quiet: bool = False,
     backend: str = 'rio',
+    metadata: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format with optional reprojection.
@@ -244,10 +270,23 @@ def convert_to_cog(
         quiet: Suppress output messages
         backend: Backend to use for COG creation. 'rio' (default) uses rio-cogeo
             CLI, 'gdal' delegates to shared_utils.gdal_cog_processor.create_cog_gdal.
+        metadata: Optional dict of activation-event tags to embed in the output
+            COG (e.g. {'ACTIVATION_EVENT': '202501_Flood_CA', 'SOURCE': 'USGS',
+            'PROCESSOR': 'NASA Disasters COG Processor v1.0.0'}). When provided,
+            convert_to_cog routes through the in-process `rio_cogeo.cog_translate`
+            (not the `rio cogeo create` subprocess) so the tags land at COG
+            creation time. Auto-augments YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
+            via shared_utils.cog_metadata.resolve_metadata. Not supported on the
+            'gdal' backend yet.
 
     Returns:
         Path to created COG file
     """
+    if metadata is not None and backend == 'gdal':
+        raise NotImplementedError(
+            "metadata embedding is not yet supported on backend='gdal'. "
+            "Use backend='rio' (the default)."
+        )
     # GDAL virtual filesystem prefixes (/vsis3/, /vsicurl/, /vsigs/, ...) bypass
     # the existence check — rasterio + gdalwarp open them natively when the
     # caller is streaming a remote object instead of downloading first.
@@ -430,20 +469,63 @@ def convert_to_cog(
         cmd.extend(['--co', 'PREDICTOR=2'])
         cmd.extend(['--co', f'ZSTD_LEVEL={compression_level}'])
 
-    # Execute command
+    # Execute COG creation.
+    #
+    # Two paths:
+    #   - `metadata is None` (default): subprocess `rio cogeo create`. Fast,
+    #     unchanged from prior behavior.
+    #   - `metadata is not None`: in-process `rio_cogeo.cogeo.cog_translate`
+    #     with `additional_cog_metadata=...`. Required because:
+    #       (a) `rio cogeo create` CLI has no flag for arbitrary tags, and
+    #       (b) reopening a finished COG with `gdal.Open(GA_Update)` +
+    #           `SetMetadata(...)` breaks the COG layout in GDAL 3.10+
+    #           (`cog_validate` returns valid=False with IFD-offset errors).
     if not quiet:
-        print(f"  Creating COG: {os.path.basename(temp_output)}")
+        if metadata is not None:
+            print(f"  Creating COG with embedded metadata: {os.path.basename(temp_output)}")
+        else:
+            print(f"  Creating COG: {os.path.basename(temp_output)}")
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        if metadata is not None:
+            from rio_cogeo.cogeo import cog_translate
 
-        if not quiet and result.stdout:
-            print(f"  {result.stdout.strip()}")
+            # Auto-augment with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
+            # if the filename matches the activation-event pattern.
+            try:
+                from shared_utils.cog_metadata import resolve_metadata
+                full_metadata = resolve_metadata(
+                    os.path.basename(input_tif),
+                    mode='manual',
+                    manual_metadata=metadata,
+                )
+            except ImportError:
+                full_metadata = dict(metadata)
+
+            if not quiet:
+                print(f"  Embedded tags: {sorted(full_metadata.keys())}")
+
+            profile = _build_cog_translate_profile(compression, compression_level)
+            cog_translate(
+                input_for_cog,
+                temp_output,
+                profile,
+                nodata=nodata,
+                overview_level=overview_levels,
+                overview_resampling=overview_resampling,
+                web_optimized=False,
+                additional_cog_metadata=full_metadata,
+                quiet=quiet,
+            )
+        else:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if not quiet and result.stdout:
+                print(f"  {result.stdout.strip()}")
 
         # If we created a temp file, replace the original
         if temp_output != output_cog:
@@ -469,7 +551,7 @@ def convert_to_cog(
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
         raise RuntimeError(error_msg)
-    except Exception as e:
+    except Exception:
         if os.path.exists(temp_output):
             os.remove(temp_output)
         if warped_file and os.path.exists(warped_file):

@@ -118,6 +118,40 @@ def resolve_metadata(
     return meta
 
 
+def load_metadata_json(path: Optional[str]) -> Optional[Dict[str, str]]:
+    """
+    Load a JSON file into a metadata dict for embedding into a COG.
+
+    Used by every sensor CLI to parse the operator's --metadata-json
+    argument before threading it down to convert_to_cog. Keeps the
+    parsing + validation logic in one place.
+
+    Args:
+        path: Filesystem path to a JSON file. None or empty string → returns None.
+
+    Returns:
+        Dict with str → str (all values coerced via str(), since GeoTIFF tags
+        must be strings), or None if no path was supplied.
+
+    Raises:
+        FileNotFoundError: path is set but the file doesn't exist.
+        ValueError: the JSON doesn't decode as a top-level object.
+    """
+    if not path:
+        return None
+    import json
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"--metadata-json path does not exist: {path}")
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"--metadata-json must contain a JSON object at the top level, "
+            f"got {type(data).__name__}"
+        )
+    return {str(k): str(v) for k, v in data.items()}
+
+
 def read_compression_settings(input_data: Union[bytes, str]) -> Dict[str, Any]:
     """
     Read compression settings from a GeoTIFF file.

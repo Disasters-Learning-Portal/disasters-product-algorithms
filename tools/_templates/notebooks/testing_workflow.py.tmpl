@@ -28,6 +28,20 @@ from ${name} import ${name}_v2
 from shared_utils import s3utils
 
 # %%
+# Activation event metadata
+EVENT_NAME = '202406_Example_Event'    # YYYYMM_Hazard_Location
+SOURCE = "TBD"  # Data origin (e.g., USGS, Copernicus, CSDA, TBD)
+
+# %%
+from shared_utils import PROCESSOR_STRING
+ACTIVATION_METADATA = {
+    "ACTIVATION_EVENT": EVENT_NAME,
+    "SOURCE": SOURCE,
+    "PROCESSOR": PROCESSOR_STRING,
+    # Add any custom key-value pairs here
+}
+
+# %%
 # ###### CONFIG #######
 bucket = "${bucket}"
 prefix = "disasters"
@@ -52,7 +66,7 @@ print(sig)
 # Convert to COG and (optionally) upload
 from shared_utils import cog_utils
 
-cog_filepath = cog_utils.convert_to_cog(sig, dst_crs=TARGET_CRS)
+cog_filepath = cog_utils.convert_to_cog(sig, dst_crs=TARGET_CRS, metadata=ACTIVATION_METADATA)
 print(cog_filepath)
 
 # %%

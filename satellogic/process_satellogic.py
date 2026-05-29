@@ -11,6 +11,7 @@ from satellogic.satellogic_v2 import (
 )
 
 from shared_utils.cog_utils import convert_to_cog
+from shared_utils.cog_metadata import load_metadata_json
 
 
 def main():
@@ -64,9 +65,22 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--metadata-json",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file containing activation-event metadata to "
+            "embed as GeoTIFF tags on the output COG (e.g. ACTIVATION_EVENT, "
+            "SOURCE, PROCESSOR). The notebooks write ACTIVATION_METADATA to "
+            "a temp JSON file and pass it here."
+        ),
+    )
+
     args = parser.parse_args()
 
     dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
+    activation_metadata = load_metadata_json(args.metadata_json)
 
     print("Retrieving Satellogic resources...")
 
@@ -133,7 +147,8 @@ def main():
             nodata=args.nodata,
             dst_crs=dst_crs_value,
             compression=args.compression,
-            compression_level=args.compression_level
+            compression_level=args.compression_level,
+            metadata=activation_metadata,
         )
 
         print(f"COG created: {cog_path}")

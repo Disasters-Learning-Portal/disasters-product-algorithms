@@ -28,9 +28,14 @@ class SimpleProcessor:
         Initialize processor with simple configuration.
 
         Args:
-            config: Simple configuration dictionary
+            config: Simple configuration dictionary. Optional key:
+                'metadata' — dict of activation-event tags (ACTIVATION_EVENT,
+                SOURCE, PROCESSOR, ...) to embed in every output COG.
+                Forwarded as `metadata=` to main_processor.convert_to_cog,
+                which embeds tags at creation time via cog_translate.
         """
         self.config = config
+        self.metadata = config.get('metadata')
         self.s3_client = None
         self.files_to_process = {}
         self.results = []
@@ -316,6 +321,7 @@ class SimpleProcessor:
                     resampling=self.config.get('resampling'),
                     clip_to_webmerc=self.config.get('clip_to_webmerc'),
                     stream_from_s3=self.config.get('stream_from_s3', True),
+                    metadata=self.metadata,
                 )
 
                 results.append({

@@ -65,6 +65,10 @@
 import os
 import subprocess
 
+# Activation event metadata
+EVENT_NAME = '202406_Example_Event'    # YYYYMM_Hazard_Location
+SOURCE = "TBD"  # Data origin (e.g., USGS, Copernicus, CSDA, TBD)
+
 # ${Name} date format
 DATE = "20260418193305"  # YYYYMMDDHHMMSS
 
@@ -100,6 +104,24 @@ print(f"  Date: {DATE}")
 print(f"  Product: {PRODUCTS}")
 print(f"  Output Directory: {OUTPUT_DIR}")
 
+# %%
+from shared_utils import PROCESSOR_STRING
+ACTIVATION_METADATA = {
+    "ACTIVATION_EVENT": EVENT_NAME,
+    "SOURCE": SOURCE,
+    "PROCESSOR": PROCESSOR_STRING,
+    # Add any custom key-value pairs here
+}
+
+# Write ACTIVATION_METADATA to a temp JSON file so the CLI can read it
+# via --metadata-json and embed the tags onto each output COG.
+import json, tempfile
+_meta_fd, ACTIVATION_METADATA_PATH = tempfile.mkstemp(
+    prefix='activation_meta_', suffix='.json'
+)
+with os.fdopen(_meta_fd, 'w') as _f:
+    json.dump(ACTIVATION_METADATA, _f)
+
 # %% [markdown]
 # # Process ${Name} Data #
 #
@@ -128,6 +150,7 @@ for PRODUCT, ENABLED in PRODUCTS.items():
         "-compression", COMPRESSION,
         "-compression_level", str(COMPRESSION_LEVEL),
         "-dst_crs", TARGET_CRS if TARGET_CRS else "native",
+        "--metadata-json", ACTIVATION_METADATA_PATH,
     ]
 
     if NODATA is not None:

@@ -19,6 +19,8 @@ import rasterio
 from rasterio.io import MemoryFile
 from rio_cogeo.cogeo import cog_validate, cog_translate
 
+from shared_utils.version import PROCESSOR_STRING
+
 # Enable GDAL exceptions
 gdal.UseExceptions()
 
@@ -70,7 +72,7 @@ def detect_activation_event(
         'YEAR_MONTH': year_month,
         'HAZARD': hazard,
         'LOCATION': location,
-        'PROCESSOR': 'NASA Disasters COG Processor v1.0',
+        'PROCESSOR': PROCESSOR_STRING,
     }
 
 

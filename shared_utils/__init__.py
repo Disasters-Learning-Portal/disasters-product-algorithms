@@ -5,6 +5,11 @@ Shared Utilities Module
 Shared utilities for COG conversion, GDAL operations, and geospatial processing.
 """
 
+# Package version (single source of truth from git tags via setuptools-scm)
+# and the canonical "NASA Disasters COG Processor vX.Y.Z" string used in
+# ACTIVATION_METADATA dicts across the codebase.
+from shared_utils.version import __version__, PROCESSOR_STRING
+
 # COG utilities (requires rasterio)
 try:
     from shared_utils.cog_utils import (

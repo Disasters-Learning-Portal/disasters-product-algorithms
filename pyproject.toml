@@ -47,19 +47,20 @@ test = [
 ]
 
 [project.scripts]
-process_landsat89 = "landsat.cli:process_landsat89_cli"
-process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
-process_satellogic = "satellogic.cli:process_satellogic_cli"
-process_umbra = "umbra.cli:process_umbra_cli"
 process_capella = "capella.cli:process_capella_cli"
+process_landsat89 = "landsat.cli:process_landsat89_cli"
+process_satellogic = "satellogic.cli:process_satellogic_cli"
+process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
+process_skysat2 = "skysat2.cli:process_skysat2_cli"
+process_umbra = "umbra.cli:process_umbra_cli"
 summarize_raster = "raster_tools.cli:summarize_raster_cli"
 
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*", "skysat2*"]
 
 [tool.setuptools_scm]
 # Single source of truth for version = the git tag.

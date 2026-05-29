@@ -170,7 +170,7 @@ def build_output_name(in_file, out_dir, product):
 
     dt = datetime.strptime("_".join(fname.split("_")[0:2]), "%Y%m%d_%H%M%S")
 
-    return f"{out_dir}/{dt.strftime('%Y%m')}_Satellogic_{fname.split('_')[4]}_{product}{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    return f"{out_dir}/{dt.strftime('%Y%m%d')}_Satellogic_{fname.split('_')[4]}_{product}{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
 
 
 # Functions for specific products

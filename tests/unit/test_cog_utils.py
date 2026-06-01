@@ -38,9 +38,15 @@ class TestSetNodataValue:
         from shared_utils.cog_utils import set_nodata_value
         assert set_nodata_value('float64') == -9999.0
 
-    def test_unknown_type_fallback(self):
+    def test_unknown_dtype_raises_ValueError(self):
+        """Previously fell back to -9999.0 silently for any unrecognized dtype.
+        Tightened 2026-06-01 to refuse-and-raise: -9999.0 is a nonsense default
+        for complex bands (and would have been silently invalid for uint32/
+        int64 too). New behavior pinned in tests/unit/test_nodata_resolution.py
+        ::TestSetNodataValueExpandedLadder."""
         from shared_utils.cog_utils import set_nodata_value
-        assert set_nodata_value('complex64') == -9999.0
+        with pytest.raises(ValueError, match="No default nodata"):
+            set_nodata_value('complex64')
 
     def test_valid_manual_nodata(self):
         from shared_utils.cog_utils import set_nodata_value

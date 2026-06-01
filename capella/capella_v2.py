@@ -78,7 +78,7 @@ def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
 
 def sigmaCalib(
     s3_image_paths: list[str],
-    save_location: str = "./s3_temp"
+    save_location: str = "/tmp/s3_temp"
 ) -> str:
 
     if save_location.endswith("/"):

@@ -175,7 +175,7 @@ def build_output_name(in_file, out_dir, product):
 
 # Functions for specific products
 
-def genTrueColor(paths, meta, out="./s3_temp", use_mask=True, visualize=True, gamma=0.7):
+def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
 
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -205,7 +205,7 @@ def genTrueColor(paths, meta, out="./s3_temp", use_mask=True, visualize=True, ga
     return outfile
 
 
-def gencolorIR(paths, meta, out="./s3_temp", use_mask=True, visualize=True, gamma=0.7):
+def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -235,7 +235,7 @@ def gencolorIR(paths, meta, out="./s3_temp", use_mask=True, visualize=True, gamm
     return outfile
 
 
-def genNDVI(paths, meta, out="./s3_temp", use_mask=True):
+def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -257,7 +257,7 @@ def genNDVI(paths, meta, out="./s3_temp", use_mask=True):
     return outfile
 
 
-def genNDWI(paths, meta, out="./s3_temp", use_mask=True):
+def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -279,7 +279,7 @@ def genNDWI(paths, meta, out="./s3_temp", use_mask=True):
     return outfile
 
 
-def genEVI(paths, meta, out="./s3_temp", use_mask=True):
+def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
 
     blue = load_reflectance_band(ds, 1, scale_factor)

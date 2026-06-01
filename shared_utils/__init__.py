@@ -103,6 +103,15 @@ try:
 except ImportError:
     pass  # rasterio not available
 
+# Thread-pool helper (pure Python, no GDAL/boto3)
+from shared_utils.parallel import map_threaded
+
+# S3 batch COG wrapper (requires boto3 transitively via process_single_file)
+try:
+    from shared_utils.cog_processing import process_batch_s3
+except ImportError:
+    pass
+
 __all__ = [
     # COG utilities
     'set_nodata_value',
@@ -152,4 +161,7 @@ __all__ = [
     'WEBMERC_EPSGS',
     # Raster inspection (geotiff_analyzer.py)
     'summarize_raster',
+    # Thread-pool helpers
+    'map_threaded',
+    'process_batch_s3',
 ]

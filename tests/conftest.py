@@ -16,6 +16,9 @@ if "osgeo" not in sys.modules:
             _mod = types.ModuleType(f"osgeo.{_sub}")
             setattr(_osgeo, _sub, _mod)
             sys.modules[f"osgeo.{_sub}"] = _mod
+        # Module-level side-effects in shared_utils call gdal.UseExceptions()
+        # at import time; provide a no-op so the stub doesn't fail.
+        sys.modules["osgeo.gdal"].UseExceptions = lambda: None
         sys.modules["osgeo"] = _osgeo
 
 # Only import rasterio if available

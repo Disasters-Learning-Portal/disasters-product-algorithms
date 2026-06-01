@@ -28,7 +28,7 @@ def main():
     # Input controls
     parser.add_argument("--date", required=True, help="Target datetime (YYYY-MM-DD HH:MM:SS)")
     parser.add_argument("--level", required=True, help="Processing level (e.g. L1D, L1B)")
-    parser.add_argument("--output", default="./s3_temp")
+    parser.add_argument("--output", default="/tmp/s3_temp")
 
     # Processing toggles
     parser.add_argument(

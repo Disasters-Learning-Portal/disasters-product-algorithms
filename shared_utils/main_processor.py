@@ -89,7 +89,9 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                    chunk_config=None, manual_nodata=None, overwrite=False,
                    skip_validation=False, target_crs='EPSG:3857',
                    resampling=None, clip_to_webmerc=None,
-                   stream_from_s3=True, metadata=None, **_legacy_kwargs):
+                   stream_from_s3=True, metadata=None,
+                   compression='ZSTD', compression_level=22,
+                   **_legacy_kwargs):
     """
     S3 orchestrator for COG conversion.
 
@@ -134,6 +136,12 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             rio_cogeo.cog_translate to embed tags at creation time. Auto-
             augmented with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE via
             shared_utils.cog_metadata.resolve_metadata.
+        compression: Compression type (default: 'ZSTD'). Forwarded to
+            cog_utils.convert_to_cog.
+        compression_level: Compression level (default: 22 for ZSTD —
+            production target). Lower values (e.g. 1) trade artifact size
+            for compress time and are appropriate for fast-iteration
+            workflows like the testing notebooks.
 
     Returns:
         None (raises exception on error)
@@ -210,6 +218,8 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             dst_crs=target_crs,
             resampling_method=resampling,
             clip_to_webmerc=clip_to_webmerc,
+            compression=compression,
+            compression_level=compression_level,
             quiet=False,
             metadata=metadata,
         )

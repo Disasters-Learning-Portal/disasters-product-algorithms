@@ -19,7 +19,7 @@ Complete reference for all functions in the `shared_utils` package.
 - [High-Level Interfaces](#high-level-interfaces)
   - [notebook_helpers](#notebook_helpers) - SimpleProcessor and quick_process
   - [main_processor](#main_processor) - S3-based COG conversion pipeline
-  - [cog_processing](#cog_processing) - Single-file S3 processing
+  - [cog_processing](#cog_processing) - Single-file and batch S3 processing
 - [COG Creation & Validation](#cog-creation--validation)
   - [cog_metadata](#cog_metadata) - COG creation with embedded metadata tags
   - [cog_utils](#cog_utils) - Local COG conversion and utilities
@@ -42,6 +42,7 @@ Complete reference for all functions in the `shared_utils` package.
   - [memory_management](#memory_management) - Memory monitoring and optimization
   - [error_handling](#error_handling) - Error recovery and temp file cleanup
   - [log_utils](#log_utils) - Logging and status reporting
+  - [parallel](#parallel) - Thread-pool helper for batch loops
 - [Legacy / Geospatial Tools](#legacy--geospatial-tools)
   - [geotools](#geotools) - GDAL-based raster utilities
 
@@ -76,6 +77,7 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `output_dirs` | dict | No | built-in | Category-to-directory mapping |
 | `nodata_values` | dict | No | built-in | Category-specific nodata values |
 | `save_results` | bool | No | `True` | Save results CSV |
+| `max_workers` | int | No | `4` | Thread-pool size for the per-category file loop in `_process_category`. Bigger = more S3+GDAL concurrency, but oversubscribes if pushed past ~CPU count (each file's `convert_to_cog` already uses `NUM_THREADS=ALL_CPUS`). |
 
 **Methods:**
 
@@ -150,7 +152,7 @@ The chunked / GDAL-driver / rio-cogeo branching that used to live here was remov
 
 ### cog_processing
 
-Simplified single-file S3 processing.
+Single-file and batch S3 → COG → S3 processing.
 
 #### `process_single_file(...)`
 
@@ -171,6 +173,30 @@ process_single_file(
                                    # of the subprocess rio cogeo fast path.
 )
 ```
+
+#### `process_batch_s3(s3_client, bucket, items, max_workers=4, **kwargs) -> List[bool | Exception]`
+
+Thread-pool wrapper around `process_single_file` for batches of S3 keys.
+`items` is a list of `(source_key, dest_key)` tuples; `**kwargs` forwards
+to `process_single_file` (`nodata`, `verify`, `metadata`, `verbose`, etc.).
+Returns one entry per input in original order: `True`/`False` (the
+single-file return value) or the `Exception` instance if that worker
+raised. One bad item does not crash the batch.
+
+```python
+from shared_utils.cog_processing import process_batch_s3
+
+items = [("incoming/a.tif", "out/a.tif"), ("incoming/b.tif", "out/b.tif")]
+results = process_batch_s3(
+    s3_client, bucket="nasa-disasters", items=items,
+    max_workers=4, metadata=ACTIVATION_METADATA, verify=True,
+)
+```
+
+Default `max_workers=4` is the sweet spot for S3 I/O + GDAL native
+overlap. Don't push past CPU count — each `convert_to_cog` internally
+already uses `NUM_THREADS=ALL_CPUS`. Threads (not processes) by design;
+see [`shared_utils.parallel`](#parallel) for the rationale.
 
 ---
 
@@ -696,6 +722,52 @@ Print processing summary from results DataFrame.
 #### `create_batch_report(file_list, results_df) -> dict`
 
 Create detailed batch processing report.
+
+---
+
+### parallel
+
+Tiny thread-pool helper for fanning out per-file / per-product loops.
+Used by `cog_processing.process_batch_s3`, `notebook_helpers.SimpleProcessor._process_category`,
+and every operator notebook that processes more than one item per
+acquisition.
+
+#### `map_threaded(func, items, max_workers=4, desc=None) -> List`
+
+```python
+from shared_utils.parallel import map_threaded
+
+# func receives one item at a time; results align with input order.
+results = map_threaded(
+    lambda item: convert_and_upload(item),
+    items=[...],
+    max_workers=4,
+    desc="COG batch",       # optional tqdm description
+)
+
+# Per-item exceptions captured in place (no batch crash on one bad input)
+for item, out in zip(items, results):
+    if isinstance(out, Exception):
+        log.warning("item %s failed: %s", item, out)
+```
+
+**Why threads, not processes.** S3 I/O (boto3) and GDAL native calls
+both release the GIL, so threads truly overlap. A `ProcessPoolExecutor`
+would oversubscribe cores because each worker's `convert_to_cog`
+internally uses `NUM_THREADS=ALL_CPUS` — N workers × all-cores → thrash.
+
+**Worker count guidance** (pinned in [`.clinerules.md`](../.clinerules.md) rule #16):
+
+| Loop kind | Recommended `max_workers` | Why |
+|---|---|---|
+| Subprocess wrapping a full GDAL CLI (`process_capella`, etc.) | **2** | Each subprocess saturates all cores via GDAL ALL_CPUS; >2 thrashes. |
+| In-process `convert_to_cog` + S3 upload | **4** | Mix of S3 I/O and GDAL native — threads overlap well. |
+| Pure S3 upload / download (no warp) | **4–8** | Bound by boto3 connection pool, not CPU. |
+
+**Properties pinned by tests** ([`tests/unit/test_parallel.py`](../tests/unit/test_parallel.py)):
+order preservation, per-item exception capture, true concurrency,
+`max_workers=1` sequential degenerate case, empty-input safety,
+iterable (not just list) acceptance.
 
 ---
 

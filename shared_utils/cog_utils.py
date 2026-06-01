@@ -287,6 +287,13 @@ def convert_to_cog(
             "metadata embedding is not yet supported on backend='gdal'. "
             "Use backend='rio' (the default)."
         )
+
+    # Normalize `dst_crs`: treat string 'None' / 'none' / '' as actual None.
+    # Mirrors the same coercion in main_processor.convert_to_cog so notebooks
+    # don't have to repeat the `_dst_crs = TARGET_CRS if (...) else None`
+    # boilerplate at every call site.
+    if isinstance(dst_crs, str) and dst_crs.strip().lower() in ('none', ''):
+        dst_crs = None
     # GDAL virtual filesystem prefixes (/vsis3/, /vsicurl/, /vsigs/, ...) bypass
     # the existence check — rasterio + gdalwarp open them natively when the
     # caller is streaming a remote object instead of downloading first.

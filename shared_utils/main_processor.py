@@ -49,8 +49,6 @@ from shared_utils.log_utils import print_status
 from shared_utils.cog_creator import create_cog_with_overviews
 
 # Import configs
-from shared_utils.profiles import select_profile_by_size, get_compression_profile
-from shared_utils.chunk_configs import get_chunk_config
 
 # Import COG profiles - use the correct import path
 try:

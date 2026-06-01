@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 from sentinel2.sentinel2_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
+from shared_utils.cog_metadata import load_metadata_json
 from tqdm import tqdm
 import traceback
 import sys
@@ -64,7 +65,9 @@ parser.add_argument('-compression', type=str, default='ZSTD', help='Compression 
 parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
 parser.add_argument('-dst_crs', type=str, default='EPSG:4326', help='Target CRS for COG output (default: EPSG:4326, use "native" to preserve original CRS).')
 parser.add_argument('-event', type=str, default=None, help='Event name for filename prefix (e.g., 202512_Flood_WA). Adds formatted date suffix.')
+parser.add_argument('--metadata-json', type=str, default=None, help='Path to a JSON file of activation-event metadata (ACTIVATION_EVENT, SOURCE, PROCESSOR, ...) to embed as GeoTIFF tags on every output COG.')
 args=parser.parse_args()
+metadata = load_metadata_json(args.metadata_json)
 
 # Handle dst_crs argument (convert "native" to None)
 dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
@@ -295,6 +298,7 @@ else:
                         prod_name,
                         nodata=args.nodata,
                         dst_crs=dst_crs_value,
+                        metadata=metadata,
                         compression=args.compression,
                         compression_level=args.compression_level
                     )
@@ -341,6 +345,7 @@ else:
                     prod_name,
                     nodata=args.nodata,
                     dst_crs=dst_crs_value,
+                    metadata=metadata,
                     compression=args.compression,
                     compression_level=args.compression_level
                 )
@@ -384,6 +389,7 @@ else:
                     prod_name,
                     nodata=args.nodata,
                     dst_crs=dst_crs_value,
+                    metadata=metadata,
                     compression=args.compression,
                     compression_level=args.compression_level
                 )
@@ -427,6 +433,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -470,6 +477,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -512,6 +520,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -554,6 +563,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -596,6 +606,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -638,6 +649,7 @@ else:
                   prod_name,
                   nodata=args.nodata,
                   dst_crs=dst_crs_value,
+                  metadata=metadata,
                   compression=args.compression,
                   compression_level=args.compression_level
               )
@@ -706,6 +718,7 @@ else:
                       prod_name,
                       nodata=args.nodata,
                       dst_crs=dst_crs_value,
+                      metadata=metadata,
                       compression=args.compression,
                       compression_level=args.compression_level
                   )
@@ -740,6 +753,7 @@ else:
                 merged_file,
                 nodata=args.nodata,
                 dst_crs=dst_crs_value,
+                metadata=metadata,
                 compression=args.compression,
                 compression_level=args.compression_level
             )
@@ -759,6 +773,7 @@ else:
                 merged_file,
                 nodata=args.nodata,
                 dst_crs=dst_crs_value,
+                metadata=metadata,
                 compression=args.compression,
                 compression_level=args.compression_level
             )

@@ -23,9 +23,12 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 - `shared_utils/` modules follow single-responsibility: one concern per file
 - **One engine, one orchestrator**:
-  - `shared_utils.cog_utils.convert_to_cog(input_tif, ...)` — local-file warp+COG primitive (subprocess `gdalwarp` + `rio cogeo create`)
-  - `shared_utils.main_processor.convert_to_cog(name, bucket, ...)` — S3 download (or `/vsis3` stream) → cog_utils → S3 upload. Thin wrapper, ~216 lines.
+  - `shared_utils.cog_utils.convert_to_cog(input_tif, ..., metadata=None)` — local-file warp+COG primitive. Default: subprocess `gdalwarp` + `rio cogeo create`. When `metadata` is set, routes through in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` to embed activation-event tags at creation time.
+  - `shared_utils.main_processor.convert_to_cog(name, bucket, ..., metadata=None)` — S3 download (or `/vsis3` stream) → cog_utils → S3 upload. Thin wrapper. Forwards `metadata` straight to the engine.
 - **One filename module**: `shared_utils/file_naming.py` is the single source of truth. Notebooks import `extract_datetime_from_filename`, `categorize_file`, `create_output_filename` — never re-define inline.
+- **One version module**: `shared_utils.version` exposes `__version__` (read from `importlib.metadata`, which `setuptools-scm` populates from the latest git tag) and `PROCESSOR_STRING = "NASA Disasters COG Processor v{__version__}"`. Notebooks import `from shared_utils import PROCESSOR_STRING` and stamp it into `ACTIVATION_METADATA['PROCESSOR']` — no hardcoded version strings anywhere in notebooks or `cog_metadata.py`.
+- **Two-cell ACTIVATION_METADATA convention** in every operator notebook. The first cell (operator-edited) declares `EVENT_NAME = 'YYYYMM_Hazard_Location'` and `SOURCE = "<sensor default>"`. A separate cell **immediately below** (auto-populated, don't edit) imports `PROCESSOR_STRING` and constructs the `ACTIVATION_METADATA` dict. Subprocess notebooks also dump the dict to a temp JSON file (`ACTIVATION_METADATA_PATH`) which then flows to the CLI via `--metadata-json`. Direct-Python notebooks pass `metadata=ACTIVATION_METADATA` straight into `cog_utils.convert_to_cog`. The split keeps "what an operator edits per activation" cleanly separate from the plumbing that derives the dict + writes the JSON.
+- **One CLI flag for metadata**: every sensor CLI (capella/landsat/sentinel2/satellogic/umbra) accepts `--metadata-json <path>`. The parsing helper is `shared_utils.cog_metadata.load_metadata_json(path)` — one line of CLI integration: `metadata = load_metadata_json(args.metadata_json)`. Same parser, same validation, same error messages. The scaffolder template at [`tools/_templates/sensor/process_name.py.tmpl`](tools/_templates/sensor/process_name.py.tmpl) already wires it for future sensors.
 - Notebooks should be short — import from `shared_utils`, don't inline complex logic
 - All temp files go to `/tmp`, cleaned up in `finally` blocks
 - All raster hot paths set `NUM_THREADS=ALL_CPUS` (gdalwarp + rio cogeo) or `num_threads=os.cpu_count()` (rasterio.warp.reproject)
@@ -42,6 +45,8 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 All sensor CLIs accept `-dst_crs <EPSG:xxxx | native>`. `native` (default on capella/satellogic/umbra) maps to `None` → preserve source projection. `landsat` and `sentinel2` still default to `EPSG:4326` for back-compat; pass `-dst_crs native` to skip the warp.
 
+All sensor CLIs also accept `--metadata-json <path>`. The path points at a JSON file with `{"ACTIVATION_EVENT": ..., "SOURCE": ..., "PROCESSOR": ..., ...}`; the tags get embedded as GeoTIFF metadata on every output COG. The activation event string is auto-split into YEAR_MONTH/HAZARD/LOCATION by `shared_utils.cog_metadata.resolve_metadata` before embedding, so operators only set `ACTIVATION_EVENT='201808_Flood_TX'` and the rest is derived.
+
 ## Critical Constraints
 
 - **Library default `dst_crs` / `target_crs` is `EPSG:3857`** (Web Mercator) — applies to `cog_utils.convert_to_cog`, `main_processor.convert_to_cog`, and `SimpleProcessor`. Reason: EPSG:4326 outputs trigger a `Point outside of projection domain` error in `veda-data-airflow`'s `build_stac` (PROJ writes the WGS 84 ensemble + lat-first axis, which `rio_stac.get_dataset_geom` can't handle). Web Mercator dodges both. Don't change without solving the ensemble + axis problem.
@@ -53,6 +58,7 @@ All sensor CLIs accept `-dst_crs <EPSG:xxxx | native>`. `native` (default on cap
 - COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels
 - Nodata auto-detection: uint8=0, int16=-9999, float=-9999.0
 - `main_processor.convert_to_cog` defaults `stream_from_s3=True` — probes `/vsis3/` then falls back to `/tmp` download. Set False for ZSTD-22 heavy workloads where the up-front download avoids many small range-request round-trips.
+- **GDAL 3.10+ refuses to update a COG in-place.** Post-step `gdal.Open(path, GA_Update); ds.SetMetadata(...)` returns `RuntimeError: ... has COG layout. Updating it will generally result in losing part of the optimizations.` With `IGNORE_COG_LAYOUT_BREAK=YES` the call succeeds but the result fails `cog_validate` (main IFD offset bloats, overview-IFD ordering inverted). **This is why `cog_utils.convert_to_cog` switches to in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` whenever `metadata` is provided** — embedding has to happen at creation, not as a post-step. Do not reintroduce the post-step pattern (we tried; it broke; commit `de80b1a` has the empirical validation).
 
 ## How to Run
 

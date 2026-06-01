@@ -49,8 +49,6 @@ from shared_utils.log_utils import print_status
 from shared_utils.cog_creator import create_cog_with_overviews
 
 # Import configs
-from shared_utils.profiles import select_profile_by_size, get_compression_profile
-from shared_utils.chunk_configs import get_chunk_config
 
 # Import COG profiles - use the correct import path
 try:
@@ -91,7 +89,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
                    chunk_config=None, manual_nodata=None, overwrite=False,
                    skip_validation=False, target_crs='EPSG:3857',
                    resampling=None, clip_to_webmerc=None,
-                   stream_from_s3=True, **_legacy_kwargs):
+                   stream_from_s3=True, metadata=None, **_legacy_kwargs):
     """
     S3 orchestrator for COG conversion.
 
@@ -129,6 +127,13 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             fails (missing creds, network, etc.). Set False to force download
             when /tmp has enough space and you'd rather pay the latency
             up-front (recommended for ZSTD-22 heavy workloads).
+        metadata: Optional dict of activation-event tags to embed in the output
+            COG (e.g. {'ACTIVATION_EVENT': '202501_Flood_CA', 'SOURCE': 'USGS',
+            'PROCESSOR': 'NASA Disasters COG Processor v1.0.0'}). Forwarded
+            to cog_utils.convert_to_cog, which routes through in-process
+            rio_cogeo.cog_translate to embed tags at creation time. Auto-
+            augmented with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE via
+            shared_utils.cog_metadata.resolve_metadata.
 
     Returns:
         None (raises exception on error)
@@ -206,6 +211,7 @@ def convert_to_cog(name, bucket, cog_filename, cog_data_bucket, cog_data_prefix,
             resampling_method=resampling,
             clip_to_webmerc=clip_to_webmerc,
             quiet=False,
+            metadata=metadata,
         )
 
         # 4. Optional validation.

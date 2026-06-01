@@ -130,10 +130,11 @@ convert_to_cog(
     manual_nodata=None,           # Override nodata value
     overwrite=False,              # Overwrite existing S3 files
     skip_validation=False,        # Skip COG validation step
-    target_crs='EPSG:3857',       # Target CRS, None = keep original
+    target_crs='EPSG:3857',       # Target CRS, None or 'None'/'none'/'' = keep source
     resampling=None,              # Warp resampling, None = auto-detect
     clip_to_webmerc=None,         # ±85° lat clip, None = auto-detect
     stream_from_s3=True,          # Probe /vsis3 first; fall back to download
+    metadata=None,                # dict[str,str] embedded as COG tags; see cog_metadata.load_metadata_json
 )
 ```
 
@@ -163,7 +164,11 @@ process_single_file(
     verify=True,                   # Validate output COG
     check_source_is_cog=True,      # Check if source is already COG
     skip_if_source_is_cog=True,    # Skip processing if already COG
-    verbose=True
+    verbose=True,
+    metadata=None,                 # dict[str,str] embedded as COG tags. When set,
+                                   # routes through cog_utils.convert_to_cog
+                                   # (which uses rio_cogeo.cog_translate) instead
+                                   # of the subprocess rio cogeo fast path.
 )
 ```
 
@@ -195,6 +200,28 @@ create_cog_with_metadata(
 ```
 
 Automatically adds `PROCESSING_DATE` if not present in metadata dict.
+
+#### `load_metadata_json(path: Optional[str]) -> Optional[Dict[str, str]]`
+
+Parse a JSON file into a metadata dict, intended for sensor-CLI integration
+of the `--metadata-json` argument. Every sensor CLI (capella/landsat/sentinel2/
+satellogic/umbra) uses this helper as a one-liner: `metadata = load_metadata_json(args.metadata_json)`.
+
+- `None` or empty string → returns `None`.
+- Missing file → `FileNotFoundError`.
+- Non-object JSON (list, scalar) → `ValueError`.
+- Values are coerced to strings (GeoTIFF tags must be strings).
+
+Tests pin the contract: see `tests/unit/test_cog_metadata.py::TestLoadMetadataJson`.
+
+#### `resolve_metadata(filename, mode, manual_metadata=None, pattern=DEFAULT_ACTIVATION_PATTERN) -> Dict[str, str]`
+
+Merge a user-supplied metadata dict with auto-derived activation-event fields.
+When `ACTIVATION_EVENT` is present (e.g. `'201808_Flood_TX'`), the helper splits it
+on `_` and stamps `YEAR_MONTH`, `HAZARD`, `LOCATION` into the result if not already
+set. `convert_to_cog(metadata=…)` calls this internally before passing tags to
+`cog_translate`, so callers only need to set `ACTIVATION_EVENT` + `SOURCE` and
+the derived fields come along for free.
 
 #### `read_compression_settings(input_data) -> Dict[str, Any]`
 
@@ -669,6 +696,33 @@ Print processing summary from results DataFrame.
 #### `create_batch_report(file_list, results_df) -> dict`
 
 Create detailed batch processing report.
+
+---
+
+### version
+
+Package version + canonical `PROCESSOR_STRING` for activation-event metadata.
+Single source of truth for "what version of this library wrote this output."
+
+```python
+from shared_utils.version import __version__, PROCESSOR_STRING
+# or:  from shared_utils import __version__, PROCESSOR_STRING  (re-exported)
+```
+
+#### `__version__: str`
+
+Resolves the installed package version from `importlib.metadata.version("disasters-product-algorithms")`.
+`setuptools-scm` populates this from the latest `vX.Y.Z` git tag at build time
+(see `pyproject.toml`'s `[tool.setuptools_scm]` block). Fallback when the
+package isn't installed: the literal string `"unknown"` (so metadata stays
+well-formed instead of hiding the ambiguity).
+
+#### `PROCESSOR_STRING: str`
+
+`f"NASA Disasters COG Processor v{__version__}"`. Embedded into every output
+COG's `PROCESSOR` tag by the operator notebooks (via `ACTIVATION_METADATA`)
+and by `shared_utils.cog_metadata.detect_activation_event()`. Bump the version
+purely by tagging a new release — no notebook or code edit needed.
 
 ---
 

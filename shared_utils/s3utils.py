@@ -1,6 +1,6 @@
 import boto3
 from datetime import datetime
-from typing import Union
+from typing import Optional, Union
 import os
 import shutil
 from urllib.parse import urlparse
@@ -10,6 +10,62 @@ def retrieve_s3_file_list(bucket : str, prefix : str) -> list[str]:
     s3_client = session.client('s3')
     files = [x["Key"] for x in s3_client.list_objects_v2(Bucket = bucket, Prefix = f"{prefix}/")["Contents"] if x["Key"].split("/")[1] != ""]
     return files
+
+def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = None) -> list[datetime]:
+    """
+    Return a sorted list of available capture datetimes for a sensor's S3 layout.
+
+    Vendor is inferred from the bucket name. Each vendor has its own
+    subfolder convention, so the parsing differs per branch.
+
+    Args:
+        bucket: S3 bucket name. Must contain one of 'satellogic' / 'umbra' /
+            'capella' (substring match).
+        prefix: S3 prefix to scan (e.g. 'disasters').
+        level: Satellogic processing level (e.g. 'L1D', 'L1B'). REQUIRED when
+            the bucket is satellogic — the subfolder layout encodes the level
+            in the name and we need it to filter. Ignored for umbra / capella
+            (their subfolder layouts don't carry a processing-level
+            distinction). Mirrors the --level arg of process_satellogic.
+
+    Returns:
+        Sorted list of datetime objects, one per available capture date.
+
+    Raises:
+        ValueError: bucket is satellogic but `level` is None.
+        ValueError: bucket doesn't match any known vendor.
+    """
+    if "satellogic" in bucket and level is None:
+        raise ValueError(
+            "level is required for satellogic buckets — pass e.g. level='L1D' "
+            "or level='L1B'. Mirrors the --level arg of process_satellogic. "
+            "Other vendors (umbra, capella) ignore this parameter."
+        )
+
+    session = boto3.Session(region_name="us-west-2")
+    s3_client = session.client('s3')
+    files = [x["Key"] for x in s3_client.list_objects_v2(Bucket = bucket, Prefix = f"{prefix}/")["Contents"] if x["Key"].split("/")[1] != ""]
+
+    if "satellogic" in bucket:
+        filtered_files = [x for x in files if f"_{level}_" in x.split("/")[1]]
+        subdirs = list(set([x.split("/")[1] for x in filtered_files]))
+        dates = [datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S") for x in subdirs]
+        dates.sort()
+        return dates
+    elif "umbra" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        subdirs = list(set([x.split("/")[2] for x in filtered_files]))
+        dates = [datetime.strptime(x.split('_')[0], "%Y-%m-%d-%H-%M-%S") for x in subdirs]
+        dates.sort()
+        return dates
+    elif "capella" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        subdirs = list(set([x.split("/")[1] for x in filtered_files]))
+        dates = [datetime.strptime(x.split("_")[5], "%Y%m%d%H%M%S") for x in subdirs]
+        dates.sort()
+        return dates
+    else:
+        raise ValueError(f"The provided bucket '{bucket}' was not recognized as a valid vendor.")
 
 def read_s3_file(s3filepath : str, file_format : str = "utf-8"):
     bucket = s3filepath.split("/")[2]

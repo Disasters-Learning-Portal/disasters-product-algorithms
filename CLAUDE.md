@@ -32,6 +32,7 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 - Notebooks should be short — import from `shared_utils`, don't inline complex logic
 - All temp files go to `/tmp`, cleaned up in `finally` blocks
 - All raster hot paths set `NUM_THREADS=ALL_CPUS` (gdalwarp + rio cogeo) or `num_threads=os.cpu_count()` (rasterio.warp.reproject)
+- **Batch loops use threads, not processes**: `shared_utils.parallel.map_threaded(func, items, max_workers, desc)` is the one helper for fanning out N independent S3 keys / files / subprocess calls. Threads (not `ProcessPoolExecutor`) because S3 I/O (boto3) and GDAL native calls both release the GIL — and a ProcessPool would oversubscribe cores since each worker's `convert_to_cog` already uses `NUM_THREADS=ALL_CPUS` internally. Default `max_workers=4` for in-process loops (mix of S3 + GDAL); `max_workers=2` when the worker spawns a full GDAL subprocess (each subprocess saturates all cores). `process_batch_s3()` in `shared_utils.cog_processing` is the pre-baked wrapper for `[(src_key, dst_key), ...]` batches; `SimpleProcessor._process_category` parallelizes per-category via `config['max_workers']` (default 4). Operator notebooks should use `map_threaded` instead of inline `for x in items: convert_to_cog(...)` loops.
 
 ## CLI Entry Points (from pyproject.toml)
 

@@ -249,6 +249,13 @@ class SimpleProcessor:
         """
         Process files in a category.
 
+        Files within a category are dispatched in parallel via
+        ``shared_utils.parallel.map_threaded`` (default 4 workers). S3 I/O and
+        GDAL native calls both release the GIL, so threads overlap usefully;
+        a process pool would oversubscribe cores because each ``convert_to_cog``
+        already uses ``NUM_THREADS=ALL_CPUS`` internally. Worker count is
+        tunable via config['max_workers'].
+
         Args:
             category: Category name
             file_list: List of files to process
@@ -256,58 +263,41 @@ class SimpleProcessor:
         Returns:
             List of processing results
         """
-        results = []
+        from shared_utils.parallel import map_threaded
 
-        # Determine output directory
         output_dir = self._get_output_dir(category)
 
-        # Get filename creator function for this category
         filename_creator = self.config.get('filename_creators', {}).get(category)
         if not filename_creator:
             print(f"⚠️ No filename creator for {category}, using default")
             filename_creator = lambda path, _: self._generate_filename(path, category)
 
-        for file_path in file_list:
+        def _one(file_path):
             start = datetime.now()
-
             try:
-                # Generate output filename using provided function
                 cog_filename = filename_creator(file_path, self.config['event_name'])
-
-                # Check if exists and handle overwrite
                 output_key = f"{self.config['destination_base']}/{output_dir}/{cog_filename}"
-                exists = self.check_s3_file_exists(
-                    self.s3_client,
-                    self.config['bucket'],
-                    output_key
-                )
 
+                exists = self.check_s3_file_exists(
+                    self.s3_client, self.config['bucket'], output_key
+                )
                 if exists and not self.config.get('overwrite', False):
-                    results.append({
+                    print(f"  ⏭️ Skipped: {os.path.basename(file_path)} (exists)")
+                    return {
                         'source_file': os.path.basename(file_path),
                         'category': category,
                         'status': 'skipped',
                         'reason': 'already exists',
                         'output_path': f"s3://{self.config['bucket']}/{output_key}",
-                        'time_seconds': 0
-                    })
-                    print(f"  ⏭️ Skipped: {os.path.basename(file_path)} (exists)")
-                    continue
+                        'time_seconds': 0,
+                    }
 
-                # Get file size
                 file_size_gb = self.get_file_size_from_s3(
-                    self.s3_client,
-                    self.config['bucket'],
-                    file_path
+                    self.s3_client, self.config['bucket'], file_path
                 )
-
-                # Process file
                 print(f"  ⚙️ Processing: {os.path.basename(file_path)} ({file_size_gb:.1f}GB)")
 
-                # Determine no-data value
                 nodata = self._get_nodata_value(category)
-
-                # Process with optimized settings
                 self.convert_to_cog(
                     name=file_path,
                     bucket=self.config['bucket'],
@@ -324,27 +314,42 @@ class SimpleProcessor:
                     metadata=self.metadata,
                 )
 
-                results.append({
+                print(f"  ✅ Complete: {cog_filename}")
+                return {
                     'source_file': os.path.basename(file_path),
                     'category': category,
                     'status': 'success',
                     'output_filename': cog_filename,
                     'output_path': f"s3://{self.config['bucket']}/{self.config['destination_base']}/{output_dir}/{cog_filename}",
-                    'time_seconds': (datetime.now() - start).total_seconds()
-                })
-
-                print(f"  ✅ Complete: {cog_filename}")
-
+                    'time_seconds': (datetime.now() - start).total_seconds(),
+                }
             except Exception as e:
-                results.append({
+                print(f"  ❌ Failed: {os.path.basename(file_path)} - {e}")
+                return {
                     'source_file': os.path.basename(file_path),
                     'category': category,
                     'status': 'failed',
                     'error': str(e),
-                    'time_seconds': (datetime.now() - start).total_seconds()
-                })
-                print(f"  ❌ Failed: {os.path.basename(file_path)} - {e}")
+                    'time_seconds': (datetime.now() - start).total_seconds(),
+                }
 
+        max_workers = int(self.config.get('max_workers', 4))
+        outcomes = map_threaded(_one, file_list, max_workers=max_workers)
+
+        # Any leftover Exceptions (worker uncaught) — coerce to failed rows so
+        # the DataFrame schema stays uniform.
+        results = []
+        for fp, out in zip(file_list, outcomes):
+            if isinstance(out, Exception):
+                results.append({
+                    'source_file': os.path.basename(fp),
+                    'category': category,
+                    'status': 'failed',
+                    'error': f"{type(out).__name__}: {out}",
+                    'time_seconds': 0,
+                })
+            else:
+                results.append(out)
         return results
 
     def _get_output_dir(self, category: str) -> str:

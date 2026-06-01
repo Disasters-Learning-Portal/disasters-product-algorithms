@@ -213,3 +213,37 @@ def process_single_file(s3_client, bucket, source_key, dest_key,
         if verbose:
             print(f"   [ERROR] ❌ Failed to process file: {e}")
         return False
+
+
+def process_batch_s3(s3_client, bucket, items, max_workers=4, **kwargs):
+    """
+    Run ``process_single_file`` over many (source_key, dest_key) pairs in
+    parallel using a thread pool.
+
+    Threads are appropriate here because the per-item work is dominated by
+    S3 download/upload (boto3 releases the GIL) and GDAL/rasterio compute
+    (also GIL-releasing). Process pools would oversubscribe CPU cores
+    because each call to ``convert_to_cog`` internally uses
+    ``NUM_THREADS=ALL_CPUS``.
+
+    Args:
+        s3_client: boto3 S3 client (thread-safe; shared across workers).
+        bucket: S3 bucket name.
+        items: Iterable of ``(source_key, dest_key)`` tuples.
+        max_workers: Thread pool size (default 4).
+        **kwargs: Forwarded to ``process_single_file`` (e.g. ``nodata``,
+            ``verify``, ``check_source_is_cog``, ``metadata``, ``verbose``).
+
+    Returns:
+        List aligned to input order. Each element is the bool returned by
+        ``process_single_file`` or an Exception if the worker raised.
+    """
+    from shared_utils.parallel import map_threaded
+
+    items = list(items)
+
+    def _one(pair):
+        src, dst = pair
+        return process_single_file(s3_client, bucket, src, dst, **kwargs)
+
+    return map_threaded(_one, items, max_workers=max_workers, desc="COG batch")

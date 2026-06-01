@@ -6,6 +6,49 @@ Single responsibility: Compression configuration and data type handling.
 import numpy as np
 
 
+# Known float32 "extreme value" nodata patterns we've seen ship from upstream
+# satellite pipelines. Some vendors stamp FLT_MAX (or close approximations)
+# into the GeoTIFF nodata tag. Those values:
+#   - Look like nodata, and gdalwarp / rio cogeo honor them as such.
+#   - But downstream `rio_stac.get_dataset_geom` (in veda-data-airflow's
+#     build_stac task) treats them as real data, producing
+#     "Point outside of projection domain" errors that block STAC ingest.
+# The fix is to detect them in cog_utils.convert_to_cog's "use existing source
+# nodata" branch and remap to the dtype-appropriate default before they
+# propagate.
+EXTREME_FLOAT_NODATA = frozenset({
+    -3.4028234663852886e+38,
+    3.4028234663852886e+38,
+    -3.40282346638529e+38,
+    3.40282346638529e+38,
+    -3.3999999521443642e+38,
+    3.3999999521443642e+38,
+})
+
+
+def is_extreme_float_nodata(value) -> bool:
+    """
+    True if `value` matches one of the known FLT_MAX-class nodata corruption
+    patterns. None, non-numeric, and NaN inputs return False (NaN is a
+    legitimate nodata sentinel for float bands).
+
+    Tolerant comparison: matches if `abs(value - bad) / abs(bad) < 1e-6` for
+    any pattern in `EXTREME_FLOAT_NODATA` — vendors stamp slightly different
+    binary representations of "max float" depending on the writer.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, (int, float, np.floating, np.integer)):
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if np.isnan(v) or np.isinf(v):
+        return False
+    return any(abs(v - bad) / abs(bad) < 1e-6 for bad in EXTREME_FLOAT_NODATA)
+
+
 def validate_nodata_for_dtype(nodata_value, dtype):
     """
     Validate if a no-data value is appropriate for the data type.

@@ -12,19 +12,35 @@ import numpy as np
 from typing import Dict, Optional, Union, Tuple
 
 
+_INTEGER_DTYPE_DEFAULTS = {
+    'uint8': 0,
+    'uint16': 0,
+    'uint32': 0,
+    'uint64': 0,
+    'int8': -128,
+    'int16': -9999,
+    'int32': -9999,
+    'int64': -9999,
+}
+
+
 def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = None) -> Union[int, float]:
     """
     Automatically select appropriate no-data value based on data type.
 
     Args:
         dtype: Rasterio/numpy data type string (e.g., 'uint8', 'int16', 'float32')
-        manual_nodata: Optional manual no-data value to use. If provided and valid
-            for the given dtype, it will be used instead of auto-detection.
+        manual_nodata: Optional manual no-data value. If provided and valid
+            for the given dtype, returned as-is. If provided and invalid,
+            ignored — falls through to auto-detect (legacy behavior).
 
     Returns:
-        Appropriate no-data value for the data type
+        Appropriate no-data value for the data type.
 
-    Based on disasters-aws-conversion/lib/core/compression.py:set_nodata_value()
+    Raises:
+        ValueError: dtype isn't a recognized integer or float family
+            (e.g. 'complex64', 'bool', or a typo). Caller must pass a
+            valid `manual_nodata` explicitly for those dtypes.
     """
     # Use manual no-data if provided and valid
     if manual_nodata is not None:
@@ -34,21 +50,16 @@ def set_nodata_value(dtype: str, manual_nodata: Optional[Union[int, float]] = No
 
     dtype_str = str(dtype).lower()
 
-    if dtype_str == 'uint8':
-        return 0
-    elif dtype_str == 'uint16':
-        return 0
-    elif dtype_str == 'int8':
-        return -128
-    elif dtype_str == 'int16':
-        return -9999
-    elif dtype_str == 'int32':
-        return -9999
-    elif 'float' in dtype_str:
+    if dtype_str in _INTEGER_DTYPE_DEFAULTS:
+        return _INTEGER_DTYPE_DEFAULTS[dtype_str]
+    if 'float' in dtype_str:
         return -9999.0
-    else:
-        # Default fallback
-        return -9999.0
+    # complex64, complex128, bool, weird typos, ... — refuse to guess.
+    raise ValueError(
+        f"No default nodata for dtype {dtype!r}. Supported dtypes: "
+        f"{sorted(_INTEGER_DTYPE_DEFAULTS)} + float* family. "
+        f"Pass manual_nodata=<value> explicitly to override."
+    )
 
 
 def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> dict:
@@ -90,7 +101,18 @@ def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> dict:
         # Float types can use any numeric value including NaN
         if not (isinstance(nodata, (int, float)) or np.isnan(nodata)):
             return {'valid': False, 'error': f"Value {nodata} must be numeric for float types"}
-    # Unknown type, be permissive
+    else:
+        # Strict for unknown dtypes — previously this branch silently returned
+        # valid=True for typos like 'WeirdType', which let invalid nodata
+        # values through unchecked.
+        return {
+            'valid': False,
+            'error': (
+                f"Unknown dtype {dtype!r} — supported: uint8/uint16/uint32/"
+                f"uint64, int8/int16/int32/int64, float*. If this dtype is real, "
+                f"add it to validate_nodata_for_dtype's ladder."
+            ),
+        }
 
     return {'valid': True, 'error': None}
 
@@ -246,6 +268,7 @@ def convert_to_cog(
     quiet: bool = False,
     backend: str = 'rio',
     metadata: Optional[Dict[str, str]] = None,
+    strict_nodata: bool = True,
 ) -> str:
     """
     Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format with optional reprojection.
@@ -278,6 +301,16 @@ def convert_to_cog(
             creation time. Auto-augments YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
             via shared_utils.cog_metadata.resolve_metadata. Not supported on the
             'gdal' backend yet.
+        strict_nodata: When True (default), an out-of-range caller-supplied
+            `nodata` raises ValueError up front instead of printing a warning
+            and pretending to continue. Set False for the legacy warn-only
+            behavior — though in practice rasterio itself rejects out-of-range
+            nodata values at the gdalwarp / rio_cogeo step, so `strict_nodata=
+            False` mostly just moves the crash site downstream. The kwarg
+            exists as a forward-looking signal in case a future rasterio
+            relaxes those checks. The default was flipped 2026-06-01 because
+            the prior silent-fail mode produced a confusing warning then a
+            cryptic rasterio crash several stack frames later.
 
     Returns:
         Path to created COG file
@@ -341,7 +374,19 @@ def convert_to_cog(
 
         # Determine no-data value
         if nodata is None:
-            if existing_nodata is not None:
+            from shared_utils.compression import is_extreme_float_nodata
+            if existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
+                # Known FLT_MAX corruption pattern — remap before it
+                # propagates to gdalwarp / veda-data-airflow.
+                remapped = set_nodata_value(dtype)
+                print(
+                    f"  WARNING: source nodata={existing_nodata!r} matches "
+                    f"FLT_MAX corruption pattern; remapping to dtype default "
+                    f"({remapped}). See shared_utils.compression."
+                    f"EXTREME_FLOAT_NODATA for the known-bad value set."
+                )
+                nodata = remapped
+            elif existing_nodata is not None:
                 nodata = existing_nodata
                 if not quiet:
                     print(f"  Using existing no-data value: {nodata}")
@@ -351,7 +396,14 @@ def convert_to_cog(
                     print(f"  Auto-selected no-data value for {dtype}: {nodata}")
         else:
             # Validate user-provided no-data
-            if not validate_nodata_for_dtype(nodata, dtype)['valid']:
+            validation = validate_nodata_for_dtype(nodata, dtype)
+            if not validation['valid']:
+                if strict_nodata:
+                    raise ValueError(
+                        f"nodata={nodata} is invalid for dtype {dtype}: "
+                        f"{validation['error']}. Pass a valid value, or set "
+                        f"strict_nodata=False to suppress (legacy behavior)."
+                    )
                 print(f"  Warning: No-data value {nodata} may be invalid for {dtype}")
 
         # Check if reprojection is needed

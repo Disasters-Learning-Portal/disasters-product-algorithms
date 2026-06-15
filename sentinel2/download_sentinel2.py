@@ -12,7 +12,6 @@ import argparse
 from datetime import datetime
 from datetime import timedelta
 import gc
-from tqdm import tqdm
 import sys
 
 # Force unbuffered output for real-time display in JupyterHub/subprocess
@@ -217,8 +216,12 @@ session = requests.Session()
 keycloak_token, refresh_token = get_keycloak(cop_user, cop_pass)
 session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
 
+total_files = len(prods_to_download)
 print('\n')
-for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit="file")):
+# Explicit [i/total] file counter instead of a tqdm bar: through a subprocess
+# pipe (non-TTY) tqdm's carriage-return counter doesn't advance visibly in the
+# Jupyter cell, so we print one clear line per file.
+for i, prod in enumerate(prods_to_download, start=1):
     id, safe_name, length = prod
     outname = os.path.join(out_dir, safe_name+'.zip')
     part = outname + '.part'
@@ -235,15 +238,15 @@ for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit=
     # `getsize(outname) == length` check was False every run and re-downloaded
     # the file forever.
     if os.path.isfile(outname):
-        tqdm.write(f'  ✓ {safe_name}.zip already exists!')
+        print(f'  [{i}/{total_files}] ✓ {safe_name}.zip already exists!')
         continue
 
     # Skip if an extracted .SAFE directory is already present.
     if os.path.isdir(safe_dir):
-        tqdm.write(f'  ✓ {safe_name} already exists (extracted)!')
+        print(f'  [{i}/{total_files}] ✓ {safe_name} already exists (extracted)!')
         continue
 
-    tqdm.write(f'  → Downloading: {safe_name}')
+    print(f'  [{i}/{total_files}] → Downloading: {safe_name}')
     then = datetime.now()
     try:
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
@@ -263,7 +266,7 @@ for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit=
                     if length > 0:
                         pct = downloaded * 100 // length
                         if pct >= next_pct:
-                            tqdm.write(f'     {safe_name[:30]}  {min(pct, 100):3d}%  ({downloaded / (1024 ** 2):.0f}/{total_mb:.0f} MB)')
+                            print(f'     {safe_name[:30]}  {min(pct, 100):3d}%  ({downloaded / (1024 ** 2):.0f}/{total_mb:.0f} MB)')
                             next_pct = (pct // 10 + 1) * 10
 
         # Atomic promote: the final filename appears only after a complete
@@ -272,13 +275,13 @@ for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit=
 
         elapsed = (datetime.now()-then).total_seconds()
         speed = length / (1024**2) / elapsed  # MB/s
-        tqdm.write(f'     ✓ Complete - {elapsed:.1f}s ({speed:.1f} MB/s)')
+        print(f'     ✓ Complete - {elapsed:.1f}s ({speed:.1f} MB/s)')
 
         # Refresh for next item
         keycloak_token, refresh_token = get_refresh(refresh_token)
         session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
     except Exception as e:
-        tqdm.write(f'    ✗ Error downloading {safe_name}: {e}')
+        print(f'    ✗ Error downloading {safe_name}: {e}')
         # Remove any partial download so the next run starts clean.
         if os.path.exists(part):
             os.remove(part)

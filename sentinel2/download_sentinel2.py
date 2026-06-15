@@ -239,12 +239,22 @@ for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit=
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
         response = session.get(url, allow_redirects=True, stream=True)
 
-        with tqdm(total=length, unit='B', unit_scale=True, unit_divisor=1024, desc=f"    {safe_name[:30]}", leave=False) as pbar:
-            with open(outname, "wb") as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        file.write(chunk)
-                        pbar.update(len(chunk))
+        # Print one progress line per ~10% downloaded instead of a live tqdm
+        # byte-bar. The bar's carriage-return refreshes (one per 8 KB chunk)
+        # flood the subprocess -> Jupyter cell output; 10% milestones stay readable.
+        downloaded = 0
+        next_pct = 10
+        total_mb = length / (1024 ** 2)
+        with open(outname, "wb") as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    if length > 0:
+                        pct = downloaded * 100 // length
+                        if pct >= next_pct:
+                            tqdm.write(f'     {safe_name[:30]}  {min(pct, 100):3d}%  ({downloaded / (1024 ** 2):.0f}/{total_mb:.0f} MB)')
+                            next_pct = (pct // 10 + 1) * 10
 
         elapsed = (datetime.now()-then).total_seconds()
         speed = length / (1024**2) / elapsed  # MB/s

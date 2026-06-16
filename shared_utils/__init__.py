@@ -106,6 +106,9 @@ except ImportError:
 # Thread-pool helper (pure Python, no GDAL/boto3)
 from shared_utils.parallel import map_threaded
 
+# Local .env.local loader (pure Python, no deps)
+from shared_utils.env_utils import load_env_local
+
 # S3 batch COG wrapper (requires boto3 transitively via process_single_file)
 try:
     from shared_utils.cog_processing import process_batch_s3
@@ -164,4 +167,6 @@ __all__ = [
     # Thread-pool helpers
     'map_threaded',
     'process_batch_s3',
+    # Local .env loader
+    'load_env_local',
 ]

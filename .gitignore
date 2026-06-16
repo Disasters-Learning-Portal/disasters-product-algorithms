@@ -2,6 +2,10 @@
 aws_credentials.py
 *.pem
 
+# Local secrets (Copernicus credentials, etc.) -- never commit real values
+.env
+.env.local
+
 # Temp processing directories
 temp_gdal/
 temp_cog/

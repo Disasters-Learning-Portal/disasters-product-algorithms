@@ -9,6 +9,7 @@ import requests
 import os
 import geopandas
 import argparse
+import subprocess
 from datetime import datetime
 from datetime import timedelta
 import gc
@@ -287,5 +288,7 @@ for i, prod in enumerate(prods_to_download, start=1):
             os.remove(part)
 
 print('\nDownload complete!')
-os.system(f'chmod -R -f ug+rwx {out_dir}')
+# Pass out_dir as an argv element (no shell) so path metacharacters can't be
+# interpreted as commands. -f suppresses errors on entries we can't chmod.
+subprocess.run(["chmod", "-R", "-f", "ug+rwx", out_dir], check=False)
     

@@ -5,6 +5,7 @@ Based on implementation patterns from disasters-aws-conversion repository.
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 import rasterio
@@ -586,11 +587,16 @@ def convert_to_cog(
             if not quiet and result.stdout:
                 print(f"  {result.stdout.strip()}")
 
-        # If we created a temp file, replace the original
+        # If we created a temp file, replace the original.
+        # Use shutil.move (not os.rename): temp_output lives in /tmp while
+        # output_cog is usually on a different mount (e.g. the Hub's /home or a
+        # shared volume). os.rename across filesystems raises
+        # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
+        # copy + delete.
         if temp_output != output_cog:
             if os.path.exists(output_cog):
                 os.remove(output_cog)
-            os.rename(temp_output, output_cog)
+            shutil.move(temp_output, output_cog)
 
         # Clean up warped temp file if it was created
         if warped_file and os.path.exists(warped_file):

@@ -229,7 +229,29 @@ else:
 # check for data directories
 num_dirs = len(data_dirs)
 if num_dirs == 0:
-  print('No directories matching inputted date(s) and/or tile(s)')
+  # Make the date/tile mismatch obvious. The common footgun: PROCESS_DATE points
+  # at a day with no downloaded scene (e.g. you downloaded a multi-day window but
+  # asked to process a single day that isn't in it). Show requested vs. on-disk,
+  # and exit non-zero so this can't be mistaken for a successful no-op.
+  avail_dates = sorted(d for d in os.listdir(unpacked_dir)
+                       if os.path.isdir(os.path.join(unpacked_dir, d)))
+  all_safe = (glob.glob(os.path.join(unpacked_dir, '*', 'S2*SAFE')) +
+              glob.glob(os.path.join(unpacked_dir, '*', 'SN*/S2*SAFE')))
+  avail_tiles = sorted({p for s in all_safe for p in os.path.basename(s).split('_')
+                        if len(p) == 6 and p[0] == 'T' and p[1:3].isdigit()})
+  print('\n' + '=' * 72)
+  print('  NO SCENES MATCHED YOUR FILTER -- nothing was processed.')
+  print('=' * 72)
+  if args.date:
+    print(f'  Requested date(s) [-date / PROCESS_DATE]: {dates}')
+  if args.tile:
+    print(f'  Requested tile(s) [-tile / PROCESS_TILE]: {tiles}')
+  print(f'  Dates available on disk:  {avail_dates or "(none)"}')
+  print(f'  Tiles available on disk:  {avail_tiles or "(none)"}')
+  print('  Fix: set PROCESS_DATE / PROCESS_TILE to one of the available values')
+  print('       above, or set it to None to process everything downloaded.')
+  print('=' * 72)
+  sys.exit(1)
 else:
   # create output directory
   out_dir = os.path.join(input_dir, 'output')

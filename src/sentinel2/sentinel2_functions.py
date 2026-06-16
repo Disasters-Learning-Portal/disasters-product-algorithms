@@ -261,11 +261,16 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
   else:
     mask_array = mask_rst.read(1)
 
+  # The source raster may have no nodata set (nodata is None) -- common for the
+  # 8-bit true-color product. NumPy can't assign None into an int array, so use
+  # a concrete fill (0) for the masked / transparent pixels in that case.
+  nd = tif_to_mask_rst.nodata if tif_to_mask_rst.nodata is not None else 0
+
   if tif_to_mask_rst.count == 1:
     # mask images with one band (e.g., NDVI, EVI, etc.)
     tif_to_mask_array = tif_to_mask_rst.read(1)
-    tif_to_mask_array[mask_array == 1] = tif_to_mask_rst.nodata
-    dump_geotiff(tif_to_mask_array, tif_to_mask_rst.crs, tif_to_mask_rst.transform, tif_to_mask_rst.nodata, masked_path)
+    tif_to_mask_array[mask_array == 1] = nd
+    dump_geotiff(tif_to_mask_array, tif_to_mask_rst.crs, tif_to_mask_rst.transform, nd, masked_path)
   else:
     # mask images with three bands (e.g., true color, color infrared, etc.)
     # outputs a 4-band image with the fourth band being an alpha band
@@ -273,8 +278,11 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
     # create alpha band array
     band1_array = tif_to_mask_rst.read(1)
     nodata_array = np.full(band1_array.shape, 255)
-    nodata_array[band1_array == tif_to_mask_rst.nodata] = tif_to_mask_rst.nodata
-    nodata_array[mask_array == 1] = tif_to_mask_rst.nodata
+    # Only flag existing-nodata pixels when the source actually defines a nodata
+    # value; otherwise there are none to flag (don't mistakenly treat 0 as nodata).
+    if tif_to_mask_rst.nodata is not None:
+      nodata_array[band1_array == tif_to_mask_rst.nodata] = nd
+    nodata_array[mask_array == 1] = nd
 
     # write new file with the addition of the alpha band
     with rio.open(masked_path, mode="w", 
@@ -1029,8 +1037,11 @@ def s2_merge(dir_to_merge, mask=False, method='first'):
 
   if mask:
     print('\t* Applying Cloud Mask')
-    # find cloud mask that matches the merged image
-    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged.tif'))[0]
+    # Find the merged cloud mask. Use *merged*.tif (not *merged.tif): the merged
+    # cloud mask is renamed to e.g. S2B_cloudMask_merged_2026-06-06_day.tif
+    # (date moved to end + _day), so it no longer *ends* in "merged.tif".
+    # *merged*.tif matches both the pre-rename and renamed forms.
+    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
   return merged_output

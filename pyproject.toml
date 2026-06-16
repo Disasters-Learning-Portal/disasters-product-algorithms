@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "disasters-product-algorithms"
 dynamic = ["version"]
-description = "Process Landsat 8/9 and Sentinel-2 satellite imagery to generate disaster response products, with COG conversion and AWS integration"
+description = "Process multi-sensor satellite imagery into Cloud Optimized GeoTIFF disaster response products with reprojection, metadata tagging, and AWS S3 integration"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
-    {name = "Kaylee Sharp"}
+    {name = "NASA VEDA"}
 ]
 dependencies = [
     "Pillow",

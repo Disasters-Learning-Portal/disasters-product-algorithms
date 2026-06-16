@@ -44,6 +44,7 @@ import tomlkit
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_ROOT / "src"          # packages live under src/ (src layout)
 TEMPLATES_DIR = Path(__file__).resolve().parent / "_templates"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 CONSISTENCY_LINT = Path(__file__).resolve().parent / "check_sensor_consistency.py"
@@ -104,7 +105,7 @@ def validate_name(name: str) -> None:
 
 def check_doesnt_exist(name: str) -> None:
     """Pre-flight: refuse to clobber an existing sensor."""
-    sensor_dir = REPO_ROOT / name
+    sensor_dir = SRC_DIR / name
     if sensor_dir.exists():
         sys.exit(
             f"ERROR: {sensor_dir} already exists. Remove it or pick a "
@@ -163,7 +164,7 @@ def find_orphaned_sensor_dirs() -> list[str]:
     VERB_PREFIXES = ("process_", "download_")
 
     orphans: list[str] = []
-    for child in sorted(REPO_ROOT.iterdir()):
+    for child in sorted(SRC_DIR.iterdir()):
         if not child.is_dir():
             continue
         if child.name.startswith((".", "_")):
@@ -269,7 +270,7 @@ def render_sensor_files(name: str, bucket: str) -> dict[Path, str]:
         "bucket": bucket,
     }
     src = TEMPLATES_DIR / "sensor"
-    sensor_dir = REPO_ROOT / name
+    sensor_dir = SRC_DIR / name
     return {
         sensor_dir / "__init__.py":         render_template(src / "__init__.py.tmpl", mapping),
         sensor_dir / "cli.py":              render_template(src / "cli.py.tmpl", mapping),
@@ -461,7 +462,7 @@ def main() -> int:
     try:
         # 1. Sensor package files.
         section("Sensor package files")
-        sensor_dir = REPO_ROOT / name
+        sensor_dir = SRC_DIR / name
         sensor_dir.mkdir()
         written.append(sensor_dir)
         for dest, content in render_sensor_files(name, bucket).items():

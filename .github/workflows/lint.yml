@@ -60,11 +60,12 @@ jobs:
             source "$CONDA/etc/profile.d/conda.sh"
           conda activate smoke
           # Find sensor dirs the same way tools/check_sensor_consistency.py does:
-          # top-level dirs (non-hidden, non-underscore-prefixed) containing
-          # cli.py + at least one process_*.py.
+          # dirs under src/ (non-hidden, non-underscore-prefixed) containing
+          # cli.py + at least one process_*.py. Import name == dir name (src/ is
+          # only a discovery root, not part of the package path).
           sensors=$(python -c "
           from pathlib import Path
-          for p in sorted(Path('.').iterdir()):
+          for p in sorted(Path('src').iterdir()):
               if p.is_dir() and not p.name.startswith(('.', '_')) \
                  and (p/'cli.py').exists() \
                  and any(p.glob('process_*.py')):

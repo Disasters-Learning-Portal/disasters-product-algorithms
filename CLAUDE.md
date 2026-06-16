@@ -12,10 +12,16 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 ## Project Structure
 
-- `shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
+All Python packages live under `src/` (a conventional **src layout**). `src/` is only a
+package-discovery root (`[tool.setuptools.packages.find] where = ["src"]`), **not** part of
+the import path — so packages are still imported by their bare name (`import shared_utils`,
+`from sentinel2.sentinel2_functions import *`) and the console scripts keep their
+`<pkg>.cli:<verb>_cli` targets. Importing requires an install (`pip install -e .`).
+
+- `src/shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
+- `src/landsat/`, `src/sentinel2/`, `src/satellogic/`, `src/umbra/`, `src/capella/` — Sensor-specific product generation (CLI entry points)
+- `src/raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
 - `notebooks/` — Operator-facing Jupyter templates for disaster event processing
-- `landsat/`, `sentinel2/`, `satellogic/`, `umbra/` — Sensor-specific product generation (CLI entry points)
-- `raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
 - `tests/fixtures/` — Real-data crops committed for tests (small, <500KB each; e.g. `gaia_atlanta_sample.tif` is a 256×256 GAIA Web-Mercator crop)
 - `docs/` — API reference, deployment guides, resampling guide, contributor tutorial
 
@@ -93,7 +99,7 @@ See `docs/SHARED_UTILS_API.md` for complete function signatures.
 
 The `.github/workflows/lint.yml` workflow runs on every push and PR to `dev`/`main`:
 
-- **`sensor-consistency`**: runs `python tools/check_sensor_consistency.py`, which walks every top-level dir containing `cli.py` + `process_*.py` and asserts each is correctly wired into `pyproject.toml` (both `[tool.setuptools.packages.find].include` and `[project.scripts]`, with the canonical `<pkg>.cli:<verb>_cli` target shape).
+- **`sensor-consistency`**: runs `python tools/check_sensor_consistency.py`, which walks every dir under `src/` containing `cli.py` + `process_*.py` and asserts each is correctly wired into `pyproject.toml` (both `[tool.setuptools.packages.find].include` and `[project.scripts]`, with the canonical `<pkg>.cli:<verb>_cli` target shape).
 - **`cli-smoke`**: bootstraps a conda env from `dev-conda-deps.txt`, runs `pip install .`, then iterates `[project.scripts]` and runs `<script> --help` on each. Catches the bug class where a console script is registered but its package isn't installable (the failure mode that broke the initial capella rollout — `ModuleNotFoundError` on a fresh hub pod despite the shim being in `bin/`).
 
 Run locally before pushing:

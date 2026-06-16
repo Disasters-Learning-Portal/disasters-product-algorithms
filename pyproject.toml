@@ -59,6 +59,7 @@ summarize_raster = "raster_tools.cli:summarize_raster_cli"
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
 
 [tool.setuptools_scm]

@@ -56,7 +56,7 @@ under [Manual fallback](#manual-fallback).
 
 ## What you need to write
 
-The four files under `<sensor>/`:
+The four files under `src/<sensor>/` (the scaffolder creates them there — packages live under `src/`):
 
 ### `<sensor>/__init__.py`
 

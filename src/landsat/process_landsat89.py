@@ -860,8 +860,13 @@ if __name__ == "__main__":
                 # merge cloud masks separately so that they are not masked themselves
                 # need to merge cloud masks first b/c this mask can be used
                 # to mask the merged product below
+                dirs_to_merge.remove(cm_dir)  # always drop from the product list
+                # Skip the (re-)merge if a merged cloud-mask COG already exists (unless -force).
+                existing_merged = glob.glob(os.path.join(cm_dir, '*merged*.tif'))
+                if existing_merged and not args.force:
+                    print(f'\n* Merged cloud mask already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
+                    continue
                 print('Merging:', cm_dir)
-                dirs_to_merge.remove(cm_dir)
                 merged_file = ls_merge(cm_dir, mask=False)
 
                 # Convert merged file to COG (default) and optionally rename with event
@@ -893,6 +898,11 @@ if __name__ == "__main__":
                                 print(f"  Warning: Could not rename {basename}: {e}")
 
             for prod_dir in dirs_to_merge:
+                # Skip the (re-)merge if a merged COG already exists for this product (unless -force).
+                existing_merged = glob.glob(os.path.join(prod_dir, '*merged*.tif'))
+                if existing_merged and not args.force:
+                    print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
+                    continue
                 # merge products of the same date
                 print('Merging:', prod_dir)
                 merged_file = ls_merge(prod_dir, args.mask)

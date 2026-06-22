@@ -229,7 +229,29 @@ else:
 # check for data directories
 num_dirs = len(data_dirs)
 if num_dirs == 0:
-  print('No directories matching inputted date(s) and/or tile(s)')
+  # Make the date/tile mismatch obvious. The common footgun: PROCESS_DATE points
+  # at a day with no downloaded scene (e.g. you downloaded a multi-day window but
+  # asked to process a single day that isn't in it). Show requested vs. on-disk,
+  # and exit non-zero so this can't be mistaken for a successful no-op.
+  avail_dates = sorted(d for d in os.listdir(unpacked_dir)
+                       if os.path.isdir(os.path.join(unpacked_dir, d)))
+  all_safe = (glob.glob(os.path.join(unpacked_dir, '*', 'S2*SAFE')) +
+              glob.glob(os.path.join(unpacked_dir, '*', 'SN*/S2*SAFE')))
+  avail_tiles = sorted({p for s in all_safe for p in os.path.basename(s).split('_')
+                        if len(p) == 6 and p[0] == 'T' and p[1:3].isdigit()})
+  print('\n' + '=' * 72)
+  print('  NO SCENES MATCHED YOUR FILTER -- nothing was processed.')
+  print('=' * 72)
+  if args.date:
+    print(f'  Requested date(s) [-date / PROCESS_DATE]: {dates}')
+  if args.tile:
+    print(f'  Requested tile(s) [-tile / PROCESS_TILE]: {tiles}')
+  print(f'  Dates available on disk:  {avail_dates or "(none)"}')
+  print(f'  Tiles available on disk:  {avail_tiles or "(none)"}')
+  print('  Fix: set PROCESS_DATE / PROCESS_TILE to one of the available values')
+  print('       above, or set it to None to process everything downloaded.')
+  print('=' * 72)
+  sys.exit(1)
 else:
   # create output directory
   out_dir = os.path.join(input_dir, 'output')
@@ -743,8 +765,13 @@ else:
         # merge cloud masks separately so that they are not masked themselves
         # need to merge cloud masks first b/c this mask can be used
         # to mask the merged product below
+        dirs_to_merge.remove(cm_dir)  # always drop from the product list
+        # Skip the (re-)merge if a merged cloud-mask COG already exists (unless -force).
+        existing_merged = glob.glob(os.path.join(cm_dir, '*merged*.tif'))
+        if existing_merged and not args.force:
+            print(f'\n* Merged cloud mask already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
+            continue
         print('Merging:', cm_dir)
-        dirs_to_merge.remove(cm_dir)
         merged_file = s2_merge(cm_dir, mask=False)
 
         # Convert merged file to COG and optionally rename with event
@@ -763,6 +790,11 @@ else:
             rename_with_event(merged_file, args.event)
 
      for prod_dir in dirs_to_merge:
+        # Skip the (re-)merge if a merged COG already exists for this product (unless -force).
+        existing_merged = glob.glob(os.path.join(prod_dir, '*merged*.tif'))
+        if existing_merged and not args.force:
+            print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
+            continue
         # merge products of the same date
         print('Merging:', prod_dir)
         merged_file = s2_merge(prod_dir, args.mask)

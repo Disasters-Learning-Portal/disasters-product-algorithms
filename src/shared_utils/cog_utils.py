@@ -5,6 +5,7 @@ Based on implementation patterns from disasters-aws-conversion repository.
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 import rasterio
@@ -586,11 +587,16 @@ def convert_to_cog(
             if not quiet and result.stdout:
                 print(f"  {result.stdout.strip()}")
 
-        # If we created a temp file, replace the original
+        # If we created a temp file, replace the original.
+        # Use shutil.move (not os.rename): temp_output lives in /tmp while
+        # output_cog is usually on a different mount (e.g. the Hub's /home or a
+        # shared volume). os.rename across filesystems raises
+        # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
+        # copy + delete.
         if temp_output != output_cog:
             if os.path.exists(output_cog):
                 os.remove(output_cog)
-            os.rename(temp_output, output_cog)
+            shutil.move(temp_output, output_cog)
 
         # Clean up warped temp file if it was created
         if warped_file and os.path.exists(warped_file):
@@ -695,7 +701,7 @@ def get_final_filename(original_path: str, event_name: Optional[str] = None, tif
         "/path/LC08_trueColor_20250922_185617_046028.tif"  # COG converts in place
 
         >>> get_final_filename("/path/LC08_trueColor_20250922_185617_046028.tif", "202512_Flood_WA", False)
-        "/path/202512_Flood_WA_LC08_trueColor_185617_046028_2025-09-22_day.tif"
+        "/path/LC08_trueColor_185617_046028_2025-09-22_day.tif"  # event name no longer prefixed
     """
     if event_name is None:
         # No renaming, COG converts in place or stays as TIF
@@ -748,41 +754,46 @@ def get_final_filename(original_path: str, event_name: Optional[str] = None, tif
 
     # Build predicted filename based on whether it's merged or individual
     if is_merged:
-        # Merged file: EVENT_NAME_sensor_product_merged_YYYY-MM-DD_day.tif
+        # Merged file: sensor_product_merged_YYYY-MM-DD_day.tif (no event prefix)
         sensor = parts[0]
         product = parts[1] if date_index > 1 else parts[2]
-        new_filename = f"{event_name}_{sensor}_{product}_merged_{formatted_date}_day{extension}"
+        new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
     else:
         # Individual file: Remove the date from parts and rejoin
         parts.pop(date_index)
         base_name_without_date = '_'.join(parts)
-        new_filename = f"{event_name}_{base_name_without_date}_{formatted_date}_day{extension}"
+        new_filename = f"{base_name_without_date}_{formatted_date}_day{extension}"
 
     return os.path.join(directory, new_filename)
 
 
 def rename_with_event(file_path: str, event_name: str, quiet: bool = False) -> str:
     """
-    Rename a file to include event name prefix and formatted date suffix.
+    Rename a file to move the date to the end and add a _day suffix.
     The date is removed from its original position in the middle and added at the end.
+
+    NOTE: the event name is intentionally NOT added to the filename. The
+    `event_name` parameter is retained for backward compatibility and as the
+    rename trigger (callers invoke this only when an event was supplied); only
+    the date relocation + _day suffix is applied.
 
     Supports both Landsat and Sentinel-2 naming patterns.
 
     Landsat individual file format:
         Original: LC08_trueColor_20250922_185617_046028.tif
-        New: EVENT_NAME_LC08_trueColor_185617_046028_2025-09-22_day.tif
+        New: LC08_trueColor_185617_046028_2025-09-22_day.tif
 
     Sentinel-2 individual file format:
         Original: S2B_MSIL2A_colorInfrared_20251111_161419_T17RLN.tif
-        New: EVENT_NAME_S2B_MSIL2A_colorInfrared_161419_T17RLN_2025-11-11_day.tif
+        New: S2B_MSIL2A_colorInfrared_161419_T17RLN_2025-11-11_day.tif
 
     Merged file format:
         Original: LC08_trueColor_20250922_merged.tif
-        New: EVENT_NAME_LC08_trueColor_merged_2025-09-22_day.tif
+        New: LC08_trueColor_merged_2025-09-22_day.tif
 
     Args:
         file_path: Path to the file to rename
-        event_name: Event name to use as prefix
+        event_name: Retained for backward compatibility / rename trigger; not added to the name
         quiet: Suppress output messages
 
     Returns:
@@ -839,16 +850,16 @@ def rename_with_event(file_path: str, event_name: str, quiet: bool = False) -> s
 
     # Build new filename based on whether it's merged or individual
     if is_merged:
-        # Merged file: EVENT_NAME_sensor_product_merged_YYYY-MM-DD_day.tif
+        # Merged file: sensor_product_merged_YYYY-MM-DD_day.tif (no event prefix)
         sensor = parts[0]
         # Product is at index 1 for Landsat, or index 2 for Sentinel (which has level at index 1)
         product = parts[1] if date_index > 1 else parts[2]
-        new_filename = f"{event_name}_{sensor}_{product}_merged_{formatted_date}_day{extension}"
+        new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
     else:
         # Individual file: Remove the date from the original parts and rejoin
         parts.pop(date_index)  # Remove date at the detected index
         base_name_without_date = '_'.join(parts)
-        new_filename = f"{event_name}_{base_name_without_date}_{formatted_date}_day{extension}"
+        new_filename = f"{base_name_without_date}_{formatted_date}_day{extension}"
 
     new_path = os.path.join(directory, new_filename)
 

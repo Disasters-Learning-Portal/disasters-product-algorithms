@@ -34,7 +34,7 @@ Triggers on every `push` and `pull_request` to `dev` or `main`. Two independent 
 ### Job 1: `sensor-consistency`
 
 Runs `python tools/check_sensor_consistency.py`. The script walks every
-top-level directory in the repo, identifies "sensor directories" (those
+directory under `src/`, identifies "sensor directories" (those
 containing both `cli.py` and at least one `process_*.py`), and asserts
 three invariants per sensor:
 
@@ -269,7 +269,7 @@ template. See `.github/RULESETS.md` for the full migration rationale.
 
 Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
 
-- **Sensor-directory detection** (lines 32-45): top-level dirs (sorted,
+- **Sensor-directory detection** (lines 32-45): dirs under `src/` (sorted,
   non-hidden) containing both `cli.py` and at least one `process_*.py`.
   Skips `.`-prefixed and `_`-prefixed dirs.
 - **Per-sensor validation** (lines 76-108):

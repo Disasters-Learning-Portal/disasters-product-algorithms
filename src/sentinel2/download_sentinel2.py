@@ -9,10 +9,10 @@ import requests
 import os
 import geopandas
 import argparse
+import subprocess
 from datetime import datetime
 from datetime import timedelta
 import gc
-from tqdm import tqdm
 import sys
 
 # Force unbuffered output for real-time display in JupyterHub/subprocess
@@ -217,45 +217,78 @@ session = requests.Session()
 keycloak_token, refresh_token = get_keycloak(cop_user, cop_pass)
 session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
 
+total_files = len(prods_to_download)
 print('\n')
-for i, prod in enumerate(tqdm(prods_to_download, desc="Downloading files", unit="file")):
+# Explicit [i/total] file counter instead of a tqdm bar: through a subprocess
+# pipe (non-TTY) tqdm's carriage-return counter doesn't advance visibly in the
+# Jupyter cell, so we print one clear line per file.
+for i, prod in enumerate(prods_to_download, start=1):
     id, safe_name, length = prod
     outname = os.path.join(out_dir, safe_name+'.zip')
-    safe_dir = os.path.join(out_dir, safe_name+'.SAFE')
+    part = outname + '.part'
+    # Copernicus product Names already end in ".SAFE", so the extracted
+    # directory is `safe_name` itself. (Joining another ".SAFE" produced a dead
+    # ".SAFE.SAFE" path that never matched anything.)
+    safe_dir = os.path.join(out_dir, safe_name)
 
-    # Check if zip file exists with correct size
-    if os.path.isfile(outname) and os.path.getsize(outname) == length:
-        tqdm.write(f'  ✓ {safe_name}.zip already exists!')
+    # Skip if the zip already exists. The download below is atomic (streamed to
+    # a .part file, renamed only on success), so `outname` exists only once a
+    # previous run finished it -- presence alone is a reliable "done" marker.
+    # We deliberately DON'T compare against the catalogue ContentLength: the
+    # /$value zip transfer size is not guaranteed to equal it, so the old
+    # `getsize(outname) == length` check was False every run and re-downloaded
+    # the file forever.
+    if os.path.isfile(outname):
+        print(f'  [{i}/{total_files}] ✓ {safe_name}.zip already exists!')
         continue
 
-    # Check if already extracted .SAFE directory exists
+    # Skip if an extracted .SAFE directory is already present.
     if os.path.isdir(safe_dir):
-        tqdm.write(f'  ✓ {safe_name}.SAFE already exists (extracted)!')
+        print(f'  [{i}/{total_files}] ✓ {safe_name} already exists (extracted)!')
         continue
 
-    tqdm.write(f'  → Downloading: {safe_name}')
+    print(f'  [{i}/{total_files}] → Downloading: {safe_name}')
     then = datetime.now()
     try:
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({id})/$value"
         response = session.get(url, allow_redirects=True, stream=True)
 
-        with tqdm(total=length, unit='B', unit_scale=True, unit_divisor=1024, desc=f"    {safe_name[:30]}", leave=False) as pbar:
-            with open(outname, "wb") as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        file.write(chunk)
-                        pbar.update(len(chunk))
+        # Print one progress line per ~10% downloaded instead of a live tqdm
+        # byte-bar. The bar's carriage-return refreshes (one per 8 KB chunk)
+        # flood the subprocess -> Jupyter cell output; 10% milestones stay readable.
+        downloaded = 0
+        next_pct = 10
+        total_mb = length / (1024 ** 2)
+        with open(part, "wb") as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    if length > 0:
+                        pct = downloaded * 100 // length
+                        if pct >= next_pct:
+                            print(f'     {safe_name[:30]}  {min(pct, 100):3d}%  ({downloaded / (1024 ** 2):.0f}/{total_mb:.0f} MB)')
+                            next_pct = (pct // 10 + 1) * 10
+
+        # Atomic promote: the final filename appears only after a complete
+        # download, so an interrupted run never leaves a complete-looking zip.
+        os.replace(part, outname)
 
         elapsed = (datetime.now()-then).total_seconds()
         speed = length / (1024**2) / elapsed  # MB/s
-        tqdm.write(f'     ✓ Complete - {elapsed:.1f}s ({speed:.1f} MB/s)')
+        print(f'     ✓ Complete - {elapsed:.1f}s ({speed:.1f} MB/s)')
 
         # Refresh for next item
         keycloak_token, refresh_token = get_refresh(refresh_token)
         session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
     except Exception as e:
-        tqdm.write(f'    ✗ Error downloading {safe_name}: {e}')
+        print(f'    ✗ Error downloading {safe_name}: {e}')
+        # Remove any partial download so the next run starts clean.
+        if os.path.exists(part):
+            os.remove(part)
 
 print('\nDownload complete!')
-os.system(f'chmod -R -f ug+rwx {out_dir}')
+# Pass out_dir as an argv element (no shell) so path metacharacters can't be
+# interpreted as commands. -f suppresses errors on entries we can't chmod.
+subprocess.run(["chmod", "-R", "-f", "ug+rwx", out_dir], check=False)
     

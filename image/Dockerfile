@@ -1,4 +1,4 @@
-FROM pangeo/pangeo-notebook:2025.08.14
+FROM pangeo/pangeo-notebook:2026.06.04
 
 LABEL org.opencontainers.image.source="https://github.com/Disasters-Learning-Portal/disasters-product-algorithms"
 

@@ -5,7 +5,11 @@ dependencies:
   - ipykernel
   # Dependencies for sentintel-2 scripts
   - p7zip==16.02
-  - libgdal-jp2openjpeg==3.10.3
+  # JPEG2000 (.jp2) driver for Sentinel-2. UNPINNED on purpose: it is ABI-locked
+  # to the base image's libgdal-core, so let conda match whatever GDAL the pangeo
+  # base ships. An exact pin (==3.10.3) is what broke the 2025.08.14 -> 2026.06.04
+  # base bump (base shipped GDAL 3.12.3). Do not re-pin to a specific version.
+  - libgdal-jp2openjpeg
   # Dependencies for VS Code IDE
   - code-server>=3.2
   - jupyter-vscode-proxy
@@ -14,10 +18,11 @@ dependencies:
   # Remove once Pangeo has upstream.
   - virtualizarr>=2.0.0
   - icechunk
-  # Working around https://github.com/holoviz/geoviews/pull/794
-  - geoviews-core==1.14.1
-  # Working around https://github.com/stac-utils/pystac/issues/1575
-  - pystac==1.14.1
+  # geoviews PR #794 (Cartopy 0.25 compat) shipped in 1.14.1; floor keeps the fix
+  # and lets the solver pick a Python-3.13-compatible build.
+  - geoviews-core>=1.14.1
+  # pystac issue #1575 fixed in 1.14.0; floor keeps the fix, drops the exact pin.
+  - pystac>=1.14.0
   # Required by tools/new_sensor.py at runtime. nbformat is part of Jupyter
   # so usually already in Pangeo base, but listing both explicitly here
   # guarantees the scaffolder runs on a fresh hub pod without a manual

@@ -73,10 +73,10 @@ inputs:
     type: string
     default: ""
   - name: we_nstd
-    label: Water-extent std devs (optional)
-    doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'
+    label: Water-extent std devs
+    doc: 'Space-separated std-dev thresholds for water extent (only used when products includes "we").'
     type: string
-    default: ""
+    default: "1 1.5"
   - name: compression_level
     label: COG compression level
     doc: ZSTD compression level (1-22).

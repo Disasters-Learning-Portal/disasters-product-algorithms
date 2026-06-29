@@ -50,7 +50,7 @@ inputs:
     default: "Copernicus"
   - name: dst_crs
     label: Target CRS
-    doc: 'native (default, fastest, no warp) | EPSG:3857 (required for VEDA build_stac) | EPSG:4326.'
+    doc: 'Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326.'
     type: string
     default: "native"
   - name: merge

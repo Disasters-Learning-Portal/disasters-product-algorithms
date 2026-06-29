@@ -49,6 +49,16 @@ dependencies:
     # into the algorithms package + DPS workers, which never import it. Bump this
     # pin if MAAP ops requires a newer client.
     - maap-py==4.2.0
+    # MAAP DPS JupyterLab 4 extensions (prebuilt wheels, no node build). These
+    # add the "MAAP Plugins" Launcher tiles: Algorithm Catalog / Register
+    # Algorithms / My Builds & Deployments (algorithms ext) and Submit Jobs /
+    # View My Jobs (dps ext). The server extension auto-enables via its
+    # jupyter_server_config.d dropin and bridges env vars (MAAP_API_HOST,
+    # MAAP_PGT) into the frontend; tiles render without those but only call the
+    # MAAP API once they're set. Versions verified live on the JL4 Pangeo base.
+    - maap-algorithms-jupyter-extension==1.0.1
+    - maap-dps-jupyter-extension==2.0.1
+    - maap-jupyter-server-extension==3.0.1
     # disasters-product-algorithms is intentionally NOT installed here. It's
     # installed in a separate Dockerfile RUN layer via
     # `pip install --no-deps /srv/repo/algorithms`, which uses the local

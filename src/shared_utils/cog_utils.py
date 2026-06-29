@@ -756,7 +756,10 @@ def get_final_filename(original_path: str, event_name: Optional[str] = None, tif
     if is_merged:
         # Merged file: sensor_product_merged_YYYY-MM-DD_day.tif (no event prefix)
         sensor = parts[0]
-        product = parts[1] if date_index > 1 else parts[2]
+        # Product is every token between the sensor prefix and the date token, so
+        # multi-token sensor IDs (e.g. Sentinel-2 "S2B_MSIL2A_<product>") keep the
+        # real product instead of collapsing to the processing-level token.
+        product = '_'.join(parts[1:date_index])
         new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
     else:
         # Individual file: Remove the date from parts and rejoin
@@ -852,8 +855,10 @@ def rename_with_event(file_path: str, event_name: str, quiet: bool = False) -> s
     if is_merged:
         # Merged file: sensor_product_merged_YYYY-MM-DD_day.tif (no event prefix)
         sensor = parts[0]
-        # Product is at index 1 for Landsat, or index 2 for Sentinel (which has level at index 1)
-        product = parts[1] if date_index > 1 else parts[2]
+        # Product is every token between the sensor prefix and the date token, so
+        # multi-token sensor IDs (e.g. Sentinel-2 "S2B_MSIL2A_<product>") keep the
+        # real product instead of collapsing to the processing-level token.
+        product = '_'.join(parts[1:date_index])
         new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
     else:
         # Individual file: Remove the date from the original parts and rejoin

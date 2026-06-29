@@ -13,7 +13,7 @@ build_command: disasters-product-algorithms/dps/landsat/build-env.sh
 run_command: disasters-product-algorithms/dps/landsat/run.sh
 # MAAP OPS default base image. MAAP installs Miniconda during the build and runs
 # build-env.sh on top, so a minimal base is fine.
-docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
 # Resource requirements (OGC/CWL schema; replaces the old queue + disk_space).
 ram_min: 64
 cores_min: 8

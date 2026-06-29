@@ -1,0 +1,104 @@
+algorithm_name: Umbra
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response
+  products. Fetches the source GEC raster for the requested date from the CSDA
+  vendor S3 bucket (csda-data-vendor-umbra), applies the selected radiometric
+  calibration (sigma/beta/gamma/rcs), optionally Lee-filters it, reprojects, and
+  embeds activation-event GeoTIFF metadata tags.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/umbra/build-env.sh
+run_command: disasters-product-algorithms/dps/umbra/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements. SAR scenes are smaller than optical mosaics.
+ram_min: 32
+cores_min: 4
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for Umbra SAR COG disaster-product generation.
+citation: NASA Disasters Program
+keywords: umbra, sar, cog, disasters, flood, sigma0, calibration
+# AWS read access: NO file input -- the CLI FETCHES the source GEC raster from
+# the CSDA vendor bucket (default csda-data-vendor-umbra, prefix 'disasters') at
+# run time. The DPS-worker role needs read access to that bucket (confirmed available).
+inputs:
+  - name: date
+    label: Target date
+    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected."
+    type: string
+  - name: product
+    label: Calibration product
+    doc: "Calibration product to generate: sigma, beta, gamma, or rcs."
+    type: string
+    default: "sigma"
+  - name: bucket
+    label: Vendor S3 bucket
+    doc: CSDA vendor S3 bucket holding the Umbra source rasters (DPS worker needs read access).
+    type: string
+    default: "csda-data-vendor-umbra"
+  - name: prefix
+    label: S3 prefix
+    doc: Key prefix within the vendor bucket to search for scenes.
+    type: string
+    default: "disasters"
+  - name: apply_filter
+    label: Apply Lee filter
+    doc: Apply a Lee speckle filter to the product.
+    type: boolean
+    default: false
+  - name: filter_size
+    label: Lee filter window size
+    doc: Lee filter window size (e.g. 3, 5, 7); only used when apply_filter is true.
+    type: int
+    default: 5
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857 | EPSG:4326."
+    type: string
+    default: "native"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Example_Event is rejected at run time -- you MUST set a real value."
+    type: string
+    default: "YYYYMM_Example_Event"
+  - name: source_label
+    label: Source
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Umbra."
+    type: string
+  - name: compression_level
+    label: COG compression level
+    doc: ZSTD compression level (1-22).
+    type: int
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string
+    default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://<s3_bucket>/<s3_dest_base>/<activation_event>/ (DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: s3_bucket
+    label: S3 bucket
+    doc: Destination S3 bucket for published COGs.
+    type: string
+    default: "nasa-disasters"
+  - name: s3_dest_base
+    label: S3 destination base
+    doc: Base prefix within the bucket; products land at <s3_dest_base>/<activation_event>/.
+    type: string
+    default: "drcs_activations_new"
+outputs:
+  - name: output
+    type: Directory

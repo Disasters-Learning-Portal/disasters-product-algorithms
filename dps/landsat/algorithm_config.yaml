@@ -1,4 +1,4 @@
-algorithm_name: disasters_process_landsat89
+algorithm_name: Landsat-8-9
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev
@@ -25,19 +25,19 @@ license: Apache-2.0
 release_notes: DPS integration for Landsat 8/9 COG disaster-product generation.
 citation: NASA Disasters Program
 keywords: landsat, cog, disasters, flood, fire, ndvi, water-extent
-# Inputs: flat list, each {name, label, doc, type, default}. File/Directory types
-# are localized by DPS and passed to run.sh as --name <path>; primitives as
-# --name <value>. run.sh maps these onto the process_landsat89 CLI.
+# Inputs: flat list, each {name, label, doc, type, default}. File inputs are
+# localized by DPS and passed to run.sh as --name <path>; booleans as a true/false
+# control; primitives as --name <value>. run.sh maps these onto process_landsat89.
 inputs:
-  - name: granule_archive
-    label: Landsat granule archive
+  - name: file_path_of_raw_data
+    label: Raw data file
     doc: A Landsat Collection 2 Level-2 granule archive (.tar or .zip).
     type: File
   - name: activation_event
     label: Activation event
-    doc: Event name, e.g. 202311_Flood_TX (embedded as a GeoTIFF tag and filename prefix).
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Example_Event is rejected at run time -- you MUST set a real value."
     type: string
-    default: "202311_Example_Event"
+    default: "YYYYMM_Example_Event"
   - name: products
     label: Products
     doc: Space-separated list (true pan nat colorIR ndvi ndwi mndwi evi nbr we) or 'all'.
@@ -45,24 +45,23 @@ inputs:
     default: "true"
   - name: source_label
     label: Source
-    doc: SOURCE metadata tag value (e.g. USGS).
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA."
     type: string
-    default: "USGS"
   - name: dst_crs
     label: Target CRS
-    doc: 'Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326.'
+    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
     type: string
     default: "native"
   - name: merge
     label: Merge by date/product
-    doc: "true to mosaic tiles by date and product (-merge); false to skip."
-    type: string
-    default: "true"
+    doc: Mosaic tiles by date and product (-merge).
+    type: boolean
+    default: true
   - name: mask
     label: Cloud mask
-    doc: "true to generate and apply a cloud mask (-mask); false to skip."
-    type: string
-    default: "true"
+    doc: Generate and apply a cloud mask (-mask).
+    type: boolean
+    default: true
   - name: process_date
     label: Process date (optional)
     doc: "Only process this date, YYYYMMDD; leave blank for all dates."
@@ -88,6 +87,21 @@ inputs:
     doc: "Override the auto-detected no-data value; leave blank to auto-detect."
     type: string
     default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://<s3_bucket>/<s3_dest_base>/<activation_event>/ (DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: s3_bucket
+    label: S3 bucket
+    doc: Destination S3 bucket for published COGs.
+    type: string
+    default: "nasa-disasters"
+  - name: s3_dest_base
+    label: S3 destination base
+    doc: Base prefix within the bucket; products land at <s3_dest_base>/<activation_event>/.
+    type: string
+    default: "drcs_activations_new"
 outputs:
   - name: output
     type: Directory

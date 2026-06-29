@@ -1,4 +1,4 @@
-algorithm_name: disasters_process_sentinel2
+algorithm_name: Sentinel-2
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev
@@ -25,19 +25,19 @@ license: Apache-2.0
 release_notes: DPS integration for Sentinel-2 COG disaster-product generation.
 citation: NASA Disasters Program
 keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent
-# Inputs: flat list, each {name, label, doc, type, default}. File/Directory types
-# are localized by DPS and passed to run.sh as --name <path>; primitives as
-# --name <value>. run.sh maps these onto the process_sentinel2 CLI.
+# Inputs: flat list, each {name, label, doc, type, default}. File inputs are
+# localized by DPS and passed to run.sh as --name <path>; booleans as a true/false
+# control; primitives as --name <value>. run.sh maps these onto process_sentinel2.
 inputs:
-  - name: granule_archive
-    label: Sentinel-2 granule archive
+  - name: file_path_of_raw_data
+    label: Raw data file
     doc: A Sentinel-2 L2A granule archive (.zip).
     type: File
   - name: activation_event
     label: Activation event
-    doc: Event name, e.g. 202601_WinterWx_US (embedded as a GeoTIFF tag and filename prefix).
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Example_Event is rejected at run time -- you MUST set a real value."
     type: string
-    default: "202601_Example_Event"
+    default: "YYYYMM_Example_Event"
   - name: products
     label: Products
     doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
@@ -45,24 +45,23 @@ inputs:
     default: "true swir"
   - name: source_label
     label: Source
-    doc: SOURCE metadata tag value (e.g. Copernicus).
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Copernicus."
     type: string
-    default: "Copernicus"
   - name: dst_crs
     label: Target CRS
-    doc: 'Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326.'
+    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
     type: string
     default: "native"
   - name: merge
     label: Merge by date/product
-    doc: "true to mosaic scenes by date and product (-merge); false to skip."
-    type: string
-    default: "true"
+    doc: Mosaic scenes by date and product (-merge).
+    type: boolean
+    default: true
   - name: mask
     label: Cloud mask
-    doc: "true to generate and apply a cloud mask (-mask, L2A only); false to skip."
-    type: string
-    default: "false"
+    doc: Generate and apply a cloud mask (-mask, L2A only).
+    type: boolean
+    default: false
   - name: process_date
     label: Process date (optional)
     doc: "Only process this date, YYYYMMDD; leave blank for all dates."
@@ -88,6 +87,21 @@ inputs:
     doc: "No-data value for the output COGs (Sentinel-2 default 0)."
     type: string
     default: "0"
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://<s3_bucket>/<s3_dest_base>/<activation_event>/ (DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: s3_bucket
+    label: S3 bucket
+    doc: Destination S3 bucket for published COGs.
+    type: string
+    default: "nasa-disasters"
+  - name: s3_dest_base
+    label: S3 destination base
+    doc: Base prefix within the bucket; products land at <s3_dest_base>/<activation_event>/.
+    type: string
+    default: "drcs_activations_new"
 outputs:
   - name: output
     type: Directory

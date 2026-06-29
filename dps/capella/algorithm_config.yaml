@@ -1,4 +1,4 @@
-algorithm_name: Capella
+algorithm_name: capella
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev

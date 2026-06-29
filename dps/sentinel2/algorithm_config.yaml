@@ -1,45 +1,90 @@
-algorithm_description: >-
-  Process Sentinel-2 L2A granule archives (.zip) into Cloud Optimized GeoTIFF
-  disaster-response products (true color, NDVI, water extent, etc.) with
-  reprojection and activation-event GeoTIFF metadata tags.
 algorithm_name: disasters_process_sentinel2
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev
+algorithm_description: >-
+  Process Sentinel-2 L2A granule archives (.zip) into Cloud Optimized GeoTIFF
+  disaster-response products (true color, SWIR, NDVI, water extent, etc.) with
+  reprojection and activation-event GeoTIFF metadata tags.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 # MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
-# command paths MUST be prefixed with the repo directory name (matches the
-# dps_tutorial convention: build_command: dps_tutorial/gdal_wrapper/build-env.sh).
+# command paths MUST be prefixed with the repo directory name.
 build_command: disasters-product-algorithms/dps/sentinel2/build-env.sh
 run_command: disasters-product-algorithms/dps/sentinel2/run.sh
-disk_space: 20GB
-queue: maap-dps-worker-16gb
-repository_url: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-# MAAP OPS default base image (per docs). MAAP installs Miniconda during the
-# build and runs build-env.sh on top, so a minimal base is fine. If this tag
-# 404s, pick the current one from the Container URL dropdown in the registration
-# UI or browse https://repo.maap-project.org/root/maap-workspaces/container_registry.
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
 docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements (OGC/CWL schema; replaces the old queue + disk_space).
+ram_min: 64
+cores_min: 8
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for Sentinel-2 COG disaster-product generation.
+citation: NASA Disasters Program
+keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent
+# Inputs: flat list, each {name, label, doc, type, default}. File/Directory types
+# are localized by DPS and passed to run.sh as --name <path>; primitives as
+# --name <value>. run.sh maps these onto the process_sentinel2 CLI.
 inputs:
-  config: []
-  file:
-    - name: granule_archive
-      description: A Sentinel-2 L2A granule archive (.zip).
-      required: true
-      default: ''
-  positional:
-    - name: activation_event
-      description: Activation event, e.g. 202512_Flood_WA (GeoTIFF tag + filename prefix).
-      required: true
-      default: '202512_Flood_WA'
-    - name: products
-      description: Space-separated product list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
-      required: false
-      default: 'true'
-    - name: dst_crs
-      description: Target CRS. EPSG:3857 for VEDA build_stac, or EPSG:4326, or native.
-      required: false
-      default: 'EPSG:3857'
-    - name: source_label
-      description: SOURCE metadata tag value.
-      required: false
-      default: 'Sentinel-2 L2A'
+  - name: granule_archive
+    label: Sentinel-2 granule archive
+    doc: A Sentinel-2 L2A granule archive (.zip).
+    type: File
+  - name: activation_event
+    label: Activation event
+    doc: Event name, e.g. 202601_WinterWx_US (embedded as a GeoTIFF tag and filename prefix).
+    type: string
+    default: "202601_Example_Event"
+  - name: products
+    label: Products
+    doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
+    type: string
+    default: "true swir"
+  - name: source_label
+    label: Source
+    doc: SOURCE metadata tag value (e.g. Copernicus).
+    type: string
+    default: "Copernicus"
+  - name: dst_crs
+    label: Target CRS
+    doc: EPSG:3857 for VEDA build_stac, EPSG:4326, or native.
+    type: string
+    default: "EPSG:3857"
+  - name: merge
+    label: Merge by date/product
+    doc: "true to mosaic scenes by date and product (-merge); false to skip."
+    type: string
+    default: "true"
+  - name: mask
+    label: Cloud mask
+    doc: "true to generate and apply a cloud mask (-mask, L2A only); false to skip."
+    type: string
+    default: "false"
+  - name: process_date
+    label: Process date (optional)
+    doc: "Only process this date, YYYYMMDD; leave blank for all dates."
+    type: string?
+  - name: process_tile
+    label: Process tile (optional)
+    doc: "Only process this tile, e.g. T17RLN; leave blank for all tiles."
+    type: string?
+  - name: we_nstd
+    label: Water-extent std devs (optional)
+    doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'
+    type: string?
+  - name: compression_level
+    label: COG compression level
+    doc: ZSTD compression level (1-22).
+    type: int
+    default: 22
+  - name: nodata
+    label: No-data value
+    doc: "No-data value for the output COGs (Sentinel-2 default 0)."
+    type: string
+    default: "0"
+outputs:
+  - name: output
+    type: Directory

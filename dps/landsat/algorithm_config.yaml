@@ -1,0 +1,40 @@
+algorithm_description: >-
+  Process Landsat 8/9 Collection 2 Level-2 granule archives (.tar/.zip) into
+  Cloud Optimized GeoTIFF disaster-response products (true color, NDVI, water
+  extent, etc.) with reprojection and activation-event GeoTIFF metadata tags.
+algorithm_name: disasters_process_landsat89
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+build_command: dps/landsat/build-env.sh
+run_command: dps/landsat/run.sh
+disk_space: 20GB
+queue: maap-dps-worker-16gb
+repository_url: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# Confirm the exact MAAP vanilla base-image URL/tag from your ADE registration UI
+# before registering. It must ship conda on PATH (build-env.sh / run.sh rely on it).
+docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:develop
+inputs:
+  config: []
+  file:
+    - name: granule_archive
+      description: A Landsat C2 L2 granule archive (.tar or .zip).
+      required: true
+      default: ''
+  positional:
+    - name: activation_event
+      description: Activation event, e.g. 202512_Flood_WA (GeoTIFF tag + filename prefix).
+      required: true
+      default: '202512_Flood_WA'
+    - name: products
+      description: Space-separated product list (true nat ndvi ndwi mndwi evi nbr we pan colorIR) or 'all'.
+      required: false
+      default: 'true'
+    - name: dst_crs
+      description: Target CRS. EPSG:3857 for VEDA build_stac, or EPSG:4326, or native.
+      required: false
+      default: 'EPSG:3857'
+    - name: source_label
+      description: SOURCE metadata tag value.
+      required: false
+      default: 'Landsat 8/9 Collection 2 Level-2'

@@ -66,15 +66,18 @@ inputs:
   - name: process_date
     label: Process date (optional)
     doc: "Only process this date, YYYYMMDD; leave blank for all dates."
-    type: string?
+    type: string
+    default: ""
   - name: process_tile
     label: Process tile (optional)
     doc: "Only process this tile, e.g. T17RLN; leave blank for all tiles."
-    type: string?
+    type: string
+    default: ""
   - name: we_nstd
     label: Water-extent std devs (optional)
     doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'
-    type: string?
+    type: string
+    default: ""
   - name: compression_level
     label: COG compression level
     doc: ZSTD compression level (1-22).

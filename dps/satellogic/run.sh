@@ -30,6 +30,9 @@ SOURCE_LABEL=""
 COMPRESSION_LEVEL="22"
 NODATA=""
 ENABLE_S3_UPLOAD="false"
+# S3 destination is LOCKED for this version: not exposed as a job input and not
+# parsed from flags, so operators cannot change it. To target a different
+# bucket/prefix, publish a new algorithm_version with these two values changed.
 S3_BUCKET="nasa-disasters"
 S3_DEST_BASE="drcs_activations_new"
 SAVE_PNG="false"
@@ -51,8 +54,6 @@ while [[ $# -gt 0 ]]; do
     --source_label)      SOURCE_LABEL="$2"; shift 2;;
     --compression_level) COMPRESSION_LEVEL="$2"; shift 2;;
     --nodata)            NODATA="$2"; shift 2;;
-    --s3_bucket)         S3_BUCKET="$2"; shift 2;;
-    --s3_dest_base)      S3_DEST_BASE="$2"; shift 2;;
     --png_min)           PNG_MIN="$2"; shift 2;;
     --png_max)           PNG_MAX="$2"; shift 2;;
     --use_mask)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then USE_MASK="$2"; shift 2; else USE_MASK="true"; shift; fi ;;

@@ -32,6 +32,11 @@ tests/
 tools/
 bin/
 
+# MAAP DPS build/run scripts + algorithm manifests. DPS clones the git repo
+# directly (ignores .dockerignore), so excluding these only keeps the hub image
+# lean; it does not affect DPS.
+dps/
+
 # Python build artifacts
 *.pyc
 __pycache__/

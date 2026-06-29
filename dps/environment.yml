@@ -1,0 +1,43 @@
+# Lean DPS-worker conda env for disasters-product-algorithms.
+#
+# Shared by every dps/<sensor>/build-env.sh via ../environment.yml.
+# Derived from dev-conda-deps.txt -- NOT image/environment.yml, which is the
+# heavy Pangeo hub env (code-server, jupyter, virtualizarr, ...) inappropriate
+# for a DPS worker.
+#
+# GDAL / rasterio / geopandas / pyproj MUST come from conda, never pip, so the
+# Python bindings match the system libgdal (see CLAUDE.md "Critical Constraints").
+#
+# The repo itself (which provides the process_* console scripts) is installed by
+# build-env.sh with `pip install <repo_root>` after this env is created, so it is
+# NOT listed here.
+#
+# The env name below is the single source of truth: every run.sh does
+# `conda run --name disasters_dps`. Keep them in sync.
+name: disasters_dps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  # --- Geospatial stack (conda only) ---
+  - gdal
+  - rasterio
+  - rio-cogeo
+  - geopandas
+  - pyproj
+  # --- Numerical / image processing ---
+  - numpy
+  - scipy
+  - pillow
+  - lxml
+  # --- HTTP / AWS ---
+  - requests
+  - boto3
+  - botocore
+  # --- Progress / utilities ---
+  - tqdm
+  - psutil
+  - fsspec
+  - s3fs
+  # --- pip (build-env.sh uses it to install the repo) ---
+  - pip

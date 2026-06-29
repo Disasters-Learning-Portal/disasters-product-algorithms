@@ -42,6 +42,13 @@ dependencies:
     - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
     - jupyter-sshd-proxy
     - jupyterlab-bxplorer
+    # maap-py: MAAP DPS client so `from maap.maap import MAAP` works on every hub
+    # pod without a manual `pip install maap-py` (used to register/submit DPS
+    # jobs from the hub). Pinned to the version verified against MAAP ops.
+    # Deliberately NOT in pyproject [project.dependencies] -- that would leak it
+    # into the algorithms package + DPS workers, which never import it. Bump this
+    # pin if MAAP ops requires a newer client.
+    - maap-py==4.2.0
     # disasters-product-algorithms is intentionally NOT installed here. It's
     # installed in a separate Dockerfile RUN layer via
     # `pip install --no-deps /srv/repo/algorithms`, which uses the local

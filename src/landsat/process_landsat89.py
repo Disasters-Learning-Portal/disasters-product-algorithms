@@ -807,8 +807,11 @@ if __name__ == "__main__":
                     # format output filename
                     nstd_str = str(nstd).replace('.', '_')
                     prod_name = os.path.join(prod_dir, f'{sensor}_waterExtent_NSTD_{nstd_str}_{date}.tif')
-                    check = glob.glob(prod_name)
-                    if len(check) == 0 or args.force:
+                    # Predict the post-COG/rename name so re-runs skip correctly
+                    # when an event is set (the raw prod_name is gone after the
+                    # rename). Matches the skip check used by the other products.
+                    final_name = get_final_filename(prod_name, args.event, args.tif_only)
+                    if not os.path.exists(final_name) or args.force:
                         try:
                             # produce water extent
                             print(f'\n* Processing Water Extent (NSTD: {nstd})')
@@ -885,17 +888,11 @@ if __name__ == "__main__":
                     # Rename TIF without COG conversion
                     rename_with_event(merged_file, args.event)
 
-                # Also rename individual files with event (if event name provided)
+                # Tidy the individual scenes left in the just-merged directory.
+                # Use cm_dir (the directory just merged), not the stale per-scene
+                # loop variable prod_dir, which would point at an unrelated product.
                 if args.event:
-                    individual_files = glob.glob(os.path.join(prod_dir, '*.tif'))
-                    for indiv_file in individual_files:
-                        # Skip files that are already renamed or are merged files
-                        basename = os.path.basename(indiv_file)
-                        if 'merged' not in basename and not basename.startswith(args.event):
-                            try:
-                                rename_with_event(indiv_file, args.event)
-                            except Exception as e:
-                                print(f"  Warning: Could not rename {basename}: {e}")
+                    rename_individual_scene_files(cm_dir, args.event)
 
             for prod_dir in dirs_to_merge:
                 # Skip the (re-)merge if a merged COG already exists for this product (unless -force).
@@ -923,17 +920,9 @@ if __name__ == "__main__":
                     # Rename TIF without COG conversion
                     rename_with_event(merged_file, args.event)
 
-                # Also rename individual files with event (if event name provided)
+                # Tidy the individual scenes left alongside the merged product.
                 if args.event:
-                    individual_files = glob.glob(os.path.join(prod_dir, '*.tif'))
-                    for indiv_file in individual_files:
-                        # Skip files that are already renamed or are merged files
-                        basename = os.path.basename(indiv_file)
-                        if 'merged' not in basename and not basename.startswith(args.event):
-                            try:
-                                rename_with_event(indiv_file, args.event)
-                            except Exception as e:
-                                print(f"  Warning: Could not rename {basename}: {e}")
+                    rename_individual_scene_files(prod_dir, args.event)
 
     if not args.unzip_only:
         # Write processing summary and log file

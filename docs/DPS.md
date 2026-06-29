@@ -1,110 +1,156 @@
 # Running on MAAP DPS
 
-This repo's sensor pipelines can run as jobs on the MAAP
+All five sensor pipelines (landsat-8-9, sentinel-2, capella, umbra, satellogic)
+are registerable as algorithms on the MAAP
 [Data Processing System (DPS)](https://docs.maap-project.org/en/latest/technical_tutorials/dps_tutorial/dps_tutorial_demo.html).
-All the DPS plumbing lives under [`dps/`](../dps/); this page explains how it
-works, how to test it, and the one open question blocking the SAR sensors.
+The plumbing lives in [`dps/`](../dps/). This page is the source of truth for the
+**non-obvious** parts; the per-sensor files are self-documenting otherwise.
 
-## How DPS runs an algorithm
+## Layout
 
-DPS clones the registered (public) git repo, then:
+```
+dps/
+├── environment.yml          # lean conda env (name: disasters_dps) + matplotlib-base
+├── _finalize.sh             # shared output handling, sourced by every run.sh
+├── register_algorithms.py   # maap-py registration helper (legacy schema; see below)
+├── README.md
+└── <sensor>/                # landsat, sentinel2, capella, umbra, satellogic
+    ├── build-env.sh         # conda env update + pip install repo (+ scm guard)
+    ├── run.sh               # parses --name flags, runs the CLI, sources _finalize.sh
+    └── algorithm_config.yaml
+```
 
-1. Runs the registered **build command** once per worker image build — our
-   `dps/<sensor>/build-env.sh` creates the `disasters_dps` conda env from the
-   shared [`dps/environment.yml`](../dps/environment.yml) and `pip install`s this
-   repo so the `process_*` console scripts exist.
-2. Runs the registered **run command** per job — our `dps/<sensor>/run.sh`.
+## The OGC/CWL registration schema (this is the part that bites)
 
-The DPS I/O contract:
+MAAP migrated registration to OGC Application Packages / CWL. The current schema
+differs from the old maap-py `register_algorithm_from_yaml_file` format in ways
+that each cost a failed registration if you get them wrong:
 
-| DPS provides | Where | How we use it |
-|---|---|---|
-| `file` inputs | downloaded into relative `input/` | the granule archive (`.tar`/`.zip`) |
-| `positional` inputs | `$1 $2 …` in registration order | event, products, CRS, source label |
-| `output/` dir | uploaded to S3 after the job | we copy products here |
-| stdout / stderr | captured to `_stdout` / `_stderr` | normal logging |
+- **`algorithm_name` must match `^[a-z0-9_-]+$`** — lowercase letters, digits,
+  hyphens, underscores only. No capitals, spaces, or slashes. (So "Landsat 8/9"
+  is invalid; we use `landsat-8-9`.)
+- **`base_container_url`**, NOT `docker_container_url`. Value =
+  `mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0`
+  (the OPS default; confirm the tag in the registration UI's Container URL
+  dropdown). MAAP installs Miniconda during the build and runs `build_command` on
+  top, so a minimal base is fine.
+- **`build_command` / `run_command` MUST be prefixed with the repo directory
+  name** — e.g. `disasters-product-algorithms/dps/landsat/build-env.sh`. MAAP
+  clones the repo to `/app/<repo-name>/` and runs the command from `/app`.
+- **`code_repository`**, not `repository_url`.
+- **Resources: `ram_min` / `cores_min` / `outdir_max`**, not `queue` /
+  `disk_space`.
+- **`inputs` is a flat list** of `{name, label, doc, type, default}`. Valid
+  `type`: `string, int, File, Directory, long, float, boolean, double` — **no
+  enum, no array**. So:
+  - multi-choice fields (`product`, `level`) and `products` stay free-text
+    strings (run.sh word-splits `products` into multiple `-p` values);
+  - optional inputs use `type: string` with `default: ""` (the `string?` optional
+    suffix is NOT a dropdown option and loads blank);
+  - toggles use `type: boolean` (renders a true/false control).
+- **Metadata fields** (`author`, `contributor`, `license`, `release_notes`,
+  `citation`, `keywords`) pre-fill the registration form.
 
-## Why only Landsat + Sentinel-2 (the file-input model)
+## How run.sh receives inputs (CWL contract)
 
-The two optical sensors take a **local directory of granule archives** as their
-positional `input` arg — a clean 1:1 fit for DPS's file-input model:
+DPS passes every input as a **named flag** `--name value` via `"$@"` — NOT
+positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
+may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
+run.sh's boolean parser accepts both and **defaults booleans to false** (presence
+sets true) so a config default of `true` round-trips correctly.
 
-- DPS downloads the granule into `input/`.
-- `run.sh` calls `process_landsat89 input/ …` (or `process_sentinel2`), which
-  unpacks to `input/unpacked/` and writes product COGs to **`input/output/`**
-  (`src/landsat/process_landsat89.py:178`, `src/sentinel2/process_sentinel2.py:257`).
-- `run.sh` then copies `input/output/.` → `output/` so DPS uploads the COGs.
-  **This copy is load-bearing** — without it the job "succeeds" but uploads
-  nothing.
+Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
+use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
+-compression_level` single-dash) and then `source dps/_finalize.sh`.
 
-### Activation metadata
+## Two input models
 
-`run.sh` writes a small `activation_metadata.json` into `input/` (so it is not
-itself uploaded) and passes it via `--metadata-json`. The COG engine embeds
-`ACTIVATION_EVENT` / `SOURCE` / `PROCESSOR` as GeoTIFF tags at creation
-(`shared_utils.cog_metadata.load_metadata_json`); `PROCESSOR` auto-stamps from
-`shared_utils.version`.
+- **Optical (landsat, sentinel2):** take a **`file_path_of_raw_data`** File input
+  (a `.tar`/`.zip` granule). run.sh stages it into a dir, runs the CLI (which
+  writes products to `<input>/output/`), copies those to `OUT_HOME`.
+- **SAR/vendor (capella, umbra, satellogic):** **no file input** — the CLI
+  fetches source rasters from a CSDA vendor bucket keyed by `--date`/`--bucket`/
+  `--prefix` (capella `csdap-capellaspace-delivery`, umbra `csda-data-vendor-umbra`,
+  satellogic `csda-data-vendor-satellogic`). The **DPS-worker IAM role must have
+  read access** to that bucket (you can't set that role from this repo or the
+  hub — it's MAAP infra; request it from MAAP, or grant cross-account on the
+  bucket). Optional code lever: set **`READ_ROLE_ARN`** (+ `READ_ROLE_EXTERNAL_ID`)
+  so `shared_utils.s3utils` assumes a role with vendor access (see s3utils
+  `_read_session`). Satellogic's bucket/prefix are hardcoded in the CLI (the
+  inputs are informational only).
 
-### CRS
+## Output flow (dps/_finalize.sh)
 
-Both CLIs default to `EPSG:4326`, but `run.sh` and the config default the
-`dst_crs` positional to **`EPSG:3857`** because VEDA `build_stac` rejects 4326
-COGs (see the CRS constraint in `CLAUDE.md`). Pass `EPSG:4326` or `native`
-explicitly for browser-only previews.
+Products → `~/drcs_outputs/<activation_event>/` → optional PNG quicklook →
+**copied to `output/`** (DPS uploads this — the COG is never lost) → optional
+publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → **COG deleted
+from `~/drcs_outputs`** (default; frees home-dir space — the PNG and the `output/`
+copy are kept). Controlled by inputs `save_png` (default true), `png_min`/
+`png_max` (blank = auto 2–98 pct, or 0–255 for uint8), `enable_s3_upload`,
+`s3_bucket`/`s3_dest_base`, `delete_cog` (default true). PNGs come from
+`shared_utils.plotting.save_cog_png` (needs `matplotlib-base`, in the DPS env).
 
-## Test locally before registering
+## Guard rails in run.sh
 
-This reproduces the DPS working directory and runs the exact build + run scripts:
+- `activation_event` default is the placeholder **`YYYYMM_Example_Event`**, which
+  run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
+- `source_label` is **required** (no default; the form marks it `*`).
+- `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
+  (EPSG:3857 is NOT required for VEDA `build_stac`.)
+
+## Registering (from the MAAP hub)
+
+Registration needs MAAP auth. Two realities:
+
+1. **Use the Register Algorithm UI** (Algorithms → Register Algorithm in the MAAP
+   JupyterLab). It's the OGC/CWL path that this schema targets. The CLI helper
+   `dps/register_algorithms.py` uses maap-py 4.2.0's **legacy** path (old
+   `config/file/positional` schema) — it does NOT consume the new flat schema, so
+   prefer the UI (or upgrade to maap-py ≥4.3 CWL deploy).
+2. **The GUI extensions need config**, set in Settings → **MAAP Settings**:
+   - `maapApiUrl` = `https://api.maap-project.org` (NO `/api` suffix — the
+     extensions append `api/ogc/...` themselves; a wrong base returns HTML →
+     "Unexpected token '<' … not valid JSON").
+   - `maapToken` = your `MAAP_PGT` (a per-user, expiring JWT). It is read from the
+     SettingRegistry, so Settings Editor is sufficient (no server env var needed
+     outside the MAAP ADE).
+
+The three MAAP JupyterLab extensions (`maap-algorithms-jupyter-extension`,
+`maap-dps-jupyter-extension`, `maap-jupyter-server-extension`) and `maap-py` are
+baked into the hub image via `image/environment.yml` so they're available on the
+Disasters hub. They surface as **Launcher tiles** ("MAAP Plugins"), not menu-bar
+tabs (the menu-bar version is the archived JL2 `maap-jupyter-ide`).
+
+`algorithm_version: dev` makes DPS clone the `dev` branch; pin a tag for
+reproducible production runs.
+
+## One build per repo
+
+MAAP builds ONE container per repository+branch
+(`container-disasters-product-algorithms:dev`) with all `process_*` CLIs in the
+`disasters_dps` env; every algorithm reuses it (differing only by `run_command`).
+"My Builds" shows the repo name, not the per-product algorithm name — expected.
+CLI-registered algorithms may not appear in "My Builds" at all (it tracks
+UI-initiated builds); the **Process dropdown** in Submit Jobs is the real "is it
+deployed" check.
+
+## Local smoke test
 
 ```bash
 WORK=$(mktemp -d); cd "$WORK"; mkdir -p input
-cp /path/to/LC09_..._02_T1.tar input/
-
-bash /path/to/repo/dps/landsat/build-env.sh
-bash /path/to/repo/dps/landsat/run.sh \
-  "202512_Flood_WA" "true ndvi" "EPSG:3857" "Landsat 8/9 Collection 2 Level-2"
-
-ls -la output/                                       # NON-EMPTY = copy step worked
-conda run -n disasters_dps which process_landsat89   # console script on PATH
-gdalinfo output/<one>.tif | grep -E 'ACTIVATION_EVENT|SOURCE|PROCESSOR'
+cp /path/to/granule.tar input/          # optical only
+bash <repo>/dps/landsat/build-env.sh
+bash <repo>/dps/landsat/run.sh \
+  --file_path_of_raw_data input/granule.tar \
+  --activation_event 202511_Flood_TX --source_label USGS --products "true ndvi"
+ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
 ```
 
-## Register + submit
-
-From a MAAP ADE workspace (maap-py installed):
-
-```bash
-python dps/register_algorithms.py            # landsat + sentinel2
-```
-
-`submitJob` example and the full recipe are in [`dps/README.md`](../dps/README.md).
-
-## Gotchas baked into the scripts
-
-- **setuptools-scm on a shallow clone.** If DPS clones with `--depth 1
-  --no-tags`, the repo install can't resolve a version and fails (→ `process_*:
-  command not found`). With `algorithm_version: dev` (a branch), setuptools-scm
-  derives a dev version from the latest reachable tag — fine as long as tags are
-  in the clone; the `SETUPTOOLS_SCM_PRETEND_VERSION` fallback in `build-env.sh`
-  covers the tagless case. Pin a tag for reproducible production runs.
-- **conda env-name drift.** `name: disasters_dps` in `environment.yml` must match
-  every `conda run --name disasters_dps`. Single source of truth: the env file.
-- **`docker_container_url`.** Must be a real MAAP base image with conda on PATH.
-  Confirm the exact vanilla image URL/tag in the ADE registration UI before
-  registering.
-- **No p7zip.** Sentinel-2 unpacks `.zip` with Python `zipfile`; Landsat uses
-  `tarfile`/`zipfile`. No system unzip binary is needed.
-
-## Out of scope: SAR / vendor sensors (phase 2, blocked)
-
-Capella, Umbra, and Satellogic do **not** take a file input. They fetch source
-rasters from CSDA **vendor S3 buckets** keyed by `--date`/`--bucket`/`--prefix`,
-using the ambient AWS credential chain (`shared_utils/s3utils.py`,
-`shared_utils/s3_operations.py`) — there is no vendor-read assume-role. Running
-them on DPS requires the **DPS worker IAM role** to be granted cross-account /
-requester-pays read on those vendor buckets, which is not granted by default.
-
-Resolve that platform question with MAAP/CSDA before scaffolding
-`dps/{capella,umbra,satellogic}/`. If cross-account reads aren't permitted, the
-alternative is a file-input variant: stage the vendor raster outside DPS and hand
-it in as a `file` input, exactly like Landsat/Sentinel-2.
+## Gotchas
+- **setuptools-scm on a shallow clone**: `build-env.sh` exports a
+  `SETUPTOOLS_SCM_PRETEND_VERSION` fallback when no tag is reachable, or `pip
+  install` of the repo fails → `process_*: command not found`.
+- **conda env name** `disasters_dps` must match across `environment.yml`,
+  `build-env.sh`, and every `conda run --name` in run.sh / `_finalize.sh`.
+- **`dps/` is excluded from the hub image** (`.dockerignore`); DPS clones git
+  directly, so that's fine.

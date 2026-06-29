@@ -92,7 +92,7 @@ copy are kept). Controlled by inputs `save_png` (default true), `png_min`/
 
 ## Guard rails in run.sh
 
-- `activation_event` default is the placeholder **`YYYYMM_Example_Event`**, which
+- `activation_event` default is the placeholder **`YYYYMM_Hazard_Location`**, which
   run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
 - `source_label` is **required** (no default; the form marks it `*`).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.

@@ -67,9 +67,9 @@ inputs:
     default: "native"
   - name: activation_event
     label: Activation event
-    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Example_Event is rejected at run time -- you MUST set a real value."
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
     type: string
-    default: "YYYYMM_Example_Event"
+    default: "YYYYMM_Hazard_Location"
   - name: source_label
     label: Source
     doc: "Data origin (required), e.g. USGS, NASA, NOAA, Copernicus, Capella Space."

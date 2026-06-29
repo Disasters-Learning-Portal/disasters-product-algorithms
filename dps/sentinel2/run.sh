@@ -14,7 +14,7 @@ mkdir -p output
 
 # --- defaults (booleans default false; flag presence sets them true) ---
 FILE_PATH=""
-ACTIVATION_EVENT="YYYYMM_Example_Event"
+ACTIVATION_EVENT="YYYYMM_Hazard_Location"
 PRODUCTS="true swir"
 SOURCE_LABEL=""
 DST_CRS="native"
@@ -63,8 +63,8 @@ done
 if [[ -z "${FILE_PATH}" ]]; then
   echo "ERROR: --file_path_of_raw_data is required (a Sentinel-2 L2A .zip granule)" >&2; exit 1
 fi
-if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Example_Event" ]]; then
-  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Example_Event'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
+if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Hazard_Location" ]]; then
+  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Hazard_Location'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
 fi
 if [[ -z "${SOURCE_LABEL}" ]]; then
   echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Copernicus)." >&2; exit 1

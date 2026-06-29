@@ -30,6 +30,8 @@ dependencies:
   - scipy
   - pillow
   - lxml
+  # matplotlib-base (headless, no Qt) for the save_png quicklook step in run.sh
+  - matplotlib-base
   # --- HTTP / AWS ---
   - requests
   - boto3

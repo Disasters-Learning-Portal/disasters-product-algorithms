@@ -3,10 +3,14 @@ set -euo pipefail
 # MAAP DPS run script (Capella) -- OGC/CWL schema.
 #
 # Inputs arrive as NAMED flags via "$@". Boolean inputs may arrive as a bare
-# "--flag" (presence) or "--flag true|false" (value) depending on how CWL renders
-# them, so the parser below accepts both. This sensor takes NO file input: it
-# FETCHES source rasters from the CSDA Capella vendor S3 bucket at run time, so
-# the DPS-worker role needs read access (confirmed available).
+# "--flag" (presence) or "--flag true|false" (value), so the parser accepts both.
+# NO file input: process_capella FETCHES source rasters from the CSDA Capella
+# vendor bucket at run time (DPS-worker read access required, confirmed available).
+#
+# Output flow: products are written to ~/drcs_outputs/<event>/, optionally given
+# a PNG quicklook, copied to output/ (which DPS uploads -- the safety net),
+# optionally published to s3://nasa-disasters, then the COGs are deleted from
+# ~/drcs_outputs (default) to free space (PNGs + the output/ copy are kept).
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
@@ -26,6 +30,10 @@ NODATA=""
 ENABLE_S3_UPLOAD="false"
 S3_BUCKET="nasa-disasters"
 S3_DEST_BASE="drcs_activations_new"
+SAVE_PNG="false"
+PNG_MIN=""
+PNG_MAX=""
+DELETE_COG="false"
 
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
@@ -42,9 +50,12 @@ while [[ $# -gt 0 ]]; do
     --nodata)            NODATA="$2"; shift 2;;
     --s3_bucket)         S3_BUCKET="$2"; shift 2;;
     --s3_dest_base)      S3_DEST_BASE="$2"; shift 2;;
-    # boolean flags: accept "--flag" (presence) or "--flag true|false" (value)
+    --png_min)           PNG_MIN="$2"; shift 2;;
+    --png_max)           PNG_MAX="$2"; shift 2;;
     --apply_filter)      if [[ "${2:-}" =~ ^(true|false)$ ]]; then APPLY_FILTER="$2"; shift 2; else APPLY_FILTER="true"; shift; fi ;;
     --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
+    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
+    --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -60,20 +71,20 @@ if [[ -z "${SOURCE_LABEL}" ]]; then
   echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Capella Space)." >&2; exit 1
 fi
 
+OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
+mkdir -p "${OUT_HOME}"
+
 # --- activation metadata embedded as GeoTIFF tags at COG creation ---
-WORK_DIR="$(mktemp -d)"
-META_JSON="${WORK_DIR}/activation_metadata.json"
+META_JSON="$(mktemp -d)/activation_metadata.json"
 printf '{"ACTIVATION_EVENT": "%s", "SOURCE": "%s"}\n' \
   "${ACTIVATION_EVENT}" "${SOURCE_LABEL}" > "${META_JSON}"
 
-# --- build the CLI argument list ---
-# process_capella: --double-dash for date/product/bucket/prefix/output; -single-dash
-# for the COG knobs (-dst_crs/-compression_level/-nodata).
+# --- run the processor (writes the COG into OUT_HOME) ---
 args=( --date "${DATE}"
        --product "${PRODUCT}"
        --bucket "${BUCKET}"
        --prefix "${PREFIX}"
-       --output output
+       --output "${OUT_HOME}"
        -dst_crs "${DST_CRS}"
        -compression_level "${COMPRESSION_LEVEL}"
        --metadata-json "${META_JSON}" )
@@ -82,19 +93,5 @@ args=( --date "${DATE}"
 
 conda run --live-stream --name disasters_dps process_capella "${args[@]}"
 
-# --- optional: publish products to the operational S3 bucket ---
-# (DPS uploads output/ to its own job bucket regardless; this publishes to the
-# operational nasa-disasters bucket that downstream consumers read.)
-if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
-  S3_PREFIX="${S3_DEST_BASE}/${ACTIVATION_EVENT}"
-  echo "Publishing products to s3://${S3_BUCKET}/${S3_PREFIX}/ ..."
-  conda run --live-stream --name disasters_dps python - "${S3_BUCKET}" "${S3_PREFIX}" <<'PY'
-import os, sys, glob
-from shared_utils import upload_file_to_s3
-bucket, prefix = sys.argv[1], sys.argv[2]
-cogs = sorted(glob.glob("output/**/*.tif", recursive=True))
-for f in cogs:
-    upload_file_to_s3(f, f"s3://{bucket}/{prefix}/{os.path.basename(f)}")
-print(f"Uploaded {len(cogs)} file(s) to s3://{bucket}/{prefix}/")
-PY
-fi
+# --- shared output handling (png -> output/ -> S3 -> delete COG) ---
+source "${basedir}/../_finalize.sh"

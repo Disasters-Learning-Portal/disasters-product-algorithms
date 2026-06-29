@@ -6,8 +6,11 @@ set -euo pipefail
 # "--flag" (presence) or "--flag true|false" (value), so the parser accepts both.
 # NO file input: process_satellogic FETCHES source rasters from the CSDA vendor
 # bucket s3://csda-data-vendor-satellogic (prefix 'disasters') at run time -- the
-# bucket/prefix are hardcoded in the CLI (not flags). The DPS-worker role needs
-# read access to that bucket (confirmed available).
+# bucket/prefix are hardcoded in the CLI (not flags). DPS-worker read access
+# required (confirmed available).
+#
+# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
+# -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
@@ -29,6 +32,10 @@ NODATA=""
 ENABLE_S3_UPLOAD="false"
 S3_BUCKET="nasa-disasters"
 S3_DEST_BASE="drcs_activations_new"
+SAVE_PNG="false"
+PNG_MIN=""
+PNG_MAX=""
+DELETE_COG="false"
 
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
@@ -46,9 +53,13 @@ while [[ $# -gt 0 ]]; do
     --nodata)            NODATA="$2"; shift 2;;
     --s3_bucket)         S3_BUCKET="$2"; shift 2;;
     --s3_dest_base)      S3_DEST_BASE="$2"; shift 2;;
+    --png_min)           PNG_MIN="$2"; shift 2;;
+    --png_max)           PNG_MAX="$2"; shift 2;;
     --use_mask)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then USE_MASK="$2"; shift 2; else USE_MASK="true"; shift; fi ;;
     --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
     --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
+    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
+    --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -64,22 +75,21 @@ if [[ -z "${SOURCE_LABEL}" ]]; then
   echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Satellogic)." >&2; exit 1
 fi
 
-# bucket/prefix are NOT consumable by the CLI (no flags); surface them in the log.
 echo "INFO: vendor source = s3://${BUCKET}/${PREFIX} (read by process_satellogic; AWS read access required)"
 
+OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
+mkdir -p "${OUT_HOME}"
+
 # --- activation metadata embedded as GeoTIFF tags at COG creation ---
-WORKDIR="$(mktemp -d)"
-META_JSON="${WORKDIR}/activation_metadata.json"
+META_JSON="$(mktemp -d)/activation_metadata.json"
 printf '{"ACTIVATION_EVENT": "%s", "SOURCE": "%s"}\n' \
   "${ACTIVATION_EVENT}" "${SOURCE_LABEL}" > "${META_JSON}"
 
-# --- build the CLI argument list ---
-# process_satellogic: --double-dash for product/date/level/output/gamma; -single-dash
-# for the COG knobs (-dst_crs/-compression_level/-nodata). use_mask/visualize are bare.
+# --- run the processor (writes the COG into OUT_HOME) ---
 args=( --product "${PRODUCT}"
        --date "${DATE}"
        --level "${LEVEL}"
-       --output output
+       --output "${OUT_HOME}"
        -dst_crs "${DST_CRS}"
        -compression_level "${COMPRESSION_LEVEL}"
        --gamma "${GAMMA}"
@@ -90,17 +100,5 @@ args=( --product "${PRODUCT}"
 
 conda run --live-stream --name disasters_dps process_satellogic "${args[@]}"
 
-# --- optional: publish products to the operational S3 bucket ---
-if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
-  S3_PREFIX="${S3_DEST_BASE}/${ACTIVATION_EVENT}"
-  echo "Publishing products to s3://${S3_BUCKET}/${S3_PREFIX}/ ..."
-  conda run --live-stream --name disasters_dps python - "${S3_BUCKET}" "${S3_PREFIX}" <<'PY'
-import os, sys, glob
-from shared_utils import upload_file_to_s3
-bucket, prefix = sys.argv[1], sys.argv[2]
-cogs = sorted(glob.glob("output/**/*.tif", recursive=True))
-for f in cogs:
-    upload_file_to_s3(f, f"s3://{bucket}/{prefix}/{os.path.basename(f)}")
-print(f"Uploaded {len(cogs)} file(s) to s3://{bucket}/{prefix}/")
-PY
-fi
+# --- shared output handling (png -> output/ -> S3 -> delete COG) ---
+source "${basedir}/../_finalize.sh"

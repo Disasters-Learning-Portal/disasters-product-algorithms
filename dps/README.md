@@ -76,9 +76,9 @@ print(maap.getJobStatus(job.id))   # then maap.getJobResult(job.id) when Succeed
 
 ## Before registering: confirm
 
-- **`docker_container_url`** in each `algorithm_config.yaml` points at a MAAP
-  vanilla base image with conda on PATH. Confirm the exact URL/tag in your ADE
-  registration UI.
+- **`base_container_url`** in each `algorithm_config.yaml` points at the MAAP OPS
+  base image (`custom_images/maap_base`). Confirm the exact URL/tag in the
+  registration UI's "Container URL" dropdown.
 - **`algorithm_version`** points at a git ref DPS can clone. It is set to `dev`
   for active development; pin a tag (e.g. `v0.10.0`) for reproducible production
   runs. Either way the clone must include git tags so setuptools-scm can resolve

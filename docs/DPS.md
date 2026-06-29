@@ -87,8 +87,14 @@ publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → **COG deleted
 from `~/drcs_outputs`** (default; frees home-dir space — the PNG and the `output/`
 copy are kept). Controlled by inputs `save_png` (default true), `png_min`/
 `png_max` (blank = auto 2–98 pct, or 0–255 for uint8), `enable_s3_upload`,
-`s3_bucket`/`s3_dest_base`, `delete_cog` (default true). PNGs come from
+`delete_cog` (default true). PNGs come from
 `shared_utils.plotting.save_cog_png` (needs `matplotlib-base`, in the DPS env).
+
+The S3 destination (`S3_BUCKET=nasa-disasters`, `S3_DEST_BASE=drcs_activations_new`)
+is **locked per algorithm_version** — it is intentionally NOT a job input and NOT
+parsed from a flag, so operators can't redirect output. To change the target,
+publish a new `algorithm_version` with the two constants edited at the top of each
+`run.sh`. Only `enable_s3_upload` (the on/off toggle) is operator-facing.
 
 ## Guard rails in run.sh
 

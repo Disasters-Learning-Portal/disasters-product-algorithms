@@ -50,9 +50,9 @@ inputs:
     default: "USGS"
   - name: dst_crs
     label: Target CRS
-    doc: EPSG:3857 for VEDA build_stac, EPSG:4326, or native.
+    doc: 'native (default, fastest, no warp) | EPSG:3857 (required for VEDA build_stac) | EPSG:4326.'
     type: string
-    default: "EPSG:3857"
+    default: "native"
   - name: merge
     label: Merge by date/product
     doc: "true to mosaic tiles by date and product (-merge); false to skip."

@@ -11,9 +11,11 @@ run_command: dps/landsat/run.sh
 disk_space: 20GB
 queue: maap-dps-worker-16gb
 repository_url: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-# Confirm the exact MAAP vanilla base-image URL/tag from your ADE registration UI
-# before registering. It must ship conda on PATH (build-env.sh / run.sh rely on it).
-docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:develop
+# MAAP OPS default base image (per docs). MAAP installs Miniconda during the
+# build and runs build-env.sh on top, so a minimal base is fine. If this tag
+# 404s, pick the current one from the Container URL dropdown in the registration
+# UI or browse https://repo.maap-project.org/root/maap-workspaces/container_registry.
+docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
 inputs:
   config: []
   file:

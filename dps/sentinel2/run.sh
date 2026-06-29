@@ -4,8 +4,10 @@ set -euo pipefail
 #
 # Inputs arrive as NAMED flags via "$@". Boolean inputs may arrive as a bare
 # "--flag" (presence) or "--flag true|false" (value), so the parser accepts both.
-# The File input is localized by DPS to a path. Anything written to a relative
-# output/ dir is uploaded to S3 by DPS.
+# The File input is localized by DPS to a path.
+#
+# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
+# -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
@@ -26,6 +28,10 @@ NODATA="0"
 ENABLE_S3_UPLOAD="false"
 S3_BUCKET="nasa-disasters"
 S3_DEST_BASE="drcs_activations_new"
+SAVE_PNG="false"
+PNG_MIN=""
+PNG_MAX=""
+DELETE_COG="false"
 
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
@@ -42,9 +48,13 @@ while [[ $# -gt 0 ]]; do
     --nodata)                NODATA="$2"; shift 2;;
     --s3_bucket)             S3_BUCKET="$2"; shift 2;;
     --s3_dest_base)          S3_DEST_BASE="$2"; shift 2;;
+    --png_min)               PNG_MIN="$2"; shift 2;;
+    --png_max)               PNG_MAX="$2"; shift 2;;
     --merge)                 if [[ "${2:-}" =~ ^(true|false)$ ]]; then MERGE="$2"; shift 2; else MERGE="true"; shift; fi ;;
     --mask)                  if [[ "${2:-}" =~ ^(true|false)$ ]]; then MASK="$2"; shift 2; else MASK="true"; shift; fi ;;
     --enable_s3_upload)      if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
+    --save_png)              if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
+    --delete_cog)            if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -60,6 +70,9 @@ if [[ -z "${SOURCE_LABEL}" ]]; then
   echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Copernicus)." >&2; exit 1
 fi
 
+OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
+mkdir -p "${OUT_HOME}"
+
 # --- stage the granule into an input dir (process_sentinel2 takes a directory) ---
 INPUT_DIR="$(mktemp -d)/input"
 mkdir -p "${INPUT_DIR}"
@@ -70,7 +83,7 @@ META_JSON="${INPUT_DIR}/activation_metadata.json"
 printf '{"ACTIVATION_EVENT": "%s", "SOURCE": "%s"}\n' \
   "${ACTIVATION_EVENT}" "${SOURCE_LABEL}" > "${META_JSON}"
 
-# --- build the CLI argument list ---
+# --- build the CLI argument list (CLI writes products to <input_dir>/output/) ---
 # shellcheck disable=SC2206  # intentional word-split of space-separated lists
 args=( "${INPUT_DIR}"
        -p ${PRODUCTS}
@@ -87,20 +100,6 @@ args=( "${INPUT_DIR}"
 
 conda run --live-stream --name disasters_dps process_sentinel2 "${args[@]}"
 
-# --- promote products into the DPS output/ dir (CLI writes to <input>/output/) ---
-cp -r "${INPUT_DIR}/output/." output/ 2>/dev/null || true
-
-# --- optional: publish products to the operational S3 bucket ---
-if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
-  S3_PREFIX="${S3_DEST_BASE}/${ACTIVATION_EVENT}"
-  echo "Publishing products to s3://${S3_BUCKET}/${S3_PREFIX}/ ..."
-  conda run --live-stream --name disasters_dps python - "${S3_BUCKET}" "${S3_PREFIX}" <<'PY'
-import os, sys, glob
-from shared_utils import upload_file_to_s3
-bucket, prefix = sys.argv[1], sys.argv[2]
-cogs = sorted(glob.glob("output/**/*.tif", recursive=True))
-for f in cogs:
-    upload_file_to_s3(f, f"s3://{bucket}/{prefix}/{os.path.basename(f)}")
-print(f"Uploaded {len(cogs)} file(s) to s3://{bucket}/{prefix}/")
-PY
-fi
+# --- move the produced COGs into OUT_HOME, then run shared output handling ---
+cp -r "${INPUT_DIR}/output/." "${OUT_HOME}/" 2>/dev/null || true
+source "${basedir}/../_finalize.sh"

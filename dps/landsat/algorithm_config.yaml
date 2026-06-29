@@ -102,6 +102,26 @@ inputs:
     doc: Base prefix within the bucket; products land at <s3_dest_base>/<activation_event>/.
     type: string
     default: "drcs_activations_new"
+  - name: save_png
+    label: Save PNG quicklook
+    doc: Also write a .png quicklook next to each product COG.
+    type: boolean
+    default: true
+  - name: png_min
+    label: PNG min (optional)
+    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: png_max
+    label: PNG max (optional)
+    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: delete_cog
+    label: Delete COG from home after upload
+    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
+    type: boolean
+    default: true
 outputs:
   - name: output
     type: Directory

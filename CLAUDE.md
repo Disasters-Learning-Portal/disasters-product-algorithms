@@ -66,6 +66,11 @@ All sensor CLIs also accept `--metadata-json <path>`. The path points at a JSON 
 - Nodata auto-detection: uint8=0, int16=-9999, float=-9999.0
 - `main_processor.convert_to_cog` defaults `stream_from_s3=True` — probes `/vsis3/` then falls back to `/tmp` download. Set False for ZSTD-22 heavy workloads where the up-front download avoids many small range-request round-trips.
 - **GDAL 3.10+ refuses to update a COG in-place.** Post-step `gdal.Open(path, GA_Update); ds.SetMetadata(...)` returns `RuntimeError: ... has COG layout. Updating it will generally result in losing part of the optimizations.` With `IGNORE_COG_LAYOUT_BREAK=YES` the call succeeds but the result fails `cog_validate` (main IFD offset bloats, overview-IFD ordering inverted). **This is why `cog_utils.convert_to_cog` switches to in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` whenever `metadata` is provided** — embedding has to happen at creation, not as a post-step. Do not reintroduce the post-step pattern (we tried; it broke; commit `de80b1a` has the empirical validation).
+- **Landsat merge path (`-merge`) invariants** (fixed 2026-06-29, commit `bef7b8e`; full rationale in `.clinerules.md` rule 18):
+  - **`gen_merge` must never reopen a source scene in `'w'` mode.** Mismatched-CRS inputs reproject into a `tempfile.mkdtemp()` dir (cleaned in `finally`), never overwriting the operator's input file. The old in-place reprojection silently destroyed native-CRS scenes on cross-UTM-zone spans. Pinned by `tests/integration/test_landsat_merge_pipeline.py`.
+  - **`ls_merge`** takes the merge date from `file_naming.extract_datetime_from_filename` (positional `parts[2]` is the *time* on already-renamed files), excludes prior `*merged*.tif` from its inputs, and raises `FileNotFoundError` on an empty dir.
+  - **`cog_utils.rename_with_event` and `cog_utils.get_final_filename` are a lockstep predictor/actual pair**: merged product token = `'_'.join(parts[1:date_index])` (keeps multi-token Sentinel-2 products); any "already exists?" skip check must glob the post-rename name via `get_final_filename`, never the raw name.
+  - The merge post-step rename is one shared helper, `rename_individual_scene_files(directory, event)` — don't re-inline it per loop.
 
 ## How to Run
 

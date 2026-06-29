@@ -25,7 +25,7 @@ USE_MASK="false"
 VISUALIZE="false"
 GAMMA="0.7"
 DST_CRS="native"
-ACTIVATION_EVENT="YYYYMM_Example_Event"
+ACTIVATION_EVENT="YYYYMM_Hazard_Location"
 SOURCE_LABEL=""
 COMPRESSION_LEVEL="22"
 NODATA=""
@@ -68,8 +68,8 @@ done
 if [[ -z "${DATE}" ]]; then
   echo "ERROR: --date is required ('YYYY-MM-DD HH:MM:SS') to select a Satellogic scene" >&2; exit 1
 fi
-if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Example_Event" ]]; then
-  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Example_Event'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
+if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Hazard_Location" ]]; then
+  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Hazard_Location'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
 fi
 if [[ -z "${SOURCE_LABEL}" ]]; then
   echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Satellogic)." >&2; exit 1

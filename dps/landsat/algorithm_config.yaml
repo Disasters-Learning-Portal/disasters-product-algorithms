@@ -6,8 +6,11 @@ algorithm_name: disasters_process_landsat89
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev
-build_command: dps/landsat/build-env.sh
-run_command: dps/landsat/run.sh
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name (matches the
+# dps_tutorial convention: build_command: dps_tutorial/gdal_wrapper/build-env.sh).
+build_command: disasters-product-algorithms/dps/landsat/build-env.sh
+run_command: disasters-product-algorithms/dps/landsat/run.sh
 disk_space: 20GB
 queue: maap-dps-worker-16gb
 repository_url: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git

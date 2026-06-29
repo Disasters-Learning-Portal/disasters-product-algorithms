@@ -5,8 +5,36 @@ import os
 import shutil
 from urllib.parse import urlparse
 
+
+def _read_session(region: str = "us-west-2"):
+    """boto3 Session for reading source/vendor S3 buckets.
+
+    If the ``READ_ROLE_ARN`` env var is set, assume that role first (optionally
+    with ``READ_ROLE_EXTERNAL_ID``) and return a session with the temporary
+    credentials -- this lets a DPS worker (or any caller) read a vendor bucket
+    via an assumable role it has permission to assume. When ``READ_ROLE_ARN`` is
+    unset, fall back to the default credential chain (the worker's ambient role
+    or ``AWS_*`` env vars) -- i.e. behaviour is unchanged unless you opt in.
+    """
+    role_arn = os.environ.get("READ_ROLE_ARN")
+    if role_arn:
+        sts = boto3.client("sts")
+        kwargs = {"RoleArn": role_arn, "RoleSessionName": "disasters-vendor-read"}
+        ext = os.environ.get("READ_ROLE_EXTERNAL_ID")
+        if ext:
+            kwargs["ExternalId"] = ext
+        creds = sts.assume_role(**kwargs)["Credentials"]
+        return boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=region,
+        )
+    return boto3.Session(region_name=region)
+
+
 def retrieve_s3_file_list(bucket : str, prefix : str) -> list[str]:
-    session = boto3.Session(region_name="us-west-2")
+    session = _read_session()
     s3_client = session.client('s3')
     files = [x["Key"] for x in s3_client.list_objects_v2(Bucket = bucket, Prefix = f"{prefix}/")["Contents"] if x["Key"].split("/")[1] != ""]
     return files
@@ -42,7 +70,7 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
             "Other vendors (umbra, capella) ignore this parameter."
         )
 
-    session = boto3.Session(region_name="us-west-2")
+    session = _read_session()
     s3_client = session.client('s3')
     files = [x["Key"] for x in s3_client.list_objects_v2(Bucket = bucket, Prefix = f"{prefix}/")["Contents"] if x["Key"].split("/")[1] != ""]
 
@@ -70,7 +98,7 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
 def read_s3_file(s3filepath : str, file_format : str = "utf-8"):
     bucket = s3filepath.split("/")[2]
     key = "/".join(s3filepath.split("/")[3:])
-    session = boto3.Session(region_name="us-west-2")
+    session = _read_session()
     s3_client = session.client('s3')
     file = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode(file_format)
     return file
@@ -81,7 +109,7 @@ def download_s3_file(s3filepath : str, save_location : str = "/tmp/s3_temp") -> 
     bucket = s3filepath.split("/")[2]
     key = "/".join(s3filepath.split("/")[3:])
     filename = s3filepath.split("/")[-1]
-    session = boto3.Session(region_name="us-west-2")
+    session = _read_session()
     if not os.path.exists(save_location):
         os.mkdir(save_location)
     s3_client = session.client('s3')

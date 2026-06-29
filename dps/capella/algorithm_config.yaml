@@ -76,7 +76,7 @@ inputs:
     type: string
   - name: compression_level
     label: COG compression level
-    doc: ZSTD compression level (1-22).
+    doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. ~1 fast, low compression; ~12 balanced; 22 max compression (default)."
     type: int
     default: 22
   - name: nodata

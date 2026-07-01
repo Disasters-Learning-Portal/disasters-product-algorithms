@@ -401,7 +401,7 @@ Initialize S3 client with automatic credential detection. Tries STS assume-role 
 
 #### `list_s3_files(s3_client, bucket, prefix, suffix='.tif') -> List[str]`
 
-List all files matching prefix and suffix.
+List all files matching prefix and suffix. **Suffix matching is case-insensitive** — `suffix='.tif'` returns both `.tif` and `.TIF` keys (CSDA vendor data ships uppercase `.TIF`). The returned keys keep their real case so a subsequent fetch resolves.
 
 #### `check_s3_file_exists(s3_client, bucket, key) -> bool`
 
@@ -426,6 +426,20 @@ Setup GDAL VSI credentials for S3 streaming (avoids downloading files).
 #### `check_s3_cog_status(s3_client, bucket, key, verbose=False)`
 
 Check if S3 file exists and whether it's already a valid COG.
+
+---
+
+### s3utils
+
+Vendor/source-bucket reads (SAR pipelines) plus the local-filename normalization helper.
+
+#### `local_tif_basename(s3path) -> str`
+
+Local basename for an S3 path, with a `.tif`-family extension forced to lowercase `.tif`; non-tif extensions (and the rest of the name, e.g. `_GEC`) are returned unchanged. CSDA vendor data ships uppercase `.TIF` — the remote key must stay as-is for the fetch to resolve, but the local working copy is normalized so downstream `.tif` assumptions hold.
+
+#### `download_s3_file(s3filepath, save_location='/tmp/s3_temp') -> str`
+
+Download an `s3://…` object to `save_location`, returning the local path. The local filename is normalized via `local_tif_basename` (so a `.TIF` source lands as `.tif` locally), while the object is fetched by its real key. Used by the capella/umbra/satellogic pipelines.
 
 ---
 

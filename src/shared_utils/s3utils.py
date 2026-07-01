@@ -103,12 +103,27 @@ def read_s3_file(s3filepath : str, file_format : str = "utf-8"):
     file = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read().decode(file_format)
     return file
 
+def local_tif_basename(s3path: str) -> str:
+    """Local basename for an S3 path, with a ``.tif``-family extension forced
+    to lowercase ``.tif``. Non-tif extensions are returned unchanged.
+
+    CSDA vendor data ships uppercase ``.TIF``. The remote key must stay as-is
+    for the fetch to resolve, but the local working copy is normalized here so
+    every downstream ``.tif`` assumption (selectors, parsing, output naming)
+    holds regardless of source case. Only the extension is lowercased — the
+    rest of the name (e.g. ``_GEC``) is preserved.
+    """
+    name = s3path.split("/")[-1]
+    stem, ext = os.path.splitext(name)
+    return f"{stem}.tif" if ext.lower() == ".tif" else name
+
+
 def download_s3_file(s3filepath : str, save_location : str = "/tmp/s3_temp") -> str:
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     bucket = s3filepath.split("/")[2]
     key = "/".join(s3filepath.split("/")[3:])
-    filename = s3filepath.split("/")[-1]
+    filename = local_tif_basename(s3filepath)
     session = _read_session()
     if not os.path.exists(save_location):
         os.mkdir(save_location)

@@ -33,7 +33,7 @@ def retrieve_satellogic_resources(date, level, bucket="csda-data-vendor-satellog
 
     metadata = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] != "rasters")]
 
-    tifs = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] == "rasters" and x.endswith(".tif"))]
+    tifs = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] == "rasters" and x.lower().endswith(".tif"))]
 
     return ([f"s3://{bucket}/{x}" for x in metadata], [f"s3://{bucket}/{x}" for x in tifs])
 
@@ -145,8 +145,8 @@ def prepare_scene(paths, meta):
     scale_factor = getScaleFactor(meta)
     sunzen = getSolarZenithAngle(meta)
 
-    in_file = download_s3_file([x for x in paths if x.endswith("_TOA_0.tif")][0])
-    cloud_file = download_s3_file([x for x in paths if x.endswith("_CLOUD_0.tif")][0])
+    in_file = download_s3_file([x for x in paths if x.lower().endswith("_toa_0.tif")][0])
+    cloud_file = download_s3_file([x for x in paths if x.lower().endswith("_cloud_0.tif")][0])
 
     ds = gdal.Open(in_file)
     dc = gdal.Open(cloud_file)

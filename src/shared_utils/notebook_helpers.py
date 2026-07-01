@@ -311,6 +311,8 @@ class SimpleProcessor:
                     resampling=self.config.get('resampling'),
                     clip_to_webmerc=self.config.get('clip_to_webmerc'),
                     stream_from_s3=self.config.get('stream_from_s3', True),
+                    compression=self.config.get('compression', 'ZSTD'),
+                    compression_level=self.config.get('compression_level', 22),
                     metadata=self.metadata,
                 )
 

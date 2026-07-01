@@ -326,7 +326,8 @@ def list_s3_files(s3_client, bucket, prefix, suffix='.tif'):
         s3_client: Boto3 S3 client
         bucket: S3 bucket name
         prefix: S3 prefix to search
-        suffix: File suffix to filter
+        suffix: File suffix to filter (matched case-insensitively, so
+            suffix='.tif' returns both '.tif' and '.TIF' keys)
 
     Returns:
         list: List of S3 keys
@@ -338,7 +339,7 @@ def list_s3_files(s3_client, bucket, prefix, suffix='.tif'):
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             if 'Contents' in page:
                 for obj in page['Contents']:
-                    if obj['Key'].endswith(suffix):
+                    if obj['Key'].lower().endswith(suffix.lower()):
                         keys.append(obj['Key'])
 
         return keys

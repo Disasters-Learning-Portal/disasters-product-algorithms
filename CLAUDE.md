@@ -62,6 +62,7 @@ All sensor CLIs also accept `--metadata-json <path>`. The path points at a JSON 
 - **There is no `normalize_wgs84_crs()` helper anymore.** The old gdal_edit.py-based approach didn't work (PROJ re-canonicalizes the WKT to the ensemble on read). The replacement is just "use EPSG:3857" (see above).
 - GDAL must be installed via conda (not pip) to avoid dylib version mismatches
 - S3 credentials use STS assume-role via `aws_credentials.py` when available, fallback to default creds
+- **`.tif` matching is case-insensitive** (CSDA vendor data ships uppercase `.TIF`). All listing/selection predicates use `name.lower().endswith(...)` — `list_s3_files` (`s3_operations.py`) plus the inline filters in `capella_v2`/`umbra_v2`/`satellogic_v2`. Returned S3 keys keep their real case (a lowercased key 404s on fetch); the **local** copy is normalized to lowercase `.tif` via `shared_utils.s3utils.local_tif_basename`, used by `download_s3_file` + the SAR download-cache checks. COG outputs are already `.tif` by construction. Full detail: `.clinerules.md` rule 20.
 - COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels
 - Nodata auto-detection: uint8=0, int16=-9999, float=-9999.0
 - `main_processor.convert_to_cog` defaults `stream_from_s3=True` — probes `/vsis3/` then falls back to `/tmp` download. Set False for ZSTD-22 heavy workloads where the up-front download avoids many small range-request round-trips.

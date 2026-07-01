@@ -49,8 +49,8 @@ def retrieve_capella_resources(
         for file in filtered_files:
             if (
                 (file.split("/")[1] == selected_subdir)
-                and file.endswith(".tif")
-                and ("_preview.tif" not in file)
+                and file.lower().endswith(".tif")
+                and ("_preview.tif" not in file.lower())
             ):
                 tifs.append(file)
 
@@ -90,7 +90,7 @@ def sigmaCalib(
 
     in_filepath = [x for x in s3_image_paths if "_GEO_" in x][0]
 
-    local_file = f"{save_location}/{os.path.basename(in_filepath)}"
+    local_file = f"{save_location}/{local_tif_basename(in_filepath)}"
 
     if local_file not in glob(f"{save_location}/*"):
 

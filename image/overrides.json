@@ -7,7 +7,6 @@
           { "type": "separator", "rank": 100 },
           {
             "type": "submenu",
-            "label": "Disasters Resources",
             "rank": 101,
             "submenu": {
               "id": "jp-mainmenu-help-disasters",

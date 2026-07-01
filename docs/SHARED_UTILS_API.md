@@ -70,6 +70,8 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `resampling` | str/None | No | `None` | Warp resampling (`'near'`, `'bilinear'`, `'cubic'`, `'average'`). `None` = auto-detect from data. |
 | `clip_to_webmerc` | bool/None | No | `None` | Clip output to Web Mercator's ±85° lat domain. `None` = auto-detect via `needs_webmerc_clip()`. |
 | `stream_from_s3` | bool | No | `True` | Probe `/vsis3/` first; fall back to `/tmp` download. Set False to force download. |
+| `compression` | str | No | `'ZSTD'` | COG compression codec. Forwarded to `main_processor.convert_to_cog`. |
+| `compression_level` | int | No | `22` | Compression level (ZSTD `1`=fast/larger … `22`=slow/smallest). Omitting it keeps the library default 22; the `simple_disaster_template` notebooks pass `9`. |
 | `overwrite` | bool | No | `False` | Overwrite existing files |
 | `verify` | bool | No | `True` | Verify results after processing |
 | `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization. Forwarded to `shared_utils.file_naming.categorize_file`. |

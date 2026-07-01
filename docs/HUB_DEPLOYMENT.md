@@ -238,6 +238,58 @@ of the build itself.
 - Layer 1 ran when you didn't expect it to → somebody touched
   `image/environment.yml`. Confirm via `git log -- image/environment.yml`.
 
+## Customizing the JupyterLab UI (baked-in `overrides.json`)
+
+The image ships an [`image/overrides.json`](../image/overrides.json) that
+customizes JupyterLab's UI with **no extension and no node build**. The
+Dockerfile COPYs it to:
+
+```
+/srv/conda/envs/notebook/share/jupyter/lab/settings/overrides.json
+```
+
+— the system-wide JupyterLab settings-override path
+(`<sys-prefix>/share/jupyter/lab/settings/overrides.json`); the sys-prefix is
+the same `/srv/conda/envs/notebook` conda env Layer 1 builds into.
+
+Current use: a **Help → Disasters Resources** submenu — *Report a Bug* → repo
+Issues, *Community Forum* → repo GitHub Discussions, *Email Support* → `mailto:`.
+Added 2026-07-01 (commit `c6a4a97`), via the built-in `help:open` command.
+
+Non-obvious rules when editing it:
+
+- **Menu customizations MERGE with the defaults; they do NOT replace them.**
+  `@jupyterlab/mainmenu-extension:plugin` special-cases this — for every *other*
+  plugin, `overrides.json` *replaces* the default settings. So appending items
+  to the Help menu (`id: jp-mainmenu-help`) keeps JupyterLab's built-in Help
+  entries (About, reference links, …) intact. Don't try to re-declare the
+  defaults.
+- **External links MUST set `"newBrowserTab": true`.** Otherwise `help:open`
+  loads the URL in an *in-lab iframe*, and any site sending
+  `X-Frame-Options: DENY` or a restrictive `frame-ancestors` CSP (GitHub and
+  most SaaS) renders a blank "refused to connect" pane. Every link in our
+  submenu sets it.
+- **Submenu item shape (JupyterLab 4 schema):** an item with
+  `"type": "submenu"` carries a nested `submenu` object (`id`, `label`,
+  `items`); leaf items are
+  `{"command": "help:open", "args": {"text", "url", "newBrowserTab"}, "rank"}`.
+- **No rebuild needed to iterate on the JSON** — mount it over the baked-in
+  path in any existing image and launch Lab:
+  ```bash
+  docker run -p 8888:8888 \
+    -v "$PWD/image/overrides.json":/srv/conda/envs/notebook/share/jupyter/lab/settings/overrides.json \
+    <image> jupyter lab --ip 0.0.0.0
+  ```
+  Then check **Help → Disasters Resources**. `python -m json.tool
+  image/overrides.json` catches syntax errors before you build.
+- **It is its own COPY layer** (between Layer 1 and Layer 2 in the Dockerfile),
+  and `image/**` is **not** in the workflows' `paths-ignore` — so editing
+  `overrides.json` *does* trigger a hub rebuild (unlike a docs-only change). It
+  busts its own layer + Layer 2 (~30-60s); conda Layer 1 stays cached.
+
+Ref: JupyterLab
+[Interface Customization](https://jupyterlab.readthedocs.io/en/latest/user/interface_customization.html).
+
 ## Design history (short)
 
 The hub-image build mechanism has gone through three iterations:

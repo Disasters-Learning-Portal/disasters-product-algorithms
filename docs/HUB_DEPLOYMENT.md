@@ -273,6 +273,14 @@ Non-obvious rules when editing it:
   `"type": "submenu"` carries a nested `submenu` object (`id`, `label`,
   `items`); leaf items are
   `{"command": "help:open", "args": {"text", "url", "newBrowserTab"}, "rank"}`.
+- **`label` goes on the `submenu` object, NOT on the item.** The mainmenu
+  schema sets `additionalProperties: false` on a menu *item*, so a stray
+  `label` (or any other unknown key) on the submenu item fails settings
+  validation (`data @ /menus/8/items/1 ... must NOT have additional
+  properties`) and takes down the ENTIRE `mainmenu-extension` plugin —
+  cascading into `help-extension:resources` + `mainmenu-extension:recents`,
+  so *no* custom menu renders. The submenu's display name comes from the
+  nested `submenu.label`. Discovered + fixed 2026-07-01 (commit `06bd552`).
 - **No rebuild needed to iterate on the JSON** — mount it over the baked-in
   path in any existing image and launch Lab:
   ```bash

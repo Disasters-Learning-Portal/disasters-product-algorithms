@@ -1,10 +1,14 @@
 #!/usr/local/anaconda3/bin/python
 
 """
-sentinel2_functions.py
+sentinel2_function.py
 
-Name:       Kaylee Sharp
-Date:       February 2024
+Name:           Kaylee Sharp
+Edited:         Aaron Serre
+
+Date Created:   February 2024
+Date Edited:    July 2026       
+
 """
 
 import os
@@ -337,9 +341,9 @@ def gen_true_color(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
+  if mask is not None:
+        print('\t* Applying cloud mask')
+        apply_cloud_mask(outname, mask)
 
 def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -377,10 +381,9 @@ def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 def gen_swir(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
   # extract bands from .jp2 file if necessary
@@ -413,10 +416,10 @@ def gen_swir(safe, outname, level, mask=None, rayleigh=False):
   print('\t* Generating short wave infrared geotiff')
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
-  # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
+ # apply cloud mask
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 
 def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -451,9 +454,9 @@ def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 
 def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -501,9 +504,9 @@ def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, ndwi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask) 
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 
 def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -551,9 +554,9 @@ def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, mndwi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 
 def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -601,9 +604,9 @@ def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, ndvi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 
 def gen_nbr(safe, outname, level, mask=None):
   # check for band geotiffs
@@ -646,10 +649,9 @@ def gen_nbr(safe, outname, level, mask=None):
   result = dump_geotiff_float(outname, nbr, projref, in_geo)
 
   # apply cloud mask
-  if mask:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
+  if mask is not None:
+      print('\t* Applying cloud mask')
+      apply_cloud_mask(outname, mask)
 def download_cdl(image, year, outname):
   ## Getting corners of image in Albers projection
     im_rst = gdal.Open(image)

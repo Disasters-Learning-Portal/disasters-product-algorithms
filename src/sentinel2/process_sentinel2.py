@@ -800,7 +800,7 @@ else:
             print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
             continue
         # Determine if this product should be masked (indices only)
-        is_index = any(x in prod_dir.lower() for x in ['ndvi', 'ndwi', 'mndwi', 'nbr'])
+        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
         mask_status = args.mask if is_index else False
 
         # merge products of the same date

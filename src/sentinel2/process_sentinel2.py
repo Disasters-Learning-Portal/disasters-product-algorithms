@@ -2,7 +2,11 @@
 process_sentinel2.py
 
 Name:           Kaylee Sharp
-Date:           February 2025
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026       
+
 """
 
 from datetime import datetime
@@ -358,7 +362,7 @@ else:
         try:
             # produce true color image
             print('\n* Processing true color')
-            gen_true_color(ddir, prod_name, level, cloudMask, ray)
+            gen_true_color(ddir, prod_name, level, None, ray)
 
             # Convert to COG (default) and optionally rename with event
             # Skip COG conversion if merging - will convert merged file instead
@@ -402,7 +406,7 @@ else:
         try:
             # produce natural color image
             print('\n* Processing natural color')
-            gen_natural_color(ddir, prod_name, level, cloudMask, ray)
+            gen_natural_color(ddir, prod_name, level, None, ray)
 
             # Convert to COG (default) and optionally rename with event
             # Skip COG conversion if merging - will convert merged file instead
@@ -446,7 +450,7 @@ else:
         try:
           # produce SWIR image
           print('\n* Porcessing short wave infrared')
-          gen_swir(ddir, prod_name, level, cloudMask, ray)
+          gen_swir(ddir, prod_name, level, None, ray)
 
           # Convert to COG (default) and optionally rename with event
           # Skip COG conversion if merging - will convert merged file instead
@@ -490,7 +494,7 @@ else:
         try:
           # produce color infrared image
           print('\n* Processing color infrared')
-          gen_color_infrared(ddir, prod_name, level, cloudMask, ray)
+          gen_color_infrared(ddir, prod_name, level, None, ray)
 
           # Convert to COG (default) and optionally rename with event
           # Skip COG conversion if merging - will convert merged file instead
@@ -795,9 +799,13 @@ else:
         if existing_merged and not args.force:
             print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
             continue
+        # Determine if this product should be masked (indices only)
+        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
+        mask_status = args.mask if is_index else False
+
         # merge products of the same date
-        print('Merging:', prod_dir)
-        merged_file = s2_merge(prod_dir, args.mask)
+        print(f'Merging: {prod_dir} (Masking: {mask_status})')
+        merged_file = s2_merge(prod_dir, mask_status)
 
         # Convert merged file to COG and optionally rename with event
         if not args.tif_only:

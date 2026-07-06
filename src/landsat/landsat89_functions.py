@@ -3,8 +3,11 @@
 """
 landsat89_functions.py
 
-Name:        Kaylee Sharp
-Date:        February 2025
+Name:           Kaylee Sharp
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026  
 
 """
 
@@ -311,7 +314,7 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(img)
   out_ds = None
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -431,7 +434,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -554,7 +557,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -675,7 +678,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -761,7 +764,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -846,7 +849,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -930,7 +933,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -1035,7 +1038,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -1117,7 +1120,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 

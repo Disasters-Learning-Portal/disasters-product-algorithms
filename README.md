@@ -349,6 +349,14 @@ the same bugs at PR time as a backstop. For lower-level `shared_utils`
 contributions that aren't a full sensor pipeline, see
 [docs/ADDING_FUNCTIONS_TUTORIAL.md](docs/ADDING_FUNCTIONS_TUTORIAL.md).
 
+## Running on MAAP DPS
+
+Landsat and Sentinel-2 can run as jobs on the MAAP
+[Data Processing System (DPS)](https://docs.maap-project.org/en/latest/technical_tutorials/dps_tutorial/dps_tutorial_demo.html).
+The DPS build/run scripts and registration manifests live under [`dps/`](dps/);
+see [docs/DPS.md](docs/DPS.md) for the full setup, local-test recipe, and the
+registration helper (`python dps/register_algorithms.py`).
+
 ## Docker Integration
 
 This repo builds the JupyterHub Docker image used on the Disasters Hub

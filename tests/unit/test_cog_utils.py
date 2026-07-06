@@ -197,21 +197,24 @@ class TestGetFinalFilename:
         from shared_utils.cog_utils import get_final_filename
         path = "/path/LC08_trueColor_20250922_185617_046028.tif"
         result = get_final_filename(path, "202512_Flood_WA")
-        assert "202512_Flood_WA" in result
+        assert "202512_Flood_WA" not in result   # event name no longer prefixed
         assert "2025-09-22" in result
-        assert result.endswith(".tif")
+        assert result.endswith("_day.tif")
+        assert "LC08_trueColor" in result
 
     def test_sentinel2_with_event_name(self):
         from shared_utils.cog_utils import get_final_filename
         path = "/path/S2B_MSIL2A_colorInfrared_20251111_161419_T17RLN.tif"
         result = get_final_filename(path, "202511_Fire_CA")
-        assert "202511_Fire_CA" in result
+        assert "202511_Fire_CA" not in result   # event name no longer prefixed
         assert "2025-11-11" in result
+        assert "S2B_MSIL2A_colorInfrared" in result
 
     def test_merged_file_with_event_name(self):
         from shared_utils.cog_utils import get_final_filename
         path = "/path/LC08_trueColor_20250922_merged.tif"
         result = get_final_filename(path, "202512_Flood_WA")
+        assert "202512_Flood_WA" not in result   # event name no longer prefixed
         assert "merged" in result
         assert "2025-09-22" in result
 
@@ -232,8 +235,9 @@ class TestRenameWithEvent:
         src.write_bytes(b"dummy")
         result = rename_with_event(str(src), "202512_Flood_WA", quiet=True)
         assert os.path.exists(result)
-        assert "202512_Flood_WA" in os.path.basename(result)
+        assert "202512_Flood_WA" not in os.path.basename(result)   # event name no longer prefixed
         assert "2025-09-22" in os.path.basename(result)
+        assert os.path.basename(result).endswith("_day.tif")
 
     def test_sentinel2_rename(self, tmp_path):
         from shared_utils.cog_utils import rename_with_event
@@ -241,7 +245,7 @@ class TestRenameWithEvent:
         src.write_bytes(b"dummy")
         result = rename_with_event(str(src), "202511_Fire_CA", quiet=True)
         assert os.path.exists(result)
-        assert "202511_Fire_CA" in os.path.basename(result)
+        assert "202511_Fire_CA" not in os.path.basename(result)   # event name no longer prefixed
         assert "2025-11-11" in os.path.basename(result)
 
     def test_invalid_filename_raises_valueerror(self, tmp_path):

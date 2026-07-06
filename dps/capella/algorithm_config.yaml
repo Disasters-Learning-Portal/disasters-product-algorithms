@@ -1,0 +1,114 @@
+algorithm_name: capella
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Process Capella SAR scenes into Cloud Optimized GeoTIFF disaster-response
+  products. Fetches the source GEO rasters from the CSDA Capella vendor S3
+  bucket (keyed by date/bucket/prefix), computes the sigma-naught calibration
+  product, optionally applies a Lee speckle filter, and writes a COG with
+  activation-event GeoTIFF metadata tags.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/capella/build-env.sh
+run_command: disasters-product-algorithms/dps/capella/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements. SAR scenes are smaller than optical mosaics.
+ram_min: 32
+cores_min: 4
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for Capella SAR sigma0 COG disaster-product generation.
+citation: NASA Disasters Program
+keywords: capella, sar, sigma0, cog, disasters, flood
+# AWS read access: NO file input -- the CLI FETCHES source rasters from the CSDA
+# vendor bucket (default csdap-capellaspace-delivery, prefix 'disasters') at run
+# time. The DPS-worker role needs read access to that bucket (confirmed available).
+inputs:
+  - name: date
+    label: Target date
+    doc: Target acquisition date, YYYYMMDDHHMMSS. The closest matching Capella scene in the vendor bucket is selected.
+    type: string
+  - name: product
+    label: Calibration product
+    doc: "Calibration product to generate. Only 'sigma' (sigma-naught) is supported."
+    type: string
+    default: "sigma"
+  - name: bucket
+    label: Vendor S3 bucket
+    doc: CSDA Capella vendor S3 bucket to fetch source rasters from. The DPS worker must have read access.
+    type: string
+    default: "csdap-capellaspace-delivery"
+  - name: prefix
+    label: Vendor S3 prefix
+    doc: Key prefix within the vendor bucket to search for scenes.
+    type: string
+    default: "disasters"
+  - name: apply_filter
+    label: Apply Lee filter
+    doc: Apply a Lee speckle filter to the sigma0 product.
+    type: boolean
+    default: false
+  - name: filter_size
+    label: Lee filter window size
+    doc: Lee filter window size in pixels (only used when apply_filter is true).
+    type: int
+    default: 5
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857 | EPSG:4326."
+    type: string
+    default: "native"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
+    type: string
+    default: "YYYYMM_Hazard_Location"
+  - name: source_label
+    label: Source
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Copernicus, Capella Space."
+    type: string
+  - name: compression_level
+    label: COG compression level
+    doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. ~1 fast, low compression; ~12 balanced; 22 max compression (default)."
+    type: int
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string
+    default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: save_png
+    label: Save PNG quicklook
+    doc: Also write a .png quicklook next to each product COG.
+    type: boolean
+    default: true
+  - name: png_min
+    label: PNG min (optional)
+    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: png_max
+    label: PNG max (optional)
+    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: delete_cog
+    label: Delete COG from home after upload
+    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
+    type: boolean
+    default: true
+outputs:
+  - name: output
+    type: Directory

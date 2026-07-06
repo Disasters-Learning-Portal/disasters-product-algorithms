@@ -1,4 +1,4 @@
-FROM pangeo/pangeo-notebook:2025.08.14
+FROM pangeo/pangeo-notebook:2026.06.04
 
 LABEL org.opencontainers.image.source="https://github.com/Disasters-Learning-Portal/disasters-product-algorithms"
 
@@ -11,6 +11,18 @@ USER ${NB_USER}
 ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
+
+# === JupyterLab Help-menu customization ===
+# Bake the "Disasters Resources" submenu into Help (Report a Bug -> GitHub
+# Issues, Community Forum -> GitHub Discussions, Email Support -> mailto).
+# Merges into the default Help menu via @jupyterlab/mainmenu-extension
+# settings -- no extension, no node build. JupyterLab reads system-wide
+# setting overrides from <sys-prefix>/share/jupyter/lab/settings/overrides.json;
+# the conda prefix here is /srv/conda/envs/notebook (same as Layer 1). Each
+# link uses newBrowserTab (GitHub sends X-Frame-Options: DENY, so the in-lab
+# iframe would render a refused page).
+COPY --chown=${NB_USER}:${NB_USER} image/overrides.json \
+     /srv/conda/envs/notebook/share/jupyter/lab/settings/overrides.json
 
 # === Layer 2: install disasters-product-algorithms from local checkout ===
 # Pre-consolidation this was `pip install git+https://...@$ALGORITHMS_REF`

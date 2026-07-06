@@ -3,7 +3,7 @@ Lint: pyproject.toml is in sync with the sensor directories on disk,
 and each sensor has a matching pair of workflow notebooks that aren't
 contaminated by copy-paste leftovers from another sensor.
 
-A "sensor directory" is any top-level dir containing both `cli.py` and at
+A "sensor directory" is any dir under `src/` containing both `cli.py` and at
 least one `process_*.py`. For each such dir, we assert:
 
   1. `<sensor>*` appears in [tool.setuptools.packages.find].include
@@ -36,6 +36,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_ROOT / "src"          # packages live under src/ (src layout)
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 NOTEBOOKS_DIR = REPO_ROOT / "notebooks"
 TESTING_NOTEBOOKS_DIR = REPO_ROOT / "notebooks" / "testing-notebooks"
@@ -130,7 +131,7 @@ def check_notebook_conformance(
 
 
 def find_sensor_dirs(root: Path) -> list[Path]:
-    """Top-level dirs that look like a sensor pipeline (cli.py + process_*.py)."""
+    """Package dirs under src/ that look like a sensor pipeline (cli.py + process_*.py)."""
     sensors = []
     for child in sorted(root.iterdir()):
         if not child.is_dir():
@@ -157,9 +158,9 @@ def main() -> int:
     )
     scripts = pyproject.get("project", {}).get("scripts", {})
 
-    sensors = find_sensor_dirs(REPO_ROOT)
+    sensors = find_sensor_dirs(SRC_DIR)
     if not sensors:
-        print("ERROR: no sensor directories found — check repo layout.", file=sys.stderr)
+        print("ERROR: no sensor directories found under src/ — check repo layout.", file=sys.stderr)
         return 1
 
     failures: list[str] = []

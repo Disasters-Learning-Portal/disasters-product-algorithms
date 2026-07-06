@@ -34,7 +34,7 @@ Triggers on every `push` and `pull_request` to `dev` or `main`. Two independent 
 ### Job 1: `sensor-consistency`
 
 Runs `python tools/check_sensor_consistency.py`. The script walks every
-top-level directory in the repo, identifies "sensor directories" (those
+directory under `src/`, identifies "sensor directories" (those
 containing both `cli.py` and at least one `process_*.py`), and asserts
 three invariants per sensor:
 
@@ -124,6 +124,25 @@ from pyproject. Adding a new sensor (via `tools/new_sensor.py`) gets both
 loops exercised automatically. Combined with `sensor-consistency`, this
 means a green CI = your CLIs at least import cleanly in a fresh env that
 matches the hub image's dep stack.
+
+#### Coverage boundary — what `cli-smoke` does *not* catch
+
+`cli-smoke` proves the CLIs **import and parse args**; it does **not** execute the
+processing path. `<cli> --help` short-circuits through argparse *before* the dispatch
+runs, and the dispatch scripts have no importable `main()` — `process_landsat89.py`
+runs under `if __name__ == "__main__":`, `process_sentinel2.py` at bare module level —
+so the dispatch loop can't be import-tested either. A runtime error there (e.g. a
+`NameError` on a name whose assignment was removed but is still referenced by the index
+products) is invisible to this job.
+
+Two targeted guards cover that path instead (both in `tests/integration/`, see
+`.clinerules.md` rule #21):
+
+- **Product code** — `test_sensor_mask_smoke.py` imports the `src/<sensor>/<sensor>_functions.py`
+  modules (they load under the `tests/conftest.py` osgeo stub) and executes `apply_cloud_mask`.
+- **Dispatch itself** — `test_dispatch_undefined_names.py` uses `symtable` to flag any name
+  referenced-but-never-bound at module scope in `process_*.py` (resolving `from X import *`),
+  catching the undefined-name class statically without a scene fixture or a `main()` refactor.
 
 #### When `cli-smoke` fails
 
@@ -269,7 +288,7 @@ template. See `.github/RULESETS.md` for the full migration rationale.
 
 Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
 
-- **Sensor-directory detection** (lines 32-45): top-level dirs (sorted,
+- **Sensor-directory detection** (lines 32-45): dirs under `src/` (sorted,
   non-hidden) containing both `cli.py` and at least one `process_*.py`.
   Skips `.`-prefixed and `_`-prefixed dirs.
 - **Per-sensor validation** (lines 76-108):

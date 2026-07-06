@@ -12,10 +12,16 @@ NASA Disasters product algorithms for satellite imagery processing. Converts raw
 
 ## Project Structure
 
-- `shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
+All Python packages live under `src/` (a conventional **src layout**). `src/` is only a
+package-discovery root (`[tool.setuptools.packages.find] where = ["src"]`), **not** part of
+the import path — so packages are still imported by their bare name (`import shared_utils`,
+`from sentinel2.sentinel2_functions import *`) and the console scripts keep their
+`<pkg>.cli:<verb>_cli` targets. Importing requires an install (`pip install -e .`).
+
+- `src/shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
+- `src/landsat/`, `src/sentinel2/`, `src/satellogic/`, `src/umbra/`, `src/capella/` — Sensor-specific product generation (CLI entry points)
+- `src/raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
 - `notebooks/` — Operator-facing Jupyter templates for disaster event processing
-- `landsat/`, `sentinel2/`, `satellogic/`, `umbra/` — Sensor-specific product generation (CLI entry points)
-- `raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
 - `tests/fixtures/` — Real-data crops committed for tests (small, <500KB each; e.g. `gaia_atlanta_sample.tif` is a 256×256 GAIA Web-Mercator crop)
 - `docs/` — API reference, deployment guides, resampling guide, contributor tutorial
 
@@ -56,10 +62,17 @@ All sensor CLIs also accept `--metadata-json <path>`. The path points at a JSON 
 - **There is no `normalize_wgs84_crs()` helper anymore.** The old gdal_edit.py-based approach didn't work (PROJ re-canonicalizes the WKT to the ensemble on read). The replacement is just "use EPSG:3857" (see above).
 - GDAL must be installed via conda (not pip) to avoid dylib version mismatches
 - S3 credentials use STS assume-role via `aws_credentials.py` when available, fallback to default creds
-- COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels
+- **`.tif` matching is case-insensitive** (CSDA vendor data ships uppercase `.TIF`). All listing/selection predicates use `name.lower().endswith(...)` — `list_s3_files` (`s3_operations.py`) plus the inline filters in `capella_v2`/`umbra_v2`/`satellogic_v2`. Returned S3 keys keep their real case (a lowercased key 404s on fetch); the **local** copy is normalized to lowercase `.tif` via `shared_utils.s3utils.local_tif_basename`, used by `download_s3_file` + the SAR download-cache checks. COG outputs are already `.tif` by construction. Full detail: `.clinerules.md` rule 20.
+- COG default: ZSTD compression level 22, 512x512 tiles, 5 overview levels. The `simple_disaster_template` notebooks expose `COMPRESSION`/`COMPRESSION_LEVEL` in their INPUTS cell (default **9**), and `SimpleProcessor` now forwards `config['compression'/'compression_level']` to `convert_to_cog` (it previously dropped them → always 22). The library-wide default stays 22.
 - Nodata auto-detection: uint8=0, int16=-9999, float=-9999.0
+- **`-mask` (Landsat/Sentinel-2) masks index products + water extent only, never color composites** (changed in #28, 2026-07-06). The cloud mask is passed to `genNdvi/genNdwi/genmNdwi/genEvi/genNbr` (+ S2 `gen_ndwi/gen_mndwi/gen_ndvi/gen_nbr`) and `gen_water_extent`, but `None` to `genTrueColor/genNaturalColor/genColorInfrared/genPanchromatic` (+ S2 `gen_swir`). Merge-path masking is gated by an **exact product-folder basename** match (`is_index = os.path.basename(...).lower() in {ndvi,ndwi,mndwi,evi,nbr}`), not a substring search. Full rationale in `.clinerules.md` rule 22.
 - `main_processor.convert_to_cog` defaults `stream_from_s3=True` — probes `/vsis3/` then falls back to `/tmp` download. Set False for ZSTD-22 heavy workloads where the up-front download avoids many small range-request round-trips.
 - **GDAL 3.10+ refuses to update a COG in-place.** Post-step `gdal.Open(path, GA_Update); ds.SetMetadata(...)` returns `RuntimeError: ... has COG layout. Updating it will generally result in losing part of the optimizations.` With `IGNORE_COG_LAYOUT_BREAK=YES` the call succeeds but the result fails `cog_validate` (main IFD offset bloats, overview-IFD ordering inverted). **This is why `cog_utils.convert_to_cog` switches to in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` whenever `metadata` is provided** — embedding has to happen at creation, not as a post-step. Do not reintroduce the post-step pattern (we tried; it broke; commit `de80b1a` has the empirical validation).
+- **Landsat merge path (`-merge`) invariants** (fixed 2026-06-29, commit `bef7b8e`; full rationale in `.clinerules.md` rule 18):
+  - **`gen_merge` must never reopen a source scene in `'w'` mode.** Mismatched-CRS inputs reproject into a `tempfile.mkdtemp()` dir (cleaned in `finally`), never overwriting the operator's input file. The old in-place reprojection silently destroyed native-CRS scenes on cross-UTM-zone spans. Pinned by `tests/integration/test_landsat_merge_pipeline.py`.
+  - **`ls_merge`** takes the merge date from `file_naming.extract_datetime_from_filename` (positional `parts[2]` is the *time* on already-renamed files), excludes prior `*merged*.tif` from its inputs, and raises `FileNotFoundError` on an empty dir.
+  - **`cog_utils.rename_with_event` and `cog_utils.get_final_filename` are a lockstep predictor/actual pair**: merged product token = `'_'.join(parts[1:date_index])` (keeps multi-token Sentinel-2 products); any "already exists?" skip check must glob the post-rename name via `get_final_filename`, never the raw name.
+  - The merge post-step rename is one shared helper, `rename_individual_scene_files(directory, event)` — don't re-inline it per loop.
 
 ## How to Run
 
@@ -93,8 +106,8 @@ See `docs/SHARED_UTILS_API.md` for complete function signatures.
 
 The `.github/workflows/lint.yml` workflow runs on every push and PR to `dev`/`main`:
 
-- **`sensor-consistency`**: runs `python tools/check_sensor_consistency.py`, which walks every top-level dir containing `cli.py` + `process_*.py` and asserts each is correctly wired into `pyproject.toml` (both `[tool.setuptools.packages.find].include` and `[project.scripts]`, with the canonical `<pkg>.cli:<verb>_cli` target shape).
-- **`cli-smoke`**: bootstraps a conda env from `dev-conda-deps.txt`, runs `pip install .`, then iterates `[project.scripts]` and runs `<script> --help` on each. Catches the bug class where a console script is registered but its package isn't installable (the failure mode that broke the initial capella rollout — `ModuleNotFoundError` on a fresh hub pod despite the shim being in `bin/`).
+- **`sensor-consistency`**: runs `python tools/check_sensor_consistency.py`, which walks every dir under `src/` containing `cli.py` + `process_*.py` and asserts each is correctly wired into `pyproject.toml` (both `[tool.setuptools.packages.find].include` and `[project.scripts]`, with the canonical `<pkg>.cli:<verb>_cli` target shape).
+- **`cli-smoke`**: bootstraps a conda env from `dev-conda-deps.txt`, runs `pip install .`, then iterates `[project.scripts]` and runs `<script> --help` on each. Catches the bug class where a console script is registered but its package isn't installable (the failure mode that broke the initial capella rollout — `ModuleNotFoundError` on a fresh hub pod despite the shim being in `bin/`). **Coverage boundary:** `--help` and the bare `import` do *not* execute the processing path, and the dispatch scripts have no importable `main()` (they run under `if __name__ == "__main__":` / bare module level) — so a runtime error in the dispatch is invisible to CI. That path is guarded separately by `tests/integration/test_sensor_mask_smoke.py` (runtime) + `test_dispatch_undefined_names.py` (symtable static check); see `.clinerules.md` rule 21 and `docs/AUTOMATION.md`.
 
 Run locally before pushing:
 
@@ -133,7 +146,19 @@ Pre-consolidation there was a third file, `hub-conda-deps.txt`, which was auto-s
   - Layer 1 (~2-3 min): `conda env update` against `image/environment.yml`. Cache key = env.yml content.
   - Layer 2 (~30s): `pip install --no-deps /srv/repo/algorithms` against the COPYed code. Cache key = the COPYed files (minus `.dockerignore` exclusions).
 - **Adding a new Python dep**: see the dependency-source-of-truth table above.
+- **JupyterLab UI customization is baked in via `image/overrides.json`** (COPYed to `/srv/conda/envs/notebook/share/jupyter/lab/settings/overrides.json`, the sys-prefix settings-override path). Currently a **Help → Disasters Resources** submenu (bug report → repo Issues, forum → repo Discussions, email → mailto). No extension / node build — uses the built-in `help:open` command. Two non-obvious rules: menu customizations **merge** with (don't replace) the default Help menu, and external links must set `newBrowserTab: true` (else GitHub/SaaS pages hit `X-Frame-Options: DENY` in the in-lab iframe). Editing it triggers a hub rebuild (`image/**` isn't in `paths-ignore`). Full how-to + no-rebuild iteration trick in `docs/HUB_DEPLOYMENT.md`.
 - **Bumping the Pangeo base image**: edit the `FROM pangeo/pangeo-notebook:<tag>` line in `image/Dockerfile`. Repo-agnostic; works the same way it did pre-consolidation.
 - **Pulling NASA-IMPACT upstream changes** (rare; ~3 commits in 5 months historically): `git subtree pull --prefix=image https://github.com/Disasters-Learning-Portal/pangeo-notebook-veda-image.git main --squash` (the archived fork's remote URL stays valid).
 - **`pyproject.toml`'s conda-dep comment block** is the DEV-LOCAL install spec (what to conda-install on your laptop). The hub image gets its conda deps from `image/environment.yml`, not from that comment block.
 - If `process_*` CLIs are missing on a fresh hub pod: check the `build-and-push*.yaml` Actions log first. Most common cause is the recently-pushed commit didn't trigger a rebuild (check the `paths-ignore:` filter — doc-only changes intentionally skip the build). Full flow + debug checklist in `docs/HUB_DEPLOYMENT.md`.
+
+## MAAP DPS (Data Processing System)
+
+All 5 sensors are registerable as MAAP DPS algorithms. Plumbing lives in `dps/` (per-sensor `algorithm_config.yaml` + `run.sh` + `build-env.sh`, shared `environment.yml` + `_finalize.sh` + `register_algorithms.py`). **Full guide + every gotcha: `docs/DPS.md`.** The non-obvious essentials:
+
+- **Registration schema is OGC/CWL**, not the legacy maap-py format. `algorithm_name` must match `^[a-z0-9_-]+$` (lowercase, no spaces/slashes — e.g. `landsat-8-9`). Use **`base_container_url`** (NOT `docker_container_url`) = `mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0`. **`build_command`/`run_command` MUST be prefixed with the repo dir name** (`disasters-product-algorithms/dps/<sensor>/...`) — MAAP clones to `/app/<repo>/` and runs from `/app`. Resources are `ram_min`/`cores_min`/`outdir_max` (not queue/disk_space). `inputs` is a flat list `{name,label,doc,type,default}`; valid types = string/int/File/Directory/long/float/boolean/double (no enum/array) — optional = `string` + `default: ""`, toggles = `boolean`.
+- **run.sh receives `--name value` flags** (CWL), not positional `$1`. File inputs are localized to a path; booleans may arrive as presence or value (parsers handle both, default false). Shared output flow is in **`dps/_finalize.sh`** (don't duplicate per sensor): `~/drcs_outputs/<event>/` → PNG (`save_png`, via `shared_utils.plotting.save_cog_png`) → `output/` (DPS uploads — COG never lost) → S3 (`enable_s3_upload` → `nasa-disasters`) → delete COG (`delete_cog` default true).
+- **Guard rails:** `activation_event` default `YYYYMM_Hazard_Location` is REJECTED by run.sh (forces a real event); `source_label` is required (no default); `dst_crs` defaults to `native` (EPSG:3857 is NOT required for `build_stac`).
+- **Register from the MAAP hub's Register Algorithm UI** (the OGC/CWL path). `dps/register_algorithms.py` uses maap-py 4.2.0's LEGACY schema — don't use it for these configs. The GUI extensions need `maapApiUrl=https://api.maap-project.org` (NO `/api` suffix) + `maapToken` (MAAP_PGT) in Settings → MAAP Settings. `maap-py` + the 3 MAAP JupyterLab extensions are baked into `image/environment.yml` so registration works from the Disasters hub.
+- **SAR sensors (capella/umbra/satellogic) fetch from CSDA vendor buckets** (no file input) — the DPS-worker IAM role needs read access (not settable from this repo). Optional `READ_ROLE_ARN` (+ `READ_ROLE_EXTERNAL_ID`) env makes `shared_utils.s3utils._read_session` assume a role for vendor reads.
+- One container is built per repo+branch (all algorithms share it, differing by `run_command`); "My Builds" shows the repo name. The **Submit Jobs Process dropdown** is the real "is it deployed" check.

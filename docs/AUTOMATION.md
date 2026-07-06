@@ -125,6 +125,25 @@ loops exercised automatically. Combined with `sensor-consistency`, this
 means a green CI = your CLIs at least import cleanly in a fresh env that
 matches the hub image's dep stack.
 
+#### Coverage boundary — what `cli-smoke` does *not* catch
+
+`cli-smoke` proves the CLIs **import and parse args**; it does **not** execute the
+processing path. `<cli> --help` short-circuits through argparse *before* the dispatch
+runs, and the dispatch scripts have no importable `main()` — `process_landsat89.py`
+runs under `if __name__ == "__main__":`, `process_sentinel2.py` at bare module level —
+so the dispatch loop can't be import-tested either. A runtime error there (e.g. a
+`NameError` on a name whose assignment was removed but is still referenced by the index
+products) is invisible to this job.
+
+Two targeted guards cover that path instead (both in `tests/integration/`, see
+`.clinerules.md` rule #21):
+
+- **Product code** — `test_sensor_mask_smoke.py` imports the `src/<sensor>/<sensor>_functions.py`
+  modules (they load under the `tests/conftest.py` osgeo stub) and executes `apply_cloud_mask`.
+- **Dispatch itself** — `test_dispatch_undefined_names.py` uses `symtable` to flag any name
+  referenced-but-never-bound at module scope in `process_*.py` (resolving `from X import *`),
+  catching the undefined-name class statically without a scene fixture or a `main()` refactor.
+
 #### When `cli-smoke` fails
 
 | Symptom | Likely cause |

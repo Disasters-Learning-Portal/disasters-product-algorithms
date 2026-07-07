@@ -9,6 +9,7 @@ Date:        February 2025
 """
 
 import glob
+import re
 import os
 import tempfile
 import numpy as np
@@ -179,7 +180,20 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
     os.mkdir(masked_dir)
   
   # masked output filename
-  masked_out_file = os.path.basename(tif_to_mask).replace('.tif', '_masked.tif')
+  in_basename = os.path.basename(tif_to_mask)
+  if '_merged' in in_basename:
+    # Merged filenames: sensor_product_merged_datetime_day.tif -> insert
+    # _masked right after "_merged", keeping datetime/_day suffix last:
+    # sensor_product_merged_masked_datetime_day.tif
+    masked_out_file = in_basename.replace('_merged', '_merged_masked', 1)
+  else:
+    # Unmerged: sensor_product_tile_rest... -> insert masked right after tile:
+    # sensor_product_tile_masked_rest...
+    parts = in_basename.split('_', 3)
+    if len(parts) == 4:
+      masked_out_file = f'{parts[0]}_{parts[1]}_{parts[2]}_masked_{parts[3]}'
+    else:
+      masked_out_file = in_basename.replace('.tif', '_masked.tif')
   masked_path = os.path.join(masked_dir, masked_out_file)
   
   # open geotiff to mask and cloud mask file
@@ -1547,22 +1561,30 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
   if not ims:
       raise FileNotFoundError(f'No (non-merged) .tif files to merge in: {dir_to_merge}')
 
-  # Sensor + product come from the leading tokens; the acquisition date comes
-  # from the shared single-source extractor. This handles both fresh per-scene
-  # files (LC08_product_YYYYMMDD_HHMMSS_PPPRRR.tif) and already-renamed files
-  # (LC08_product_HHMMSS_PPPRRR_YYYY-MM-DD_day.tif). Positional date parsing is
-  # no longer safe: event-name prefixes were dropped 2026-06-16, so parts[2] is
-  # the time (not the date) on renamed files.
+  # Sensor + product come from the leading tokens; date + time are extracted
+  # as an ISO 8601 combined string (YYYY-MM-DDTHH:MM:SSZ) via regex below,
+  # supporting both a fresh scene file (..._YYYYMMDD_HHMMSS_PPPRRR.tif) and
+  # an already-renamed one (..._PPPRRR_YYYY-MM-DDTHH:MM:SSZ.tif). Path/row
+  # (PPPRRR) is intentionally NOT carried into the merged filename.
   basename = os.path.basename(ims[0])
   parts = basename.split('_')
   sat = parts[0]
   prod_type = parts[1]
-  matched, _ = extract_datetime_from_filename(basename)
-  if matched is None:
-      raise ValueError(f'Could not extract a date from filename: {basename}')
-  im_date = matched.replace('-', '')  # normalize YYYY-MM-DD -> YYYYMMDD
 
-  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_{im_date}_merged.tif')
+  iso_match = re.search(r'(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})Z', basename)
+  if iso_match:
+      date_iso, time_iso = iso_match.group(1), iso_match.group(2)
+  else:
+      raw_match = re.search(r'(\d{8})_(\d{6})', basename)
+      if not raw_match:
+          raise ValueError(f'Could not extract date/time from filename: {basename}')
+      date_raw, time_raw = raw_match.group(1), raw_match.group(2)
+      date_iso = f'{date_raw[0:4]}-{date_raw[4:6]}-{date_raw[6:8]}'
+      time_iso = f'{time_raw[0:2]}:{time_raw[2:4]}:{time_raw[4:6]}'
+
+  # apply_cloud_mask() inserts "_masked" right after "_merged":
+  # LC08_trueColor_merged_masked_2025-09-22T18:56:17Z_day.tif
+  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_merged_{date_iso}T{time_iso}Z.tif')
 
   # merge images
   gen_merge(ims, merged_output, method)
@@ -1578,4 +1600,10 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
     cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
+    # apply_cloud_mask writes to <dir_to_merge>/masked/<basename with _masked
+    # inserted after _merged>
+    masked_dir = os.path.join(Path(merged_output).parent, 'masked')
+    masked_basename = os.path.basename(merged_output).replace('_merged', '_merged_masked', 1)
+    return os.path.join(masked_dir, masked_basename)
+
   return merged_output

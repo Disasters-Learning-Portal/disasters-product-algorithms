@@ -238,7 +238,12 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
     os.mkdir(masked_dir)
   
   # masked output filename
-  masked_out_file = os.path.basename(tif_to_mask).replace('.tif', '_masked.tif')
+  base = os.path.splitext(os.path.basename(tif_to_mask))[0]
+  parts = base.split("_") 
+  timestamp = parts[-1]
+  prefix = "_".join(parts[:-1])
+  masked_out_file = f"{prefix}_masked_{timestamp}.tif"
+
   masked_path = os.path.join(masked_dir, masked_out_file)
   
   # open geotiff to mask and cloud mask file
@@ -1027,10 +1032,18 @@ def gen_merge(list_of_files, outfile, method='first'):
 def s2_merge(dir_to_merge, mask=False, method='first'): 
   # create output filename
   ims = glob.glob(os.path.join(dir_to_merge, '*tif'))
-  sat = os.path.basename(ims[0]).split('_')[0]
-  prod_type = os.path.basename(ims[0]).split('_')[2]
-  im_date = os.path.basename(ims[0]).split('_')[3]
-  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_{im_date}_merged.tif')
+
+  parts = os.path.splitext(os.path.basename(ims[0]))[0].split("_")
+
+  sat = parts[0]
+  level = parts[1]
+  product = parts[2]
+  timestamp = parts[-1]
+
+  merged_output = os.path.join(
+      dir_to_merge,
+      f"{sat}_{level}_{product}_merged_{timestamp}.tif"
+  )
 
   # merge images
   gen_merge(ims, merged_output, method)

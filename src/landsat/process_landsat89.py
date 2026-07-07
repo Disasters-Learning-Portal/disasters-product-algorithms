@@ -4,7 +4,10 @@
 process_landsat89.py
 
 Name:           Kaylee Sharp
-Date:           February 2025
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026  
 
 """
 
@@ -347,7 +350,7 @@ if __name__ == "__main__":
                     try:
                         # produce true color image
                         print('\n* Processing true color')
-                        genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         if not args.tif_only:
@@ -398,7 +401,7 @@ if __name__ == "__main__":
                     else:
                         try:
                             print('\n* Processing panchromatic')
-                            genPanchromatic(b8_file, sun_zen, prod_name, cloudMask)
+                            genPanchromatic(b8_file, sun_zen, prod_name, None)
 
                             # Convert to COG (default) and optionally rename with event
                             # Skip COG conversion if merging - will convert merged file instead
@@ -443,7 +446,7 @@ if __name__ == "__main__":
                 else:
                     try:
                         print('\n* Processing natural color')
-                        genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         # Skip COG conversion if merging - will convert merged file instead
@@ -501,7 +504,7 @@ if __name__ == "__main__":
                 else:
                     try:
                         print('\n* Processing color infrared')
-                        genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         # Skip COG conversion if merging - will convert merged file instead
@@ -953,8 +956,11 @@ if __name__ == "__main__":
                     print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
                     continue
                 # merge products of the same date
-                print('Merging:', prod_dir)
-                merged_file = ls_merge(prod_dir, args.mask)
+                is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'evi', 'nbr'}
+                mask_status = args.mask if is_index else False
+
+                print(f'Merging: {prod_dir} (Masking: {mask_status})')
+                merged_file = ls_merge(prod_dir, mask_status)
 
                 # Convert merged file to COG (default) and optionally rename with event
                 if not args.tif_only:

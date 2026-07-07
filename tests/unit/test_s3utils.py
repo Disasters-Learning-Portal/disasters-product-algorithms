@@ -159,3 +159,97 @@ class TestRetrieveS3ValidDates:
         _put(client, UNKNOWN_BUCKET, f"{PREFIX}/anything/file.tif")
         with pytest.raises(ValueError, match="was not recognized as a valid vendor"):
             retrieve_s3_valid_dates(UNKNOWN_BUCKET, PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive .tif / .TIF handling.
+#
+# CSDA vendor data ships uppercase `.TIF`. Detection must match both cases, and
+# the local working copy is normalized to lowercase `.tif` — while the remote
+# S3 key stays as-is so the fetch still resolves.
+# ---------------------------------------------------------------------------
+
+GENERIC_BUCKET = "nasa-disasters-test"
+
+
+class TestLocalTifBasename:
+    """Pure-unit: local file naming forces a .tif-family extension to lowercase
+    '.tif' while preserving the rest of the name."""
+
+    @pytest.mark.parametrize(
+        "s3path, expected",
+        [
+            ("s3://b/p/CAPELLA_C18_GEO_GEC.TIF", "CAPELLA_C18_GEO_GEC.tif"),  # upper -> lower
+            ("s3://b/p/scene_GEC.tif", "scene_GEC.tif"),  # already lowercase, unchanged
+            ("s3://b/p/scene_GEC.Tif", "scene_GEC.tif"),  # mixed case
+            ("bare_file.TIF", "bare_file.tif"),           # no slashes
+            ("s3://b/p/metadata.json", "metadata.json"),  # non-tif extension untouched
+            ("s3://b/p/angles.geojson", "angles.geojson"),  # non-tif extension untouched
+        ],
+    )
+    def test_extension_normalized(self, s3path, expected):
+        from shared_utils.s3utils import local_tif_basename
+
+        assert local_tif_basename(s3path) == expected
+
+    def test_preserves_non_extension_case(self):
+        """Only the extension is lowercased — tokens like _GEC keep their case."""
+        from shared_utils.s3utils import local_tif_basename
+
+        assert local_tif_basename("s3://b/p/X_GEC.TIF") == "X_GEC.tif"
+
+
+@mock_aws
+class TestListS3FilesCaseInsensitive:
+    """list_s3_files must return both '.tif' and '.TIF' keys (CSDA ships .TIF)."""
+
+    def _bucket(self):
+        client = boto3.client("s3", region_name="us-west-2")
+        client.create_bucket(
+            Bucket=GENERIC_BUCKET,
+            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+        )
+        return client
+
+    def test_matches_both_cases(self):
+        from shared_utils.s3_operations import list_s3_files
+
+        client = self._bucket()
+        _put(client, GENERIC_BUCKET, f"{PREFIX}/lower.tif")
+        _put(client, GENERIC_BUCKET, f"{PREFIX}/UPPER.TIF")
+        _put(client, GENERIC_BUCKET, f"{PREFIX}/notes.txt")  # must be excluded
+
+        keys = list_s3_files(client, GENERIC_BUCKET, PREFIX)  # default suffix='.tif'
+
+        assert sorted(keys) == [f"{PREFIX}/UPPER.TIF", f"{PREFIX}/lower.tif"]
+        # The real (uppercase) key is preserved — NOT lowercased — so a later
+        # download resolves the actual object.
+        assert f"{PREFIX}/UPPER.TIF" in keys
+
+
+@mock_aws
+class TestDownloadS3FileNormalizesExtension:
+    """download_s3_file fetches the real .TIF key but writes a local .tif."""
+
+    def test_uppercase_source_downloads_to_lowercase_tif(self, tmp_path):
+        import os
+
+        from shared_utils.s3utils import download_s3_file
+
+        client = boto3.client("s3", region_name="us-west-2")
+        client.create_bucket(
+            Bucket=GENERIC_BUCKET,
+            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+        )
+        key = f"{PREFIX}/scene_GEC.TIF"
+        _put(client, GENERIC_BUCKET, key)
+
+        outpath = download_s3_file(
+            f"s3://{GENERIC_BUCKET}/{key}", save_location=str(tmp_path)
+        )
+
+        # Local file normalized to .tif ...
+        assert outpath.endswith("scene_GEC.tif")
+        # ... and it exists, proving the real .TIF key (not a lowercased one)
+        # was the object actually fetched.
+        assert os.path.exists(outpath)

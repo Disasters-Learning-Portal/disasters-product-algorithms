@@ -1,0 +1,49 @@
+{
+  "@jupyterlab/mainmenu-extension:plugin": {
+    "menus": [
+      {
+        "id": "jp-mainmenu-help",
+        "items": [
+          { "type": "separator", "rank": 100 },
+          {
+            "type": "submenu",
+            "rank": 101,
+            "submenu": {
+              "id": "jp-mainmenu-help-disasters",
+              "label": "Disasters Resources",
+              "items": [
+                {
+                  "command": "help:open",
+                  "rank": 0,
+                  "args": {
+                    "text": "Report a Bug (GitHub)",
+                    "url": "https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/issues/new",
+                    "newBrowserTab": true
+                  }
+                },
+                {
+                  "command": "help:open",
+                  "rank": 1,
+                  "args": {
+                    "text": "Community Forum",
+                    "url": "https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/discussions",
+                    "newBrowserTab": true
+                  }
+                },
+                {
+                  "command": "help:open",
+                  "rank": 2,
+                  "args": {
+                    "text": "Email Support",
+                    "url": "mailto:alexander.melancon@nasa.gov,kdl0040@uah.edu?subject=Disasters%20Hub%20Bug%20Report",
+                    "newBrowserTab": true
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -13,29 +13,53 @@ NODATA_FLOAT = -9999.0
 
 # Retieving satellogic data from S3
 def retrieve_satellogic_resources(date, level, bucket="csda-data-vendor-satellogic", prefix="disasters"):
-
     files = retrieve_s3_file_list(bucket, prefix)
 
-    filtered_files = [x for x in files if f"_{level}_" in x.split("/")[1]]
+    filtered_files = [
+        x for x in files
+        if len(x.split("/")) > 1 and f"_{level}_" in x.split("/")[1]
+    ]
 
-    subdirs = list(set([x.split("/")[1] for x in filtered_files]))
+    subdirs = sorted(set(x.split("/")[1] for x in filtered_files))
 
-    dates = [datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S") for x in subdirs]
+    dates = [
+        datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S")
+        for x in subdirs
+    ]
 
     if isinstance(date, str):
         date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
 
     closest_date = min(dates, key=lambda d: abs(d - date))
-
     date_prefix = closest_date.strftime("%Y%m%d_%H%M%S")
 
     selected = [x for x in subdirs if x.startswith(date_prefix)][0]
 
-    metadata = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] != "rasters")]
+    selected_files = [
+        x for x in filtered_files
+        if len(x.split("/")) > 1 and x.split("/")[1] == selected
+    ]
 
-    tifs = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] == "rasters" and x.lower().endswith(".tif"))]
+    metadata = [
+        x for x in selected_files
+        if not x.lower().endswith((".tif", ".tiff"))
+    ]
 
-    return ([f"s3://{bucket}/{x}" for x in metadata], [f"s3://{bucket}/{x}" for x in tifs])
+    tifs = [
+        x for x in selected_files
+        if x.lower().endswith((".tif", ".tiff"))
+    ]
+
+    print(f"Selected Satellogic folder: {selected}")
+    print(f"Metadata files found: {len(metadata)}")
+    print(f"TIF files found: {len(tifs)}")
+    for t in tifs:
+        print("  ", t)
+
+    return (
+        [f"s3://{bucket}/{x}" for x in metadata],
+        [f"s3://{bucket}/{x}" for x in tifs],
+    )
 
 # Functions to retrieve metedata
 def getSolarZenithAngle(meta):
@@ -145,8 +169,36 @@ def prepare_scene(paths, meta):
     scale_factor = getScaleFactor(meta)
     sunzen = getSolarZenithAngle(meta)
 
-    in_file = download_s3_file([x for x in paths if x.lower().endswith("_toa_0.tif")][0])
-    cloud_file = download_s3_file([x for x in paths if x.lower().endswith("_cloud_0.tif")][0])
+    print("Available paths:")
+    for p in paths:
+        print(p)
+    
+    # Support both newer L1D_SR products and older L1B products
+    image_files = [
+        x for x in paths
+        if (
+            x.lower().endswith("_analytic.tif")
+            or x.lower().endswith("_toa_0.tif")
+        )
+    ]
+    
+    if not image_files:
+        raise FileNotFoundError(
+            "No Analytic or TOA tif found. Available paths:\n"
+            + "\n".join(paths)
+        )
+    
+    in_file = download_s3_file(image_files[0])
+
+    cloud_files = [
+        x for x in paths
+        if (
+            x.lower().endswith("_cloud.tif")
+            or x.lower().endswith("_cloud_0.tif")
+        )
+    ]
+    
+    cloud_file = download_s3_file(cloud_files[0]) if cloud_files else None
 
     ds = gdal.Open(in_file)
     dc = gdal.Open(cloud_file)
@@ -166,11 +218,23 @@ def maybe_correct(arrays, level, sunzen):
 
 # Proper file naming conventions
 def build_output_name(in_file, out_dir, product):
-    fname = in_file.split("/")[-1]
+    fname = os.path.basename(in_file)
+    parts = fname.split("_")
 
-    dt = datetime.strptime("_".join(fname.split("_")[0:2]), "%Y%m%d_%H%M%S")
+    dt = datetime.strptime("_".join(parts[0:2]), "%Y%m%d_%H%M%S")
 
-    return f"{out_dir}/{dt.strftime('%Y%m%d')}_Satellogic_{fname.split('_')[4]}_{product}{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    tile_id = parts[2]          # 773
+    satellite = parts[3]        # SN49
+    tile_grid = "_".join(parts[7:10])  # 19N_606_1162
+
+    return (
+        f"{out_dir}/"
+        f"Satellogic_"
+        f"{satellite}_"
+        f"{product}_"
+        f"{tile_id}_{tile_grid}_"
+        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    )
 
 
 # Functions for specific products

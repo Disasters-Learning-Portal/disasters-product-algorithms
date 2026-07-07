@@ -130,6 +130,34 @@ tabs (the menu-bar version is the archived JL2 `maap-jupyter-ide`).
 `algorithm_version: dev` makes DPS clone the `dev` branch; pin a tag for
 reproducible production runs.
 
+## Platform v6.0.0 / OGC assessment (2026-07-07) — no repo change needed
+
+MAAP announced platform **v6.0.0** (OGC-compliant API, new Algorithm Catalog,
+`maap-py` v5.0.0+, refreshed R/Isce3/Pangeo/TF/PyTorch workspace images) and
+"recommended" reregistering existing algorithms. Verified this does **not**
+require any code change here — our stack is already OGC-native:
+
+- **Our `algorithm_config.yaml` files are already the OGC/CWL schema** (see the
+  section above). No schema migration. Reregistering is a **runtime GUI action**
+  (re-run Register Algorithm so it shows in the v6 OGC catalog), not a repo edit.
+- **Do NOT blind-bump `maap-py==4.2.0`** (pinned in `image/environment.yml`).
+  v5.0.0+ is snakecase + OGC-only — a breaking change that would break the two
+  *legacy, non-primary* client usages: `register_algorithms.py`
+  (`register_algorithm_from_yaml_file`) and the `submitJob`/`getJobStatus`
+  snippet in `dps/README.md`. The real registration path is the GUI extensions
+  (already on OGC endpoints), so 4.2.0 stays until MAAP ops forces a client bump.
+- **`base_container_url: maap_base:v4.2.0`** is NOT deprecated by the announcement
+  and only supplies Miniconda (build-env.sh installs on top). Only action: confirm
+  the tag still resolves in the UI's Container URL dropdown; bump if MAAP retires it.
+- **The workspace image updates are irrelevant** — those are MAAP's own hub images.
+  Our operator hub image is built *in this repo* (`image/Dockerfile`) on a Pangeo
+  base we control, independent of MAAP's workspaces.
+- **The pinned JL extensions already target OGC** (`api/ogc/...`). Bumping them
+  would only add usability improvements — optional, not required.
+
+Bottom line: existing jobs keep running; the only *someday* actions are non-code
+(GUI reregister, possible base-tag bump).
+
 ## One build per repo
 
 MAAP builds ONE container per repository+branch

@@ -43,6 +43,35 @@ class Unbuffered(object):
 sys.stdout = Unbuffered(sys.stdout)
 sys.stderr = Unbuffered(sys.stderr)
 
+def _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata):
+    """Convert/rename the masked copy of an individual (non-merged) product,
+    mirroring what's already done for the unmasked prod_name. apply_cloud_mask
+    writes the masked file to <prod_dir>/masked/<basename with masked inserted
+    after tile>; that file was previously never COG'd or event-renamed."""
+    if not cloudMask:
+        return
+    masked_dir = os.path.join(Path(prod_name).parent, 'masked')
+    masked_basename_parts = os.path.basename(prod_name).split('_', 3)
+    if len(masked_basename_parts) != 4:
+        return
+    masked_basename = f'{masked_basename_parts[0]}_{masked_basename_parts[1]}_{masked_basename_parts[2]}_masked_{masked_basename_parts[3]}'
+    masked_path = os.path.join(masked_dir, masked_basename)
+    if not os.path.exists(masked_path):
+        return
+    if not args.tif_only:
+        cog_path = convert_to_cog(
+            masked_path,
+            nodata=args.nodata,
+            dst_crs=dst_crs_value,
+            metadata=metadata,
+            compression=args.compression,
+            compression_level=args.compression_level
+        )
+        if args.event and not args.merge:
+            rename_with_event(cog_path, args.event)
+    elif args.event and not args.merge:
+        rename_with_event(masked_path, args.event)
+
 if __name__ == "__main__":
     then = datetime.now()
 
@@ -246,7 +275,9 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_cloudMask_{date}_{time}_{pthrw}.tif')
+                # NOTE: tile (pthrw) now leads, directly after the product name,
+                # so it survives to the front of every downstream rename step.
+                prod_name = os.path.join(prod_dir, f'{sensor}_cloudMask_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -308,7 +339,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_trueColor_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_trueColor_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -337,6 +368,11 @@ if __name__ == "__main__":
                             # Rename TIF without COG conversion
                             rename_with_event(prod_name, args.event)
 
+                        # The masked copy (if cloud masking is on) is written by
+                        # apply_cloud_mask to <prod_dir>/masked/ but was never
+                        # itself COG'd/renamed - do that here too.
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'True Color', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -355,7 +391,7 @@ if __name__ == "__main__":
                     prod_dirs.append(prod_dir)
                     if not os.path.isdir(prod_dir):
                         os.mkdir(prod_dir)
-                    prod_name = os.path.join(prod_dir, f'{sensor}_panchromatic_{date}_{time}_{pthrw}.tif')
+                    prod_name = os.path.join(prod_dir, f'{sensor}_panchromatic_{pthrw}_{date}_{time}.tif')
 
                     # Check if final output file already exists
                     final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -384,6 +420,8 @@ if __name__ == "__main__":
                                 # Rename TIF without COG conversion
                                 rename_with_event(prod_name, args.event)
 
+                            _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                             processing_success.append((os.path.basename(ddir), 'Panchromatic', 'Success'))
                         except Exception as e:
                             error_msg = f"{type(e).__name__}: {str(e)}"
@@ -398,7 +436,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_naturalColor_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_naturalColor_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -440,6 +478,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'Natural Color', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -454,7 +494,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_colorInfrared_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_colorInfrared_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -496,6 +536,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -509,7 +551,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NDVI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NDVI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -551,6 +593,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'NDVI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -564,7 +608,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NDWI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NDWI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -606,6 +650,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'NDWI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -619,7 +665,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_MNDWI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_MNDWI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -661,6 +707,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'MNDWI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -674,7 +722,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_EVI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_EVI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -716,6 +764,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'EVI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -729,7 +779,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NBR_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NBR_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -770,6 +820,8 @@ if __name__ == "__main__":
                             # Rename TIF without COG conversion
 
                             rename_with_event(prod_name, args.event)
+
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
 
                         processing_success.append((os.path.basename(ddir), 'NBR', 'Success'))
                     except Exception as e:

@@ -162,7 +162,7 @@ def apply_gamma(img, gamma=1.0):
     return np.power(np.clip(img, 0, 1), 1.0 / gamma)
 
 
-def prepare_scene(paths, meta):
+def prepare_scene(paths, meta, use_mask=True):
     level = infer_processing_level(paths)
     print(f"Detected processing level: {level}")
 
@@ -172,7 +172,7 @@ def prepare_scene(paths, meta):
     print("Available paths:")
     for p in paths:
         print(p)
-    
+
     # Support both newer L1D_SR products and older L1B products
     image_files = [
         x for x in paths
@@ -181,29 +181,36 @@ def prepare_scene(paths, meta):
             or x.lower().endswith("_toa_0.tif")
         )
     ]
-    
+
     if not image_files:
         raise FileNotFoundError(
             "No Analytic or TOA tif found. Available paths:\n"
             + "\n".join(paths)
         )
-    
+
     in_file = download_s3_file(image_files[0])
-
-    cloud_files = [
-        x for x in paths
-        if (
-            x.lower().endswith("_cloud.tif")
-            or x.lower().endswith("_cloud_0.tif")
-        )
-    ]
-    
-    cloud_file = download_s3_file(cloud_files[0]) if cloud_files else None
-
     ds = gdal.Open(in_file)
-    dc = gdal.Open(cloud_file)
 
-    cloud = dc.GetRasterBand(1).ReadAsArray()
+    # Only fetch + open the cloud band when it will actually be applied.
+    # Color composites (truecolor/colorir) pass use_mask=False and never touch
+    # `cloud`, so skip the download/open entirely. When masking is requested but
+    # no cloud tif exists, `cloud` stays None (never gdal.Open(None)).
+    cloud = None
+    if use_mask:
+        cloud_files = [
+            x for x in paths
+            if (
+                x.lower().endswith("_cloud.tif")
+                or x.lower().endswith("_cloud_0.tif")
+            )
+        ]
+
+        if cloud_files:
+            cloud_file = download_s3_file(cloud_files[0])
+            dc = gdal.Open(cloud_file)
+            cloud = dc.GetRasterBand(1).ReadAsArray()
+        else:
+            print("No cloud tif found for this scene; proceeding without a mask.")
 
     return (ds, cloud, in_file, level, scale_factor, sunzen)
 
@@ -240,7 +247,7 @@ def build_output_name(in_file, out_dir, product):
 # Functions for specific products
 
 def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     red = load_reflectance_band(ds, 3, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
@@ -248,7 +255,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         red, green, blue = apply_mask([red, green, blue], cloud)
 
     if visualize:
@@ -270,7 +277,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
 
 
 def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -278,7 +285,7 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, red, green = apply_mask([nir, red, green], cloud)
 
     if visualize:
@@ -300,14 +307,14 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
 
 
 def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
 
     nir, red = maybe_correct([nir, red], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, red = apply_mask([nir, red], cloud)
 
     ndvi = (nir - red) / (nir + red + 1e-10)
@@ -322,14 +329,14 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
 
 def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
 
     nir, green = maybe_correct([nir, green], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, green = apply_mask([nir, green], cloud)
 
     ndwi = (green - nir) / (green + nir + 1e-10)
@@ -344,7 +351,7 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
 
 def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     blue = load_reflectance_band(ds, 1, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -352,7 +359,7 @@ def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
     blue, red, nir = maybe_correct([blue, red, nir], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         blue, red, nir = apply_mask([blue, red, nir], cloud)
 
     denom = nir + 6 * red - 7.5 * blue + 1

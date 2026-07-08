@@ -15,6 +15,13 @@ from shared_utils.cog_metadata import load_metadata_json
 
 
 def group_satellogic_tifs(tifs):
+    """Group each image tif with its cloud/visual companions.
+
+    Companion matching is case-insensitive — CSDA vendor data ships mixed- and
+    upper-case ``.TIF`` (see CLAUDE.md "Critical Constraints" / .clinerules
+    rule 20) — but the returned keys preserve the real S3-object case so
+    downstream fetches don't 404.
+    """
     groups = []
 
     image_files = [
@@ -25,25 +32,29 @@ def group_satellogic_tifs(tifs):
         )
     ]
 
+    def _find(expected_lower):
+        """Return the real-case key whose lowercased name matches, else None."""
+        return next((t for t in tifs if t.lower() == expected_lower), None)
+
     for image in image_files:
         lower = image.lower()
 
         if lower.endswith("_analytic.tif"):
-            base = image[:-len("_analytic.tif")]
-            cloud = base + "_cloud.tif"
-            visual = base + "_visual.tif"
+            base = lower[:-len("_analytic.tif")]
+            cloud = _find(base + "_cloud.tif")
+            visual = _find(base + "_visual.tif")
 
         elif lower.endswith("_toa_0.tif"):
-            base = image[:-len("_TOA_0.tif")]
-            cloud = base + "_CLOUD_0.tif"
-            visual = base + "_VISUAL_0.tif"
+            base = lower[:-len("_toa_0.tif")]
+            cloud = _find(base + "_cloud_0.tif")
+            visual = _find(base + "_visual_0.tif")
 
         group = [image]
 
-        if cloud in tifs:
+        if cloud:
             group.append(cloud)
 
-        if visual in tifs:
+        if visual:
             group.append(visual)
 
         groups.append(group)

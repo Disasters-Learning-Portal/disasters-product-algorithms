@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 from osgeo import gdal
 from datetime import datetime
@@ -225,23 +226,40 @@ def maybe_correct(arrays, level, sunzen):
 
 # Proper file naming conventions
 def build_output_name(in_file, out_dir, product):
+    """Derive the output COG name from a Satellogic image basename.
+
+    Target (analytic-tiled, verified against real outputs):
+      20260627_140714_051_SN33_L1D_MS_19N_724_1158_analytic.tif
+        -> Satellogic_SN33_<product>_051_724_1158_2026-06-27T14:07:14Z.tif
+
+    Fields are extracted by pattern, not fixed index: satellite (SN\\d+),
+    capture-id (the 3-digit token right after the timestamp; absent on L1B),
+    and the UTM tile's col/row (the two numeric groups of \\d+[A-Z]_(\\d+)_(\\d+);
+    the zone and level are dropped). The band token (TOA/analytic) is ignored —
+    the product comes from `product`. Empty tokens are dropped (no `__`), and the
+    trailing ISO-8601-Zulu is the "already-named" completion marker. Vendor TOA
+    scenes have no UTM tile, so they degrade cleanly to
+    Satellogic_<SAT>_<product>_<capture>_<ISO>.tif with no bogus col/row.
+    """
     fname = os.path.basename(in_file)
     parts = fname.split("_")
 
     dt = datetime.strptime("_".join(parts[0:2]), "%Y%m%d_%H%M%S")
 
-    tile_id = parts[2]          # 773
-    satellite = parts[3]        # SN49
-    tile_grid = "_".join(parts[7:10])  # 19N_606_1162
+    sat_m = re.search(r"SN\d+", fname)
+    satellite = sat_m.group(0) if sat_m else "SNXX"
 
-    return (
-        f"{out_dir}/"
-        f"Satellogic_"
-        f"{satellite}_"
-        f"{product}_"
-        f"{tile_id}_{tile_grid}_"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
-    )
+    # capture-id: 3-digit token after the timestamp (L1D layouts); absent on L1B
+    capture_id = parts[2] if len(parts) > 2 and parts[2].isdigit() else ""
+
+    # UTM tile col_row (analytic-tiled layout); zone dropped. Absent on TOA scenes.
+    tile_m = re.search(r"\d+[A-Z]_(\d+)_(\d+)", fname)
+    col_row = f"{tile_m.group(1)}_{tile_m.group(2)}" if tile_m else ""
+
+    tokens = [t for t in ("Satellogic", satellite, product, capture_id, col_row) if t]
+    stamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return f"{out_dir}/{'_'.join(tokens)}_{stamp}.tif"
 
 
 # Functions for specific products

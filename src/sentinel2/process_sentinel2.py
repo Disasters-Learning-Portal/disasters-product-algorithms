@@ -303,15 +303,7 @@ else:
         prod_dirs.append(prod_dir)
         if not os.path.isdir(prod_dir):
             os.mkdir(prod_dir)
-        timestamp = (
-            f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-            f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-        )
-        
-        prod_name = os.path.join(
-            prod_dir,
-            f"{sat}_{level}_cloudMask_{tile}_{timestamp}.tif"
-        )
+        prod_name = os.path.join(prod_dir, f'{sat}_cloudMask_{date}_{time}_{tile}.tif')
 
         # Check if final output file already exists
         final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -359,15 +351,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_trueColor_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_trueColor_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -411,15 +395,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_naturalColor_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_naturalColor_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -463,15 +439,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_shortwaveInfrared_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_shortwaveInfrared_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -515,15 +483,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_colorInfrared_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_colorInfrared_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -566,15 +526,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NDWI_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDWI_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -617,15 +569,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_MNDWI_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_MNDWI_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -668,15 +612,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NDVI_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDVI_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -719,15 +655,7 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NBR_{tile}_{timestamp}.tif"
-      )
+      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NBR_{date}_{time}_{tile}.tif')
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -796,15 +724,7 @@ else:
       for nstd in args.we_nstd:
           # format output filename
           nstd_str = str(nstd).replace('.', '_')
-          timestamp = (
-              f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-              f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-          )
-          
-          prod_name = os.path.join(
-              prod_dir,
-              f"{sat}_{level}_waterExtent_NSTD_{tile}_{timestamp}.tif"
-          )
+          prod_name = os.path.join(prod_dir, f'{sat}_waterExtent_NSTD_{nstd_str}_{date}.tif')
 
           # Check if final output file already exists
           final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -880,7 +800,7 @@ else:
             print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
             continue
         # Determine if this product should be masked (indices only)
-        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
+        is_index = any(x in prod_dir.lower() for x in ['ndvi', 'ndwi', 'mndwi', 'nbr'])
         mask_status = args.mask if is_index else False
 
         # merge products of the same date

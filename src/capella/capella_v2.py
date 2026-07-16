@@ -144,8 +144,10 @@ def sigmaCalib(
     if scale_factor is None:
         raise RuntimeError("scale_factor could not be parsed")
 
+    filt = ""
     if do_filt:
         dn = lee_filter(dn, size = filter_size)
+        filt = f"_filtered{size}"
 
     sigma_0 = 20.0 * np.log10(scale_factor * dn)
 
@@ -169,7 +171,9 @@ def sigmaCalib(
         f"{dt.strftime('%Y%m')}_"
         f"Capella-{satellite.replace('C', '')}_"
         f"sigma0"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"{filt}",
+        ".tif"
     )
 
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)

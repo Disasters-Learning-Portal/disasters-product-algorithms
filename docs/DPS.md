@@ -56,8 +56,14 @@ that each cost a failed registration if you get them wrong:
 DPS passes every input as a **named flag** `--name value` via `"$@"` — NOT
 positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
-run.sh's boolean parser accepts both and **defaults booleans to false** (presence
-sets true) so a config default of `true` round-trips correctly.
+run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
+`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask`/`save_png`/
+`delete_cog` default `true`; satellogic `use_mask`/`visualize` default `false`).
+This way an input left at its form default round-trips correctly **whether or not**
+MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
+config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the
+run.sh defaults all to `false`: if MAAP omits default-`true` booleans, that would
+silently invert `merge`/`mask`/`save_png`/`delete_cog`.)
 
 Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/

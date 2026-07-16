@@ -13,7 +13,9 @@ set -euo pipefail
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
-# --- defaults (booleans default false; flag presence sets them true) ---
+# --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
+# at its form default round-trips correctly whether or not MAAP re-emits the
+# flag; --flag or --flag true|false overrides) ---
 DATE=""
 PRODUCT="sigma"
 BUCKET="csda-data-vendor-umbra"
@@ -31,10 +33,10 @@ ENABLE_S3_UPLOAD="false"
 # bucket/prefix, publish a new algorithm_version with these two values changed.
 S3_BUCKET="nasa-disasters"
 S3_DEST_BASE="drcs_activations_new"
-SAVE_PNG="false"
+SAVE_PNG="true"
 PNG_MIN=""
 PNG_MAX=""
-DELETE_COG="false"
+DELETE_COG="true"
 
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do

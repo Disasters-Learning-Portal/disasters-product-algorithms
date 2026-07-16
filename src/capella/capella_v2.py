@@ -147,16 +147,14 @@ def sigmaCalib(
     filt = ""
     if do_filt:
         dn = lee_filter(dn, size = filter_size)
-        filt = f"_filtered{size}"
+        filt = f"_filtered{filter_size}"
 
     sigma_0 = 20.0 * np.log10(scale_factor * dn)
-
-    print(sigma_0, np.nanmin(sigma_0), np.nanmax(sigma_0))
 
     sigma_0 = np.clip(sigma_0, -60.0, np.nanmax(sigma_0))
 
     print("Sigma0 range: " f"{np.nanmin(sigma_0)} -> {np.nanmax(sigma_0)}")
-    
+
     base = os.path.basename(in_file)
 
     parts = base.replace(".tif", "").split("_")
@@ -171,8 +169,8 @@ def sigmaCalib(
         f"{dt.strftime('%Y%m')}_"
         f"Capella-{satellite.replace('C', '')}_"
         f"sigma0"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}",
-        f"{filt}",
+        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"{filt}"
         ".tif"
     )
 

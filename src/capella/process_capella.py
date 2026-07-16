@@ -132,7 +132,7 @@ def main():
             tifs,
             save_location=args.output,
             do_filt=args.apply_filter,
-            size=args.filter_size
+            filter_size=args.filter_size
         )
 
     # Convert to COG

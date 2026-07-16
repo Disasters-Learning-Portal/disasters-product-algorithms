@@ -9,8 +9,7 @@ import os
 
 from capella.capella_v2 import (
     retrieve_capella_resources,
-    sigmaCalib,
-    apply_filter
+    sigmaCalib
 )
 
 from shared_utils.cog_utils import convert_to_cog
@@ -131,20 +130,10 @@ def main():
 
         outfile = sigmaCalib(
             tifs,
-            save_location=args.output
+            save_location=args.output,
+            do_filt=args.apply_filter,
+            size=args.filter_size
         )
-
-        if args.apply_filter:
-
-            raw_outfile = outfile
-
-            outfile = apply_filter(
-                outfile,
-                size=args.filter_size
-            )
-
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
 
     # Convert to COG
     if outfile:

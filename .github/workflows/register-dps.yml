@@ -1,0 +1,63 @@
+name: Register DPS algorithm (OGC)
+
+# Registers a DPS sensor as an OGC process on MAAP via MAAP's ogc-app-pack-generator
+# action — the registration path that supports the `?` optional-input suffix (the
+# Register Algorithm GUI's Type dropdown does not; see docs/DPS.md). The action:
+#   1. builds a CWL workflow from the OGC config (dps/ogc/<sensor>.yml),
+#   2. validates it (cwltool --validate + ap-validator),
+#   3. commits the generated CWL to cwl_workflows/ and pushes it, then
+#   4. (if deploy=true) POST/PUTs it to the OGC processes API (prod).
+# Because the config sets algorithm_container_url (a prebuilt image), the action
+# SKIPS the Docker build — we do NOT pass dockerfile-path (validate_inputs.py
+# rejects providing both).
+#
+# Manual only: registration is a deliberate act against a LIVE MAAP endpoint.
+#
+# ── PREREQUISITES (one-time) ────────────────────────────────────────────────
+#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (the same MAAP_PGT
+#     you put in the hub's MAAP Settings). Sent as the `proxy-ticket` header.
+#   • The image in the config's algorithm_container_url must be PUBLICLY pullable
+#     (docker.io/klesinger/disasters-dps-image:kyle-test).
+#   • The repo must be readable by MAAP's ADES: the deploy step registers the CWL
+#     by its raw.githubusercontent.com URL, which the ADES fetches. Public repo = OK.
+#   • The "Run workflow" button only appears once THIS file exists on the default
+#     branch (main) — cherry-pick it there. You can then pick the ref (kyle-test)
+#     to run against.
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: OGC algorithm config to register (dps/ogc/<sensor>.yml)
+        required: true
+        default: dps/ogc/capella.yml
+      deploy:
+        description: Register to MAAP prod? (false = generate + validate CWL only)
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: write  # the generator commits the generated CWL to cwl_workflows/ and pushes it
+  packages: write  # per the generator README (only exercised if a Dockerfile is built — it isn't here)
+
+jobs:
+  register:
+    name: Generate + register OGC application package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build + register OGC application package
+        uses: MAAP-Project/ogc-app-pack-generator@main
+        with:
+          algorithm-configuration-path: ${{ inputs.config_path }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-app-pack: ${{ inputs.deploy }}
+          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT would be
+          # https://api.dit.maap-project.org/api/ogc/processes.
+          app-pack-register-endpoint: https://api.maap-project.org/api/ogc/processes
+        env:
+          # MAAP proxy-granting ticket — required by deploy_app_pack.py to auth the
+          # POST/PUT. Never printed; supplied from repo secrets.
+          MAAP_PGT: ${{ secrets.MAAP_PGT }}

@@ -14,7 +14,7 @@ from datetime import datetime
 from osgeo import gdal
 
 from scipy.ndimage import uniform_filter
-from scipy.ndimage.measurements import variance
+from scipy.ndimage import variance
 
 from shared_utils.geotools import *
 from shared_utils.s3utils import *

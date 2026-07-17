@@ -1,0 +1,96 @@
+name: Build & push DPS image (test)
+
+# Self-contained MAAP DPS worker image. Mirrors build-and-push.yaml (the hub
+# image) for structure, secrets, and version handling, but builds dps/Dockerfile
+# and pushes a test image tagged :kyle-test + :<sha-12> (never :latest).
+on:
+  push:
+    # Primary trigger. This workflow runs FROM the kyle-test branch itself
+    # (GitHub executes the workflow definition living on the pushed branch), so
+    # the push path works even though this file is not yet on `main`.
+    branches: [kyle-test]
+    # No paths filter on purpose: this is a test image and we want every push
+    # to kyle-test to rebuild it. dps/** and src/** are exactly what we build,
+    # so they must NOT be excluded.
+  workflow_dispatch:
+    # Manual "Run workflow" trigger. NOTE: GitHub only renders the "Run
+    # workflow" button in the Actions UI once this workflow file exists on the
+    # repo DEFAULT branch (main). Until this file is merged to main, use the
+    # push-to-kyle-test trigger above — it fires from the branch alone.
+
+# Minimal permissions: this job only reads the repo and pushes to Docker Hub
+# (auth via DOCKER_USERNAME/DOCKER_PASSWORD secrets, not the GITHUB_TOKEN).
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & push klesinger/disasters-dps-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools-scm reads tags via `git describe`; default checkout
+          # is a shallow clone with no tag history.
+          fetch-depth: 0
+
+      - name: Compute version from git tags
+        id: ver
+        # pyproject.toml uses setuptools-scm with a dynamic version derived
+        # from the latest tag. The Dockerfile build context excludes .git/
+        # (via dps/Dockerfile.dockerignore — it'd bloat the image), so
+        # setuptools-scm can't discover the version inside the container. We
+        # compute it here (where .git/ is present) and pass it through as a
+        # build-arg. Same step as build-and-push.yaml.
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --user setuptools-scm
+          VERSION=$(python -c "from setuptools_scm import get_version; print(get_version(root='.'))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Computed package version: $VERSION"
+
+      - name: Log in to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Build image
+        # BuildKit is REQUIRED here: the repo-root .dockerignore excludes dps/,
+        # but this image IS built from dps/. BuildKit honors a per-Dockerfile
+        # ignore file (dps/Dockerfile.dockerignore) that overrides the root
+        # .dockerignore, letting dps/ back into the context. Plain (legacy)
+        # docker build would apply the root .dockerignore and drop dps/,
+        # producing a broken image. DOCKER_BUILDKIT=1 forces the BuildKit
+        # backend, matching build-and-push.yaml's plain-`docker build` style.
+        #
+        # --cache-from targets the :kyle-test tag (remote registry cache). On
+        # the very first run that tag doesn't exist yet; `docker build` treats a
+        # missing cache-from image as a warning, not an error, so this is
+        # non-fatal. Build context is the repo root (`.`) so setuptools-scm
+        # metadata + src/ + dps/ are all available to the Dockerfile.
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/disasters-dps-image"
+          # Best-effort warm the layer cache from the last :kyle-test image.
+          # `|| true` swallows the first-run cache miss (tag not on Docker Hub
+          # yet) so a cold start still builds cleanly.
+          docker pull "${IMAGE}:kyle-test" || true
+          docker build \
+            -f dps/Dockerfile \
+            -t "${IMAGE}:kyle-test" \
+            -t "${IMAGE}:${GITHUB_SHA::12}" \
+            --cache-from "${IMAGE}:kyle-test" \
+            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS="${{ steps.ver.outputs.version }}" \
+            .
+
+      - name: Push image
+        # Push both tags: the moving :kyle-test branch tag and the immutable
+        # per-commit :<sha-12> tag (mirrors build-and-push.yaml's dual-tag
+        # scheme, just with :kyle-test in place of :latest). No :latest — this
+        # is a test image (see file header).
+        run: |
+          set -euo pipefail
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/disasters-dps-image"
+          docker push "${IMAGE}:kyle-test"
+          docker push "${IMAGE}:${GITHUB_SHA::12}"

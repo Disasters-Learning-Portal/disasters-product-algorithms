@@ -48,9 +48,10 @@ def test_renames_only_the_given_directory(tmp_path):
     rename_individual_scene_files(str(cm), "202509_Flood_X", quiet=True)
 
     cm_after = set(os.listdir(cm))
-    # Both per-scene cloud masks were renamed (date moved to end + _day).
-    assert "LC08_cloudMask_185617_046028_2025-09-22_day.tif" in cm_after
-    assert "LC08_cloudMask_190001_046029_2025-09-22_day.tif" in cm_after
+    # Both per-scene cloud masks were renamed: date+time relocated to the end as
+    # an ISO 8601 Zulu stamp (individual scenes carry a time -> Z, not _day).
+    assert "LC08_cloudMask_046028_2025-09-22T18:56:17Z.tif" in cm_after
+    assert "LC08_cloudMask_046029_2025-09-22T19:00:01Z.tif" in cm_after
     # The merged output is untouched.
     assert "LC08_cloudMask_20250922_merged.tif" in cm_after
     # D1: the unrelated product directory must not be touched.

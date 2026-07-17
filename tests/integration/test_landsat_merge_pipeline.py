@@ -61,19 +61,24 @@ def test_fresh_per_scene_merge_name(tmp_path):
     _make_scene(str(d / "LC08_trueColor_20250922_185617_046028.tif"), 500000, 4000000)
     _make_scene(str(d / "LC08_trueColor_20250922_190001_046029.tif"), 500300, 4000000)
     out = ls_merge(str(d))
-    assert os.path.basename(out) == "LC08_trueColor_20250922_merged.tif"
+    # A merged mosaic is day-granularity: only the acquisition DATE is carried
+    # into the raw merge name (no time; path/row dropped). rename_with_event
+    # appends the _day suffix downstream.
+    assert os.path.basename(out) == "LC08_trueColor_merged_2025-09-22.tif"
     assert os.path.exists(out)
 
 
 def test_renamed_inputs_merge_name_uses_date_not_time(tmp_path):
-    """D2 regression: parts[2] is the time (185617) on already-renamed files."""
+    """D2 regression: ls_merge must read the acquisition DATE from an already-
+    renamed scene (..._HHMMSS_PPPRRR_YYYY-MM-DD_day.tif) via the shared
+    file_naming extractor -- neither crashing nor mistaking the time for the date."""
     from landsat.landsat89_functions import ls_merge
     d = tmp_path / "trueColor"
     d.mkdir()
     _make_scene(str(d / "LC08_trueColor_185617_046028_2025-09-22_day.tif"), 500000, 4000000)
     _make_scene(str(d / "LC08_trueColor_190001_046029_2025-09-22_day.tif"), 500300, 4000000)
     out = ls_merge(str(d))
-    assert os.path.basename(out) == "LC08_trueColor_20250922_merged.tif"
+    assert os.path.basename(out) == "LC08_trueColor_merged_2025-09-22.tif"
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +96,7 @@ def test_remerge_excludes_prior_merged(tmp_path):
     _make_scene(str(d / "LC08_trueColor_20250922_merged.tif"), 900000, 9000000, fill=222)
 
     out = ls_merge(str(d))
-    assert os.path.basename(out) == "LC08_trueColor_20250922_merged.tif"
+    assert os.path.basename(out) == "LC08_trueColor_merged_2025-09-22.tif"
     with rasterio.open(out) as src:
         # union of the two real scenes only (x in [500000, 500620]); the far-away
         # prior merged tile at x=900000 must NOT have widened the output.
@@ -155,7 +160,7 @@ def test_merge_then_cog_native_preserves_inputs_and_cleans_tmp(tmp_path):
     merged = ls_merge(str(d))
     cog = convert_to_cog(merged, dst_crs=None, quiet=True)  # native: no warp
 
-    assert os.path.basename(cog) == "LC08_trueColor_20250922_merged.tif"
+    assert os.path.basename(cog) == "LC08_trueColor_merged_2025-09-22.tif"
     is_valid, _ = validate_cog(cog)
     assert is_valid
     # Source scenes must not be mutated by the merge (same-CRS path).

@@ -198,8 +198,8 @@ class TestGetFinalFilename:
         path = "/path/LC08_trueColor_20250922_185617_046028.tif"
         result = get_final_filename(path, "202512_Flood_WA")
         assert "202512_Flood_WA" not in result   # event name no longer prefixed
-        assert "2025-09-22" in result
-        assert result.endswith("_day.tif")
+        # Individual scene with a time -> full ISO 8601 Zulu, ends in Z (not _day).
+        assert result.endswith("2025-09-22T18:56:17Z.tif")
         assert "LC08_trueColor" in result
 
     def test_sentinel2_with_event_name(self):
@@ -236,8 +236,8 @@ class TestRenameWithEvent:
         result = rename_with_event(str(src), "202512_Flood_WA", quiet=True)
         assert os.path.exists(result)
         assert "202512_Flood_WA" not in os.path.basename(result)   # event name no longer prefixed
-        assert "2025-09-22" in os.path.basename(result)
-        assert os.path.basename(result).endswith("_day.tif")
+        # Individual scene with a time -> full ISO 8601 Zulu, ends in Z (not _day).
+        assert os.path.basename(result).endswith("2025-09-22T18:56:17Z.tif")
 
     def test_sentinel2_rename(self, tmp_path):
         from shared_utils.cog_utils import rename_with_event

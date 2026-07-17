@@ -145,6 +145,30 @@ Then format the chosen date for the sensor's `--date` (validated in run.sh):
 Capella `YYYYMMDDHHMMSS` (e.g. `20231107120000`), Umbra & Satellogic
 `'YYYY-MM-DD HH:MM:SS'` (e.g. `'2023-11-07 12:00:00'`).
 
+### In-DPS discovery: `list_dates=true` (Capella pilot)
+
+When you *don't* have local read creds to the vendor bucket (only the DPS worker
+role does), you can discover dates **from a DPS job itself**. Capella's
+`algorithm_config.yaml` exposes `list_dates` as its **first** input (boolean,
+default `false`). Submit the Capella algorithm with `list_dates=true` and it runs
+a **report-only** job: `run.sh` short-circuits *before* validation/staging (so
+`date`/`activation_event`/`source_label` are NOT required), calls
+`process_capella --list_dates`, prints the report to the **job log**, and exits —
+no COG, no upload. The report lists one row per scene, **newest first by S3
+delivery time** (`LastModified` — the top rows are the scenes most recently added
+to the bucket, i.e. closest to today), each with the `--date` value to copy, its
+acquisition time, and its S3-delivery time. Read it in the MAAP **Jobs** panel,
+copy a `--date`, then submit again with `list_dates=false`.
+
+Mechanics (the reusable pattern, currently wired for Capella only):
+`shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
+returns `(key, LastModified)` pairs; `capella_v2.report_capella_scenes()` groups
+by scene folder, keeps the newest `LastModified` per scene, parses the acquisition
+date from the folder name, and sorts most-recent-delivered first. Note: a DPS job
+is headless/async — it prints to the log; it **cannot** pop up a browser UI. For
+an interactive date-picker, run `report_capella_scenes()` in a live notebook
+kernel (needs local/hub S3 creds) and render it with `ipywidgets`/`IPython.display`.
+
 ## Output flow (dps/_finalize.sh)
 
 Products → `~/drcs_outputs/<activation_event>/` → optional PNG quicklook →

@@ -15,6 +15,9 @@ set -euo pipefail
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
+# shared input validators (fail fast, before conda/fetch)
+source "${basedir}/../_validate.sh"
+
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
 # flag; --flag or --flag true|false overrides) ---
@@ -63,16 +66,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- required-input / placeholder guards ---
-if [[ -z "${DATE}" ]]; then
-  echo "ERROR: --date is required (YYYYMMDDHHMMSS) to select a Capella scene" >&2; exit 1
-fi
-if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Hazard_Location" ]]; then
-  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Hazard_Location'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
-fi
-if [[ -z "${SOURCE_LABEL}" ]]; then
-  echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA, Capella Space)." >&2; exit 1
-fi
+# --- input validation (fail fast with a clear message; nothing has run yet) ---
+require_nonempty date "${DATE}" "YYYYMMDDHHMMSS, to select a Capella scene"
+validate_regex date "${DATE}" '^[0-9]{14}$' 'YYYYMMDDHHMMSS'
+validate_activation_event "${ACTIVATION_EVENT}"
+require_nonempty source_label "${SOURCE_LABEL}" "e.g. USGS, NASA, NOAA, Capella Space"
+validate_dst_crs "${DST_CRS}"
+validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
+# --product ('sigma') is already enforced by argparse choices= in the CLI.
+[[ "${APPLY_FILTER}" == "true" ]] && validate_int_range filter_size "${FILTER_SIZE}" 1 101
+[[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
+[[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
+[[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"

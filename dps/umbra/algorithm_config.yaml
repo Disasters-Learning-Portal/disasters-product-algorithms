@@ -33,7 +33,7 @@ keywords: umbra, sar, cog, disasters, flood, sigma0, calibration
 inputs:
   - name: date
     label: Target date
-    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected."
+    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
     type: string
   - name: product
     label: Calibration product

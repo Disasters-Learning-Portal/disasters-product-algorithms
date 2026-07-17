@@ -12,6 +12,9 @@ set -euo pipefail
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
+# shared input validators (fail fast, before conda/staging)
+source "${basedir}/../_validate.sh"
+
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
 # flag; --flag or --flag true|false overrides) ---
@@ -62,16 +65,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- required-input / placeholder guards ---
-if [[ -z "${FILE_PATH}" ]]; then
-  echo "ERROR: --file_path_of_raw_data is required (a Landsat C2 L2 .tar/.zip granule)" >&2; exit 1
-fi
-if [[ "${ACTIVATION_EVENT}" == "YYYYMM_Hazard_Location" ]]; then
-  echo "ERROR: activation_event is still the placeholder 'YYYYMM_Hazard_Location'. Set a real event, e.g. 202511_Flood_TX." >&2; exit 1
-fi
-if [[ -z "${SOURCE_LABEL}" ]]; then
-  echo "ERROR: source_label is required (e.g. USGS, NASA, NOAA)." >&2; exit 1
-fi
+# --- input validation (fail fast with a clear message; nothing has run yet) ---
+validate_granule file_path_of_raw_data "${FILE_PATH}" "tar zip"
+validate_activation_event "${ACTIVATION_EVENT}"
+require_nonempty source_label "${SOURCE_LABEL}" "e.g. USGS, NASA, NOAA"
+validate_dst_crs "${DST_CRS}"
+validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
+# optical products validated here (the CLI's own check ends in quit() -> exit 0);
+# token set mirrors the accepted list in src/landsat/process_landsat89.py.
+# shellcheck disable=SC2086  # intentional word-split of the space-separated list
+for t in ${PRODUCTS}; do validate_in_set products "$t" \
+  "all true tc truecolor pan panchromatic nat natural naturalcolor nc colorir colorinfrared cir mndwi ndvi evi ndwi nbr we waterextent"; done
+[[ -n "${PROCESS_DATE}" ]] && validate_regex process_date "${PROCESS_DATE}" '^[0-9]{8}$' 'YYYYMMDD'
+[[ -n "${PROCESS_TILE}" ]] && validate_regex process_tile "${PROCESS_TILE}" '^[0-9]{6}$' 'path/row e.g. 171035'
+# shellcheck disable=SC2086
+[[ -n "${WE_NSTD}" ]] && for n in ${WE_NSTD}; do validate_number we_nstd "$n"; done
+[[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
+[[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
+[[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"

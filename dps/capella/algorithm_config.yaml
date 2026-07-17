@@ -33,7 +33,7 @@ keywords: capella, sar, sigma0, cog, disasters, flood
 inputs:
   - name: date
     label: Target date
-    doc: Target acquisition date, YYYYMMDDHHMMSS. The closest matching Capella scene in the vendor bucket is selected.
+    doc: "Target acquisition date, YYYYMMDDHHMMSS. The closest matching Capella scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csdap-capellaspace-delivery/disasters/ (see docs/DPS.md 'Finding available scenes')."
     type: string
   - name: product
     label: Calibration product

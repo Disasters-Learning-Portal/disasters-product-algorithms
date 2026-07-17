@@ -270,6 +270,40 @@ tabs (the menu-bar version is the archived JL2 `maap-jupyter-ide`).
 `algorithm_version: dev` makes DPS clone the `dev` branch; pin a tag for
 reproducible production runs.
 
+## Deploying a code change (push → re-register)
+
+A DPS algorithm code change goes live in **two steps, in this order**:
+
+1. **Commit + push to the branch the algorithm tracks** (`origin/dev` for
+   `algorithm_version: dev`). MAAP builds the algorithm container by
+   **git-cloning the repo from GitHub** at build time — it does NOT see your
+   local working tree, so uncommitted / unpushed changes are invisible to the
+   build. This is the #1 *"I re-registered but nothing changed"* trap: the code
+   simply wasn't on `origin/dev` yet.
+2. **Re-register the algorithm** (Register Algorithm UI, same
+   `algorithm_version`). Registration kicks off a fresh build that re-clones
+   `origin/<branch>@HEAD` and re-runs `build-env.sh`, so it picks up whatever you
+   just pushed. Confirm via the **Submit Jobs Process dropdown** (the real "is it
+   deployed" check — more reliable than "My Builds", which only tracks
+   UI-initiated builds).
+
+**You do NOT rebuild the hub image for an algorithm code change** — two distinct
+artifacts, don't conflate them:
+
+- **Hub image** (`image/Dockerfile` + `image/environment.yml`) = the JupyterLab
+  environment operators use; built by GitHub Actions on push to `main`/`dev`.
+  Unrelated to what executes inside a DPS job.
+- **DPS algorithm container** = built by MAAP from the repo branch via
+  `dps/<sensor>/build-env.sh` when you register/build; this is what actually runs
+  `process_<sensor>`. (`dps/` is `.dockerignore`d from the hub image precisely
+  because DPS clones it from git directly — see "Gotchas" below.)
+
+**`dev` is PR-protected.** GitHub branch protection requires changes to `dev` go
+through a pull request; a direct `git push origin dev` is refused unless your
+account can bypass the rule (the push log then shows
+`Bypassed rule violations for refs/heads/dev`). Prefer opening a PR into `dev`
+for anything non-trivial.
+
 ## Platform v6.0.0 / OGC assessment (2026-07-07) — no repo change needed
 
 MAAP announced platform **v6.0.0** (OGC-compliant API, new Algorithm Catalog,

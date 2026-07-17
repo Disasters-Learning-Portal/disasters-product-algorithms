@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Run consistency lint
         run: python tools/check_sensor_consistency.py
 
@@ -31,7 +31,7 @@ jobs:
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
-          python-version: '3.12'
+          python-version: '3.13'
           channels: conda-forge
           channel-priority: strict
           activate-environment: smoke
@@ -128,3 +128,40 @@ jobs:
           echo ""
           echo "===== Summary: failed=$failed ====="
           exit $failed
+
+  pytest:
+    name: pytest (GDAL execution suite)
+    runs-on: ubuntu-latest
+    # Runs the real GDAL processing suite (merge / COG / warp / nodata / metadata
+    # / cog_validate) that cli-smoke does NOT execute. Real GDAL + rio + osgeo come
+    # from conda, so the integration tests actually run instead of skipping.
+    # Python 3.13 to match the hub image (pangeo base ships GDAL 3.12.x on py3.13);
+    # dev-conda-deps.txt is unpinned on purpose (mirrors the hub's floating GDAL) —
+    # this job is the guard that catches when that drift breaks a code path.
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          python-version: '3.13'
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: test
+      - name: Install GDAL + core deps from conda
+        # Same one-liner as cli-smoke: single source of truth is dev-conda-deps.txt.
+        run: |
+          deps=$(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
+          echo "Installing: $deps"
+          mamba install -y -c conda-forge $deps
+      - name: Install algorithms package + test extras
+        # The [test] extra (pyproject.toml) provides pytest, pytest-cov, moto[s3].
+        run: pip install '.[test]'
+      - name: Run the GDAL execution suite
+        # -ra prints skip reasons: a green run that silently skipped the GDAL-marked
+        # tests (missing rio/gdalwarp/osgeo) would prove nothing — this must show them run.
+        run: |
+          python -c "import sys, rasterio, rio_cogeo, pyproj; print('py', sys.version.split()[0], '| GDAL', rasterio.__gdal_version__, '| rio_cogeo', rio_cogeo.__version__, '| PROJ', pyproj.proj_version_str)"
+          python -m pytest -v -ra tests/

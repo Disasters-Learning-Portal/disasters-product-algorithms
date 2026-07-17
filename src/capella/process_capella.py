@@ -182,10 +182,11 @@ def main():
     )
 
     outfile = None
+    source_tif = None
 
     if args.product == "sigma":
 
-        outfile = sigmaCalib(
+        outfile, source_tif = sigmaCalib(
             tifs,
             save_location=args.output,
             do_filt=args.apply_filter,
@@ -207,6 +208,13 @@ def main():
         )
 
         print(f"COG created: {cog_path}")
+
+        # Delete the raw downloaded source raster now that a valid COG exists.
+        # Gated on COG success (a failure/exception above skips cleanup so the
+        # download is preserved for a retry).
+        if cog_path and source_tif and os.path.exists(source_tif):
+            os.remove(source_tif)
+            print(f"Removed source raster: {source_tif}")
 
 
 if __name__ == "__main__":

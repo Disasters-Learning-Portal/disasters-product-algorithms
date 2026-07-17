@@ -129,7 +129,7 @@ def sigmaCalib(
     save_location: str = "/tmp/s3_temp",
     do_filt : bool = True,
     filter_size : int = 5
-) -> str:
+) -> tuple[str, str]:
 
     if save_location.endswith("/"):
         save_location = save_location[:-1]
@@ -226,4 +226,6 @@ def sigmaCalib(
 
     print(f"Generation completed, file saved to {outfile}")
 
-    return outfile
+    # Return the sigma0 product plus the raw downloaded source raster so the
+    # caller can delete the (large) original once a valid COG exists.
+    return outfile, in_file

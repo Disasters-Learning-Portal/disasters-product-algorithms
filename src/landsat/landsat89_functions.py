@@ -3,13 +3,18 @@
 """
 landsat89_functions.py
 
-Name:        Kaylee Sharp
-Date:        February 2025
+Name:           Kaylee Sharp
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026  
 
 """
 
 import glob
+import re
 import os
+import tempfile
 import numpy as np
 from osgeo import gdal, osr
 from PIL import Image, ImageEnhance
@@ -30,6 +35,8 @@ import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 from tqdm import tqdm
+from shared_utils.file_naming import extract_datetime_from_filename
+from shared_utils.cog_utils import rename_with_event
 
 def unzip_landsat(files_to_unzip, unpacked_dir):
     print(f'\nNumber of .tar / .zip files: {len(files_to_unzip)}')
@@ -176,7 +183,20 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
     os.mkdir(masked_dir)
   
   # masked output filename
-  masked_out_file = os.path.basename(tif_to_mask).replace('.tif', '_masked.tif')
+  in_basename = os.path.basename(tif_to_mask)
+  if '_merged' in in_basename:
+    # Merged filenames: sensor_product_merged_datetime_day.tif -> insert
+    # _masked right after "_merged", keeping datetime/_day suffix last:
+    # sensor_product_merged_masked_datetime_day.tif
+    masked_out_file = in_basename.replace('_merged', '_merged_masked', 1)
+  else:
+    # Unmerged: sensor_product_tile_rest... -> insert masked right after tile:
+    # sensor_product_tile_masked_rest...
+    parts = in_basename.split('_', 3)
+    if len(parts) == 4:
+      masked_out_file = f'{parts[0]}_{parts[1]}_{parts[2]}_masked_{parts[3]}'
+    else:
+      masked_out_file = in_basename.replace('.tif', '_masked.tif')
   masked_path = os.path.join(masked_dir, masked_out_file)
   
   # open geotiff to mask and cloud mask file
@@ -308,7 +328,7 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   out_ds.GetRasterBand(1).WriteArray(img)
   out_ds = None
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -428,7 +448,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -551,7 +571,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -672,7 +692,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -758,7 +778,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -843,7 +863,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -927,7 +947,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -1032,7 +1052,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -1114,7 +1134,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds = None
 
 
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -1447,94 +1467,122 @@ def gen_merge(list_of_files, outfile, method='first'):
   # get unique CRS found in the inputted list of files to merge
   crs_list = [rio.open(im).crs for im in list_of_files]
   crs_list_unique = list(set(crs_list))
-  if len(crs_list_unique) != 1:
-      crs_dom = max(set(crs_list), key=crs_list.count)    # most common CRS
-      # reproject each file to most common CRS
-      for tif in list_of_files:
-          tif_array = rio.open(tif)
-          tif_crs = tif_array.crs
-          if tif_crs != crs_dom:
-              with rio.open(tif) as src:
-                  transform, width, height = calculate_default_transform(
-                      src.crs, crs_dom, src.width, src.height, *src.bounds)
-                  kwargs = src.meta.copy()
-                  kwargs.update({
-                      'crs': crs_dom,
-                      'transform': transform,
-                      'width': width,
-                      'height': height})
-                  with rio.open(tif, 'w', **kwargs) as dst:
-                      for i in range(1, src.count +1):
-                          reproject(
-                              source=rio.band(src, i),
-                              destination=rio.band(dst, i),
-                              src_transform=src.transform,
-                              src_crs=src.crs,
-                              dst_transform=transform,
-                              dst_crs=crs_dom)
-  else:
-    crs_dom = crs_list_unique[0]
 
-  # determine no data value
-  nodata_val = rio.open(list_of_files[0]).nodata
-  if not nodata_val:
-      nodata_val = 0
+  # Files actually fed to merge(). When CRSs disagree, each mismatched scene is
+  # reprojected to the dominant CRS in a TEMP directory and swapped in here. We
+  # never reopen a source scene in 'w' mode: doing so used to overwrite the
+  # operator's native-CRS input file in place, permanently destroying it.
+  merge_inputs = list(list_of_files)
+  tmp_dir = None
+  try:
+    if len(crs_list_unique) != 1:
+        crs_dom = max(crs_list, key=crs_list.count)    # most common CRS
+        tmp_dir = tempfile.mkdtemp(prefix='ls_merge_reproj_')
+        for idx, tif in enumerate(list_of_files):
+            with rio.open(tif) as src:
+                if src.crs == crs_dom:
+                    continue
+                transform, width, height = calculate_default_transform(
+                    src.crs, crs_dom, src.width, src.height, *src.bounds)
+                kwargs = src.meta.copy()
+                kwargs.update({
+                    'crs': crs_dom,
+                    'transform': transform,
+                    'width': width,
+                    'height': height})
+                reproj_path = os.path.join(tmp_dir, f'{idx}_{os.path.basename(tif)}')
+                with rio.open(reproj_path, 'w', **kwargs) as dst:
+                    for i in range(1, src.count + 1):
+                        reproject(
+                            source=rio.band(src, i),
+                            destination=rio.band(dst, i),
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=crs_dom)
+                merge_inputs[idx] = reproj_path
+    else:
+      crs_dom = crs_list_unique[0]
 
-  # number of bands
-  bands = rio.open(list_of_files[0]).count
+    # determine no data value
+    nodata_val = rio.open(merge_inputs[0]).nodata
+    if not nodata_val:
+        nodata_val = 0
 
-  # merge the files
-  im_array, im_trans = merge(list_of_files, method=method)
+    # number of bands
+    bands = rio.open(merge_inputs[0]).count
 
-  # write the merged images to file
-  with rio.open(
-      outfile, "w",
-      driver = 'GTiff',
-      count = bands,
-      dtype = im_array.dtype,
-      height = im_array.shape[1],
-      width = im_array.shape[2],
-      nodata = nodata_val,
-      crs = crs_dom,
-      transform = im_trans) as dest:
-      dest.write(im_array)
+    # merge the files
+    im_array, im_trans = merge(merge_inputs, method=method)
+
+    # write the merged images to file
+    with rio.open(
+        outfile, "w",
+        driver = 'GTiff',
+        count = bands,
+        dtype = im_array.dtype,
+        height = im_array.shape[1],
+        width = im_array.shape[2],
+        nodata = nodata_val,
+        crs = crs_dom,
+        transform = im_trans) as dest:
+        dest.write(im_array)
+  finally:
+    if tmp_dir is not None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def rename_individual_scene_files(directory, event_name, quiet=False):
+  """Event-rename the per-scene product TIFs left in `directory` after a merge.
+
+  Used by the -merge post-step to tidy the individual scenes that sit alongside
+  the merged COG: each scene gets its date moved to the end + a `_day` suffix
+  (via rename_with_event). Files that are merged outputs ('merged' in the name)
+  or already carry the event prefix are skipped. A per-file failure is warned and
+  skipped, never fatal.
+
+  Factored out of process_landsat89's merge phase so both the cloud-mask loop and
+  the product loop share one implementation (the copy-paste split was the source
+  of a bug where the cloud-mask loop renamed the wrong directory).
+  """
+  for indiv_file in glob.glob(os.path.join(directory, '*.tif')):
+    basename = os.path.basename(indiv_file)
+    if 'merged' in basename or basename.startswith(event_name):
+      continue
+    try:
+      rename_with_event(indiv_file, event_name, quiet=quiet)
+    except Exception as e:
+      print(f"  Warning: Could not rename {basename}: {e}")
+
 
 def ls_merge(dir_to_merge, mask=False, method='first'):
-  # create output filename
-  ims = glob.glob(os.path.join(dir_to_merge, '*tif'))
+  # Gather inputs, excluding any prior merged output so a re-merge (e.g. -force)
+  # doesn't fold the previous mosaic back into the new one.
+  ims = sorted(
+      im for im in glob.glob(os.path.join(dir_to_merge, '*.tif'))
+      if 'merged' not in os.path.basename(im)
+  )
+  if not ims:
+      raise FileNotFoundError(f'No (non-merged) .tif files to merge in: {dir_to_merge}')
 
-  # Parse filename - handle both event-named and regular files
+  # Sensor + product come from the leading tokens. The DATE comes from the
+  # shared single-source extractor (file_naming.extract_datetime_from_filename),
+  # which parses every input shape ls_merge can receive: a fresh scene
+  # (..._YYYYMMDD_HHMMSS_PPPRRR.tif), an already-renamed scene
+  # (..._HHMMSS_PPPRRR_YYYY-MM-DD_day.tif), and an ISO-Zulu scene
+  # (..._YYYY-MM-DDTHH:MM:SSZ.tif). A merged mosaic spans multiple acquisition
+  # times, so only the DATE is carried into the name (day granularity); path/row
+  # is dropped and rename_with_event() later appends the _day suffix.
   basename = os.path.basename(ims[0])
   parts = basename.split('_')
+  sat = parts[0]
+  prod_type = parts[1]
 
-  # Check if this is an event-named file (starts with YYYYMM pattern)
-  if len(parts) > 3 and parts[0].isdigit() and len(parts[0]) == 6:
-      # Event-named file: EVENT_NAME_LC08_product_..._YYYY-MM-DD_day.tif
-      # Find the satellite (LC08 or LC09)
-      sat = None
-      prod_type = None
-      for i, part in enumerate(parts):
-          if part in ['LC08', 'LC09', 'LC8', 'LC9']:
-              sat = part
-              if i + 1 < len(parts):
-                  prod_type = parts[i + 1]
-              break
+  matched, _ = extract_datetime_from_filename(basename)
+  if not matched:
+      raise ValueError(f'Could not extract a date from filename: {basename}')
+  date_iso = matched[:10] if '-' in matched else f'{matched[0:4]}-{matched[4:6]}-{matched[6:8]}'
 
-      # Extract date from end (format: YYYY-MM-DD)
-      if len(parts) >= 2 and parts[-2] == 'day':
-          date_part = parts[-3]  # YYYY-MM-DD
-          im_date = date_part.replace('-', '')  # Convert to YYYYMMDD
-      else:
-          # Fallback: use today's date
-          from datetime import datetime
-          im_date = datetime.now().strftime('%Y%m%d')
-  else:
-      # Regular file: LC08_product_YYYYMMDD_...
-      sat = parts[0]
-      prod_type = parts[1]
-      im_date = parts[2]
-
-  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_{im_date}_merged.tif')
+  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_merged_{date_iso}.tif')
 
   # merge images
   gen_merge(ims, merged_output, method)
@@ -1550,4 +1598,10 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
     cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
+    # apply_cloud_mask writes to <dir_to_merge>/masked/<basename with _masked
+    # inserted after _merged>
+    masked_dir = os.path.join(Path(merged_output).parent, 'masked')
+    masked_basename = os.path.basename(merged_output).replace('_merged', '_merged_masked', 1)
+    return os.path.join(masked_dir, masked_basename)
+
   return merged_output

@@ -3,8 +3,12 @@
 """
 sentinel2_functions.py
 
-Name:       Kaylee Sharp
-Date:       February 2024
+Name:           Kaylee Sharp
+Edited:         Aaron Serre
+
+Date Created:   February 2024
+Date Edited:    July 2026       
+
 """
 
 import os
@@ -20,6 +24,7 @@ from rasterio.enums import Resampling
 from pathlib import Path
 import requests
 import shutil
+import tempfile
 from scipy.signal import medfilt2d
 from pyproj import Transformer
 import geopandas as gpd
@@ -238,7 +243,12 @@ def apply_cloud_mask(tif_to_mask, cloud_mask):
     os.mkdir(masked_dir)
   
   # masked output filename
-  masked_out_file = os.path.basename(tif_to_mask).replace('.tif', '_masked.tif')
+  base = os.path.splitext(os.path.basename(tif_to_mask))[0]
+  parts = base.split("_") 
+  timestamp = parts[-1]
+  prefix = "_".join(parts[:-1])
+  masked_out_file = f"{prefix}_masked_{timestamp}.tif"
+
   masked_path = os.path.join(masked_dir, masked_out_file)
   
   # open geotiff to mask and cloud mask file
@@ -337,7 +347,7 @@ def gen_true_color(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -377,7 +387,7 @@ def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -414,7 +424,7 @@ def gen_swir(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -451,7 +461,7 @@ def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -501,9 +511,9 @@ def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, ndwi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask) 
+    apply_cloud_mask(outname, mask)
 
 def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
@@ -551,7 +561,7 @@ def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, mndwi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -601,7 +611,7 @@ def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
   result = dump_geotiff_float(outname, ndvi, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -646,7 +656,7 @@ def gen_nbr(safe, outname, level, mask=None):
   result = dump_geotiff_float(outname, nbr, projref, in_geo)
 
   # apply cloud mask
-  if mask:
+  if mask is not None:
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
@@ -972,65 +982,86 @@ def gen_merge(list_of_files, outfile, method='first'):
   # get unique CRS found in the inputted list of files to merge
   crs_list = [rio.open(im).crs for im in list_of_files]
   crs_list_unique = list(set(crs_list))
-  if len(crs_list_unique) != 1:
-      crs_dom = max(set(crs_list), key=crs_list.count)    # most common CRS
-      # reproject each file to most common CRS
-      for tif in list_of_files:
-          tif_array = rio.open(tif)
-          tif_crs = tif_array.crs
-          if tif_crs != crs_dom:
-              with rio.open(tif) as src:
-                  transform, width, height = calculate_default_transform(
-                      src.crs, crs_dom, src.width, src.height, *src.bounds)
-                  kwargs = src.meta.copy()
-                  kwargs.update({
-                      'crs': crs_dom,
-                      'transform': transform,
-                      'width': width,
-                      'height': height})
-                  with rio.open(tif, 'w', **kwargs) as dst:
-                      for i in range(1, src.count +1):
-                          reproject(
-                              source=rio.band(src, i),
-                              destination=rio.band(dst, i),
-                              src_transform=src.transform,
-                              src_crs=src.crs,
-                              dst_transform=transform,
-                              dst_crs=crs_dom)
-  else:
-    crs_dom = crs_list_unique[0]
 
-  # determine no data value
-  nodata_val = rio.open(list_of_files[0]).nodata
-  if not nodata_val:
-      nodata_val = 0
-  
-  # number of bands
-  bands = rio.open(list_of_files[0]).count
+  # Files actually fed to merge(). When CRSs disagree, each mismatched scene is
+  # reprojected to the dominant CRS in a TEMP directory and swapped in here. We
+  # never reopen a source scene in 'w' mode: doing so used to overwrite (and
+  # truncate mid-read) the input file in place, corrupting the merge. Mirrors the
+  # Landsat gen_merge fix (landsat89_functions.py).
+  merge_inputs = list(list_of_files)
+  tmp_dir = None
+  try:
+    if len(crs_list_unique) != 1:
+        crs_dom = max(crs_list, key=crs_list.count)    # most common CRS
+        tmp_dir = tempfile.mkdtemp(prefix='s2_merge_reproj_')
+        for idx, tif in enumerate(list_of_files):
+            with rio.open(tif) as src:
+                if src.crs == crs_dom:
+                    continue
+                transform, width, height = calculate_default_transform(
+                    src.crs, crs_dom, src.width, src.height, *src.bounds)
+                kwargs = src.meta.copy()
+                kwargs.update({
+                    'crs': crs_dom,
+                    'transform': transform,
+                    'width': width,
+                    'height': height})
+                reproj_path = os.path.join(tmp_dir, f'{idx}_{os.path.basename(tif)}')
+                with rio.open(reproj_path, 'w', **kwargs) as dst:
+                    for i in range(1, src.count + 1):
+                        reproject(
+                            source=rio.band(src, i),
+                            destination=rio.band(dst, i),
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=crs_dom)
+                merge_inputs[idx] = reproj_path
+    else:
+      crs_dom = crs_list_unique[0]
 
-  # merge the files
-  im_array, im_trans = merge(list_of_files, method=method)
-  
-  # write the merged images to file
-  with rio.open(
-      outfile, "w",
-      driver = 'GTiff',
-      count = bands,
-      dtype = im_array.dtype,
-      height = im_array.shape[1],
-      width = im_array.shape[2],
-      nodata = nodata_val,
-      crs = crs_dom,
-      transform = im_trans) as dest:
-      dest.write(im_array)
+    # determine no data value
+    nodata_val = rio.open(merge_inputs[0]).nodata
+    if not nodata_val:
+        nodata_val = 0
+
+    # number of bands
+    bands = rio.open(merge_inputs[0]).count
+
+    # merge the files
+    im_array, im_trans = merge(merge_inputs, method=method)
+
+    # write the merged images to file
+    with rio.open(
+        outfile, "w",
+        driver = 'GTiff',
+        count = bands,
+        dtype = im_array.dtype,
+        height = im_array.shape[1],
+        width = im_array.shape[2],
+        nodata = nodata_val,
+        crs = crs_dom,
+        transform = im_trans) as dest:
+        dest.write(im_array)
+  finally:
+    if tmp_dir is not None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def s2_merge(dir_to_merge, mask=False, method='first'): 
   # create output filename
   ims = glob.glob(os.path.join(dir_to_merge, '*tif'))
-  sat = os.path.basename(ims[0]).split('_')[0]
-  prod_type = os.path.basename(ims[0]).split('_')[2]
-  im_date = os.path.basename(ims[0]).split('_')[3]
-  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_{im_date}_merged.tif')
+
+  parts = os.path.splitext(os.path.basename(ims[0]))[0].split("_")
+
+  sat = parts[0]
+  level = parts[1]
+  product = parts[2]
+  timestamp = parts[-1]
+
+  merged_output = os.path.join(
+      dir_to_merge,
+      f"{sat}_{level}_{product}_merged_{timestamp}.tif"
+  )
 
   # merge images
   gen_merge(ims, merged_output, method)
@@ -1044,4 +1075,12 @@ def s2_merge(dir_to_merge, mask=False, method='first'):
     cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
+    # apply_cloud_mask writes <dir_to_merge>/masked/<prefix>_masked_<timestamp>.tif.
+    # Return THAT path (not the unmasked merge) so the caller COGs/uploads the
+    # masked product. Reconstructed from the same split apply_cloud_mask uses, so
+    # it is byte-identical to what was written. Mirrors Landsat ls_merge.
+    base = os.path.splitext(os.path.basename(merged_output))[0]
+    mparts = base.split("_")
+    masked_basename = f"{'_'.join(mparts[:-1])}_masked_{mparts[-1]}.tif"
+    return os.path.join(Path(merged_output).parent, 'masked', masked_basename)
   return merged_output

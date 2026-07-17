@@ -2,7 +2,11 @@
 process_sentinel2.py
 
 Name:           Kaylee Sharp
-Date:           February 2025
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026       
+
 """
 
 from datetime import datetime
@@ -299,7 +303,15 @@ else:
         prod_dirs.append(prod_dir)
         if not os.path.isdir(prod_dir):
             os.mkdir(prod_dir)
-        prod_name = os.path.join(prod_dir, f'{sat}_cloudMask_{date}_{time}_{tile}.tif')
+        timestamp = (
+            f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+            f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+        )
+        
+        prod_name = os.path.join(
+            prod_dir,
+            f"{sat}_{level}_cloudMask_{tile}_{timestamp}.tif"
+        )
 
         # Check if final output file already exists
         final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -347,7 +359,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_trueColor_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_trueColor_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -358,7 +378,7 @@ else:
         try:
             # produce true color image
             print('\n* Processing true color')
-            gen_true_color(ddir, prod_name, level, cloudMask, ray)
+            gen_true_color(ddir, prod_name, level, None, ray)
 
             # Convert to COG (default) and optionally rename with event
             # Skip COG conversion if merging - will convert merged file instead
@@ -391,7 +411,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_naturalColor_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_naturalColor_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -402,7 +430,7 @@ else:
         try:
             # produce natural color image
             print('\n* Processing natural color')
-            gen_natural_color(ddir, prod_name, level, cloudMask, ray)
+            gen_natural_color(ddir, prod_name, level, None, ray)
 
             # Convert to COG (default) and optionally rename with event
             # Skip COG conversion if merging - will convert merged file instead
@@ -435,7 +463,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_shortwaveInfrared_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_shortwaveInfrared_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -446,7 +482,7 @@ else:
         try:
           # produce SWIR image
           print('\n* Porcessing short wave infrared')
-          gen_swir(ddir, prod_name, level, cloudMask, ray)
+          gen_swir(ddir, prod_name, level, None, ray)
 
           # Convert to COG (default) and optionally rename with event
           # Skip COG conversion if merging - will convert merged file instead
@@ -479,7 +515,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_colorInfrared_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_colorInfrared_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -490,7 +534,7 @@ else:
         try:
           # produce color infrared image
           print('\n* Processing color infrared')
-          gen_color_infrared(ddir, prod_name, level, cloudMask, ray)
+          gen_color_infrared(ddir, prod_name, level, None, ray)
 
           # Convert to COG (default) and optionally rename with event
           # Skip COG conversion if merging - will convert merged file instead
@@ -522,7 +566,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDWI_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_NDWI_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -565,7 +617,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_MNDWI_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_MNDWI_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -608,7 +668,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NDVI_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_NDVI_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -651,7 +719,15 @@ else:
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
-      prod_name = os.path.join(prod_dir, f'{sat}_{level}_NBR_{date}_{time}_{tile}.tif')
+      timestamp = (
+          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+      )
+      
+      prod_name = os.path.join(
+          prod_dir,
+          f"{sat}_{level}_NBR_{tile}_{timestamp}.tif"
+      )
 
       # Check if final output file already exists
       final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -720,7 +796,15 @@ else:
       for nstd in args.we_nstd:
           # format output filename
           nstd_str = str(nstd).replace('.', '_')
-          prod_name = os.path.join(prod_dir, f'{sat}_waterExtent_NSTD_{nstd_str}_{date}.tif')
+          timestamp = (
+              f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+              f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
+          )
+          
+          prod_name = os.path.join(
+              prod_dir,
+              f"{sat}_{level}_waterExtent_NSTD_{tile}_{timestamp}.tif"
+          )
 
           # Check if final output file already exists
           final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -795,9 +879,13 @@ else:
         if existing_merged and not args.force:
             print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
             continue
+        # Determine if this product should be masked (indices only)
+        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
+        mask_status = args.mask if is_index else False
+
         # merge products of the same date
-        print('Merging:', prod_dir)
-        merged_file = s2_merge(prod_dir, args.mask)
+        print(f'Merging: {prod_dir} (Masking: {mask_status})')
+        merged_file = s2_merge(prod_dir, mask_status)
 
         # Convert merged file to COG and optionally rename with event
         if not args.tif_only:

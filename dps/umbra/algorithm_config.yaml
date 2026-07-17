@@ -1,0 +1,114 @@
+algorithm_name: umbra
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response
+  products. Fetches the source GEC raster for the requested date from the CSDA
+  vendor S3 bucket (csda-data-vendor-umbra), applies the selected radiometric
+  calibration (sigma/beta/gamma/rcs), optionally Lee-filters it, reprojects, and
+  embeds activation-event GeoTIFF metadata tags.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/umbra/build-env.sh
+run_command: disasters-product-algorithms/dps/umbra/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements. SAR scenes are smaller than optical mosaics.
+ram_min: 32
+cores_min: 4
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for Umbra SAR COG disaster-product generation.
+citation: NASA Disasters Program
+keywords: umbra, sar, cog, disasters, flood, sigma0, calibration
+# AWS read access: NO file input -- the CLI FETCHES the source GEC raster from
+# the CSDA vendor bucket (default csda-data-vendor-umbra, prefix 'disasters') at
+# run time. The DPS-worker role needs read access to that bucket (confirmed available).
+inputs:
+  - name: date
+    label: Target date
+    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
+    type: string
+  - name: product
+    label: Calibration product
+    doc: "Calibration product to generate: sigma, beta, gamma, or rcs."
+    type: string
+    default: "sigma"
+  - name: bucket
+    label: Vendor S3 bucket
+    doc: CSDA vendor S3 bucket holding the Umbra source rasters (DPS worker needs read access).
+    type: string
+    default: "csda-data-vendor-umbra"
+  - name: prefix
+    label: S3 prefix
+    doc: Key prefix within the vendor bucket to search for scenes.
+    type: string
+    default: "disasters"
+  - name: apply_filter
+    label: Apply Lee filter
+    doc: Apply a Lee speckle filter to the product.
+    type: boolean
+    default: false
+  - name: filter_size
+    label: Lee filter window size
+    doc: Lee filter window size (e.g. 3, 5, 7); only used when apply_filter is true.
+    type: int
+    default: 5
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857 | EPSG:4326."
+    type: string
+    default: "native"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
+    type: string
+    default: "YYYYMM_Hazard_Location"
+  - name: source_label
+    label: Source
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Umbra."
+    type: string
+  - name: compression_level
+    label: COG compression level
+    doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. ~1 fast, low compression; ~12 balanced; 22 max compression (default)."
+    type: int
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string
+    default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: save_png
+    label: Save PNG quicklook
+    doc: Also write a .png quicklook next to each product COG.
+    type: boolean
+    default: true
+  - name: png_min
+    label: PNG min (optional)
+    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: png_max
+    label: PNG max (optional)
+    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: delete_cog
+    label: Delete COG from home after upload
+    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
+    type: boolean
+    default: true
+outputs:
+  - name: output
+    type: Directory

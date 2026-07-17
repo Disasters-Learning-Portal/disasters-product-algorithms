@@ -5,7 +5,11 @@ dependencies:
   - ipykernel
   # Dependencies for sentintel-2 scripts
   - p7zip==16.02
-  - libgdal-jp2openjpeg==3.10.3
+  # JPEG2000 (.jp2) driver for Sentinel-2. UNPINNED on purpose: it is ABI-locked
+  # to the base image's libgdal-core, so let conda match whatever GDAL the pangeo
+  # base ships. An exact pin (==3.10.3) is what broke the 2025.08.14 -> 2026.06.04
+  # base bump (base shipped GDAL 3.12.3). Do not re-pin to a specific version.
+  - libgdal-jp2openjpeg
   # Dependencies for VS Code IDE
   - code-server>=3.2
   - jupyter-vscode-proxy
@@ -14,10 +18,11 @@ dependencies:
   # Remove once Pangeo has upstream.
   - virtualizarr>=2.0.0
   - icechunk
-  # Working around https://github.com/holoviz/geoviews/pull/794
-  - geoviews-core==1.14.1
-  # Working around https://github.com/stac-utils/pystac/issues/1575
-  - pystac==1.14.1
+  # geoviews PR #794 (Cartopy 0.25 compat) shipped in 1.14.1; floor keeps the fix
+  # and lets the solver pick a Python-3.13-compatible build.
+  - geoviews-core>=1.14.1
+  # pystac issue #1575 fixed in 1.14.0; floor keeps the fix, drops the exact pin.
+  - pystac>=1.14.0
   # Required by tools/new_sensor.py at runtime. nbformat is part of Jupyter
   # so usually already in Pangeo base, but listing both explicitly here
   # guarantees the scaffolder runs on a fresh hub pod without a manual
@@ -37,6 +42,23 @@ dependencies:
     - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
     - jupyter-sshd-proxy
     - jupyterlab-bxplorer
+    # maap-py: MAAP DPS client so `from maap.maap import MAAP` works on every hub
+    # pod without a manual `pip install maap-py` (used to register/submit DPS
+    # jobs from the hub). Pinned to the version verified against MAAP ops.
+    # Deliberately NOT in pyproject [project.dependencies] -- that would leak it
+    # into the algorithms package + DPS workers, which never import it. Bump this
+    # pin if MAAP ops requires a newer client.
+    - maap-py==4.2.0
+    # MAAP DPS JupyterLab 4 extensions (prebuilt wheels, no node build). These
+    # add the "MAAP Plugins" Launcher tiles: Algorithm Catalog / Register
+    # Algorithms / My Builds & Deployments (algorithms ext) and Submit Jobs /
+    # View My Jobs (dps ext). The server extension auto-enables via its
+    # jupyter_server_config.d dropin and bridges env vars (MAAP_API_HOST,
+    # MAAP_PGT) into the frontend; tiles render without those but only call the
+    # MAAP API once they're set. Versions verified live on the JL4 Pangeo base.
+    - maap-algorithms-jupyter-extension==1.0.1
+    - maap-dps-jupyter-extension==2.0.1
+    - maap-jupyter-server-extension==3.0.1
     # disasters-product-algorithms is intentionally NOT installed here. It's
     # installed in a separate Dockerfile RUN layer via
     # `pip install --no-deps /srv/repo/algorithms`, which uses the local

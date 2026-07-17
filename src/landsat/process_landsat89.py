@@ -4,7 +4,10 @@
 process_landsat89.py
 
 Name:           Kaylee Sharp
-Date:           February 2025
+Edited:         Aaron Serre
+
+Date Created:   February 2025
+Date Edited:    July 2026  
 
 """
 
@@ -39,6 +42,35 @@ class Unbuffered(object):
 
 sys.stdout = Unbuffered(sys.stdout)
 sys.stderr = Unbuffered(sys.stderr)
+
+def _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata):
+    """Convert/rename the masked copy of an individual (non-merged) product,
+    mirroring what's already done for the unmasked prod_name. apply_cloud_mask
+    writes the masked file to <prod_dir>/masked/<basename with masked inserted
+    after tile>; that file was previously never COG'd or event-renamed."""
+    if not cloudMask:
+        return
+    masked_dir = os.path.join(Path(prod_name).parent, 'masked')
+    masked_basename_parts = os.path.basename(prod_name).split('_', 3)
+    if len(masked_basename_parts) != 4:
+        return
+    masked_basename = f'{masked_basename_parts[0]}_{masked_basename_parts[1]}_{masked_basename_parts[2]}_masked_{masked_basename_parts[3]}'
+    masked_path = os.path.join(masked_dir, masked_basename)
+    if not os.path.exists(masked_path):
+        return
+    if not args.tif_only:
+        cog_path = convert_to_cog(
+            masked_path,
+            nodata=args.nodata,
+            dst_crs=dst_crs_value,
+            metadata=metadata,
+            compression=args.compression,
+            compression_level=args.compression_level
+        )
+        if args.event and not args.merge:
+            rename_with_event(cog_path, args.event)
+    elif args.event and not args.merge:
+        rename_with_event(masked_path, args.event)
 
 if __name__ == "__main__":
     then = datetime.now()
@@ -243,7 +275,9 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_cloudMask_{date}_{time}_{pthrw}.tif')
+                # NOTE: tile (pthrw) now leads, directly after the product name,
+                # so it survives to the front of every downstream rename step.
+                prod_name = os.path.join(prod_dir, f'{sensor}_cloudMask_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -305,7 +339,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_trueColor_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_trueColor_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -316,7 +350,7 @@ if __name__ == "__main__":
                     try:
                         # produce true color image
                         print('\n* Processing true color')
-                        genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genTrueColor(b4_file, b3_file, b2_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         if not args.tif_only:
@@ -333,6 +367,11 @@ if __name__ == "__main__":
                         elif args.event and not args.merge:
                             # Rename TIF without COG conversion
                             rename_with_event(prod_name, args.event)
+
+                        # The masked copy (if cloud masking is on) is written by
+                        # apply_cloud_mask to <prod_dir>/masked/ but was never
+                        # itself COG'd/renamed - do that here too.
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
 
                         processing_success.append((os.path.basename(ddir), 'True Color', 'Success'))
                     except Exception as e:
@@ -352,7 +391,7 @@ if __name__ == "__main__":
                     prod_dirs.append(prod_dir)
                     if not os.path.isdir(prod_dir):
                         os.mkdir(prod_dir)
-                    prod_name = os.path.join(prod_dir, f'{sensor}_panchromatic_{date}_{time}_{pthrw}.tif')
+                    prod_name = os.path.join(prod_dir, f'{sensor}_panchromatic_{pthrw}_{date}_{time}.tif')
 
                     # Check if final output file already exists
                     final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -362,7 +401,7 @@ if __name__ == "__main__":
                     else:
                         try:
                             print('\n* Processing panchromatic')
-                            genPanchromatic(b8_file, sun_zen, prod_name, cloudMask)
+                            genPanchromatic(b8_file, sun_zen, prod_name, None)
 
                             # Convert to COG (default) and optionally rename with event
                             # Skip COG conversion if merging - will convert merged file instead
@@ -381,6 +420,8 @@ if __name__ == "__main__":
                                 # Rename TIF without COG conversion
                                 rename_with_event(prod_name, args.event)
 
+                            _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                             processing_success.append((os.path.basename(ddir), 'Panchromatic', 'Success'))
                         except Exception as e:
                             error_msg = f"{type(e).__name__}: {str(e)}"
@@ -395,7 +436,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_naturalColor_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_naturalColor_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -405,7 +446,7 @@ if __name__ == "__main__":
                 else:
                     try:
                         print('\n* Processing natural color')
-                        genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genNaturalColor(b6_file, b5_file, b4_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         # Skip COG conversion if merging - will convert merged file instead
@@ -436,6 +477,8 @@ if __name__ == "__main__":
                             # Rename TIF without COG conversion
 
                             rename_with_event(prod_name, args.event)
+
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
 
                         processing_success.append((os.path.basename(ddir), 'Natural Color', 'Success'))
                     except Exception as e:
@@ -451,7 +494,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_colorInfrared_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_colorInfrared_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -461,7 +504,7 @@ if __name__ == "__main__":
                 else:
                     try:
                         print('\n* Processing color infrared')
-                        genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, cloudMask)
+                        genColorInfrared(b5_file, b4_file, b3_file, qa_file, sun_zen, prod_name, None)
 
                         # Convert to COG (default) and optionally rename with event
                         # Skip COG conversion if merging - will convert merged file instead
@@ -493,6 +536,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -506,7 +551,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NDVI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NDVI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -548,6 +593,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'NDVI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -561,7 +608,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NDWI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NDWI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -603,6 +650,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'NDWI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -616,7 +665,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_MNDWI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_MNDWI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -658,6 +707,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'MNDWI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -671,7 +722,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_EVI_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_EVI_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -713,6 +764,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'EVI', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -726,7 +779,7 @@ if __name__ == "__main__":
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
-                prod_name = os.path.join(prod_dir, f'{sensor}_NBR_{date}_{time}_{pthrw}.tif')
+                prod_name = os.path.join(prod_dir, f'{sensor}_NBR_{pthrw}_{date}_{time}.tif')
 
                 # Check if final output file already exists
                 final_name = get_final_filename(prod_name, args.event, args.tif_only)
@@ -768,6 +821,8 @@ if __name__ == "__main__":
 
                             rename_with_event(prod_name, args.event)
 
+                        _process_masked_individual(prod_name, cloudMask, args, dst_crs_value, metadata)
+
                         processing_success.append((os.path.basename(ddir), 'NBR', 'Success'))
                     except Exception as e:
                         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -807,8 +862,11 @@ if __name__ == "__main__":
                     # format output filename
                     nstd_str = str(nstd).replace('.', '_')
                     prod_name = os.path.join(prod_dir, f'{sensor}_waterExtent_NSTD_{nstd_str}_{date}.tif')
-                    check = glob.glob(prod_name)
-                    if len(check) == 0 or args.force:
+                    # Predict the post-COG/rename name so re-runs skip correctly
+                    # when an event is set (the raw prod_name is gone after the
+                    # rename). Matches the skip check used by the other products.
+                    final_name = get_final_filename(prod_name, args.event, args.tif_only)
+                    if not os.path.exists(final_name) or args.force:
                         try:
                             # produce water extent
                             print(f'\n* Processing Water Extent (NSTD: {nstd})')
@@ -885,17 +943,11 @@ if __name__ == "__main__":
                     # Rename TIF without COG conversion
                     rename_with_event(merged_file, args.event)
 
-                # Also rename individual files with event (if event name provided)
+                # Tidy the individual scenes left in the just-merged directory.
+                # Use cm_dir (the directory just merged), not the stale per-scene
+                # loop variable prod_dir, which would point at an unrelated product.
                 if args.event:
-                    individual_files = glob.glob(os.path.join(prod_dir, '*.tif'))
-                    for indiv_file in individual_files:
-                        # Skip files that are already renamed or are merged files
-                        basename = os.path.basename(indiv_file)
-                        if 'merged' not in basename and not basename.startswith(args.event):
-                            try:
-                                rename_with_event(indiv_file, args.event)
-                            except Exception as e:
-                                print(f"  Warning: Could not rename {basename}: {e}")
+                    rename_individual_scene_files(cm_dir, args.event)
 
             for prod_dir in dirs_to_merge:
                 # Skip the (re-)merge if a merged COG already exists for this product (unless -force).
@@ -904,8 +956,11 @@ if __name__ == "__main__":
                     print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
                     continue
                 # merge products of the same date
-                print('Merging:', prod_dir)
-                merged_file = ls_merge(prod_dir, args.mask)
+                is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'evi', 'nbr'}
+                mask_status = args.mask if is_index else False
+
+                print(f'Merging: {prod_dir} (Masking: {mask_status})')
+                merged_file = ls_merge(prod_dir, mask_status)
 
                 # Convert merged file to COG (default) and optionally rename with event
                 if not args.tif_only:
@@ -923,17 +978,9 @@ if __name__ == "__main__":
                     # Rename TIF without COG conversion
                     rename_with_event(merged_file, args.event)
 
-                # Also rename individual files with event (if event name provided)
+                # Tidy the individual scenes left alongside the merged product.
                 if args.event:
-                    individual_files = glob.glob(os.path.join(prod_dir, '*.tif'))
-                    for indiv_file in individual_files:
-                        # Skip files that are already renamed or are merged files
-                        basename = os.path.basename(indiv_file)
-                        if 'merged' not in basename and not basename.startswith(args.event):
-                            try:
-                                rename_with_event(indiv_file, args.event)
-                            except Exception as e:
-                                print(f"  Warning: Could not rename {basename}: {e}")
+                    rename_individual_scene_files(prod_dir, args.event)
 
     if not args.unzip_only:
         # Write processing summary and log file

@@ -1,0 +1,125 @@
+algorithm_name: satellogic
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Fetch Satellogic L1B/L1D reflectance rasters from the CSDA vendor S3 bucket
+  (csda-data-vendor-satellogic), generate a disaster-response product (true
+  color, color IR, NDVI, NDWI, or EVI), and write a Cloud Optimized GeoTIFF with
+  reprojection and activation-event GeoTIFF metadata tags.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/satellogic/build-env.sh
+run_command: disasters-product-algorithms/dps/satellogic/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements. Satellogic scenes are single-strip rasters.
+ram_min: 32
+cores_min: 4
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for Satellogic COG disaster-product generation.
+citation: NASA Disasters Program
+keywords: satellogic, cog, disasters, flood, fire, ndvi, ndwi, evi
+# AWS read access: NO file input -- the CLI FETCHES source rasters from the CSDA
+# vendor bucket (csda-data-vendor-satellogic, prefix 'disasters') at run time.
+# The bucket/prefix are HARDCODED in the CLI (no flag), so the bucket/prefix
+# inputs below are informational only. The DPS-worker role needs read access to
+# that bucket (confirmed available).
+inputs:
+  - name: date
+    label: Target datetime
+    doc: "Target acquisition datetime 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csda-data-vendor-satellogic/disasters/ (see docs/DPS.md 'Finding available scenes')."
+    type: string
+  - name: product
+    label: Product
+    doc: "One of: truecolor, colorir, ndvi, ndwi, evi."
+    type: string
+    default: "truecolor"
+  - name: level
+    label: Processing level
+    doc: "Satellogic processing level to select, e.g. L1D or L1B."
+    type: string
+    default: "L1D"
+  - name: bucket
+    label: Vendor S3 bucket (informational)
+    doc: "CSDA vendor bucket the rasters are read from. The CLI hardcodes this default and does NOT expose a bucket flag, so changing it has no effect -- documented to make the AWS read-access requirement explicit."
+    type: string
+    default: "csda-data-vendor-satellogic"
+  - name: prefix
+    label: Vendor S3 prefix (informational)
+    doc: "Key prefix under the vendor bucket. The CLI hardcodes this default and does NOT expose a prefix flag, so changing it has no effect -- documented only."
+    type: string
+    default: "disasters"
+  - name: use_mask
+    label: Apply cloud mask
+    doc: Apply the cloud mask (--use_mask).
+    type: boolean
+    default: false
+  - name: visualize
+    label: Visualize (RGB only)
+    doc: Apply normalization + gamma correction for RGB products (--visualize).
+    type: boolean
+    default: false
+  - name: gamma
+    label: Gamma correction
+    doc: Gamma correction for RGB products (only used when visualize is true).
+    type: float
+    default: 0.7
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
+    type: string
+    default: "native"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
+    type: string
+    default: "YYYYMM_Hazard_Location"
+  - name: source_label
+    label: Source
+    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Satellogic."
+    type: string
+  - name: compression_level
+    label: COG compression level
+    doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. ~1 fast, low compression; ~12 balanced; 22 max compression (default)."
+    type: int
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string
+    default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless)."
+    type: boolean
+    default: false
+  - name: save_png
+    label: Save PNG quicklook
+    doc: Also write a .png quicklook next to each product COG.
+    type: boolean
+    default: true
+  - name: png_min
+    label: PNG min (optional)
+    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: png_max
+    label: PNG max (optional)
+    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
+    type: string
+    default: ""
+  - name: delete_cog
+    label: Delete COG from home after upload
+    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
+    type: boolean
+    default: true
+outputs:
+  - name: output
+    type: Directory

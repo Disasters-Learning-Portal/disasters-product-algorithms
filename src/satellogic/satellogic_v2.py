@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 from osgeo import gdal
 from datetime import datetime
@@ -13,29 +14,53 @@ NODATA_FLOAT = -9999.0
 
 # Retieving satellogic data from S3
 def retrieve_satellogic_resources(date, level, bucket="csda-data-vendor-satellogic", prefix="disasters"):
-
     files = retrieve_s3_file_list(bucket, prefix)
 
-    filtered_files = [x for x in files if f"_{level}_" in x.split("/")[1]]
+    filtered_files = [
+        x for x in files
+        if len(x.split("/")) > 1 and f"_{level}_" in x.split("/")[1]
+    ]
 
-    subdirs = list(set([x.split("/")[1] for x in filtered_files]))
+    subdirs = sorted(set(x.split("/")[1] for x in filtered_files))
 
-    dates = [datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S") for x in subdirs]
+    dates = [
+        datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S")
+        for x in subdirs
+    ]
 
     if isinstance(date, str):
         date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
 
     closest_date = min(dates, key=lambda d: abs(d - date))
-
     date_prefix = closest_date.strftime("%Y%m%d_%H%M%S")
 
     selected = [x for x in subdirs if x.startswith(date_prefix)][0]
 
-    metadata = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] != "rasters")]
+    selected_files = [
+        x for x in filtered_files
+        if len(x.split("/")) > 1 and x.split("/")[1] == selected
+    ]
 
-    tifs = [x for x in filtered_files if (x.split("/")[1] == selected and x.split("/")[2] == "rasters" and x.endswith(".tif"))]
+    metadata = [
+        x for x in selected_files
+        if not x.lower().endswith((".tif", ".tiff"))
+    ]
 
-    return ([f"s3://{bucket}/{x}" for x in metadata], [f"s3://{bucket}/{x}" for x in tifs])
+    tifs = [
+        x for x in selected_files
+        if x.lower().endswith((".tif", ".tiff"))
+    ]
+
+    print(f"Selected Satellogic folder: {selected}")
+    print(f"Metadata files found: {len(metadata)}")
+    print(f"TIF files found: {len(tifs)}")
+    for t in tifs:
+        print("  ", t)
+
+    return (
+        [f"s3://{bucket}/{x}" for x in metadata],
+        [f"s3://{bucket}/{x}" for x in tifs],
+    )
 
 # Functions to retrieve metedata
 def getSolarZenithAngle(meta):
@@ -138,20 +163,55 @@ def apply_gamma(img, gamma=1.0):
     return np.power(np.clip(img, 0, 1), 1.0 / gamma)
 
 
-def prepare_scene(paths, meta):
+def prepare_scene(paths, meta, use_mask=True):
     level = infer_processing_level(paths)
     print(f"Detected processing level: {level}")
 
     scale_factor = getScaleFactor(meta)
     sunzen = getSolarZenithAngle(meta)
 
-    in_file = download_s3_file([x for x in paths if x.endswith("_TOA_0.tif")][0])
-    cloud_file = download_s3_file([x for x in paths if x.endswith("_CLOUD_0.tif")][0])
+    print("Available paths:")
+    for p in paths:
+        print(p)
 
+    # Support both newer L1D_SR products and older L1B products
+    image_files = [
+        x for x in paths
+        if (
+            x.lower().endswith("_analytic.tif")
+            or x.lower().endswith("_toa_0.tif")
+        )
+    ]
+
+    if not image_files:
+        raise FileNotFoundError(
+            "No Analytic or TOA tif found. Available paths:\n"
+            + "\n".join(paths)
+        )
+
+    in_file = download_s3_file(image_files[0])
     ds = gdal.Open(in_file)
-    dc = gdal.Open(cloud_file)
 
-    cloud = dc.GetRasterBand(1).ReadAsArray()
+    # Only fetch + open the cloud band when it will actually be applied.
+    # Color composites (truecolor/colorir) pass use_mask=False and never touch
+    # `cloud`, so skip the download/open entirely. When masking is requested but
+    # no cloud tif exists, `cloud` stays None (never gdal.Open(None)).
+    cloud = None
+    if use_mask:
+        cloud_files = [
+            x for x in paths
+            if (
+                x.lower().endswith("_cloud.tif")
+                or x.lower().endswith("_cloud_0.tif")
+            )
+        ]
+
+        if cloud_files:
+            cloud_file = download_s3_file(cloud_files[0])
+            dc = gdal.Open(cloud_file)
+            cloud = dc.GetRasterBand(1).ReadAsArray()
+        else:
+            print("No cloud tif found for this scene; proceeding without a mask.")
 
     return (ds, cloud, in_file, level, scale_factor, sunzen)
 
@@ -166,17 +226,46 @@ def maybe_correct(arrays, level, sunzen):
 
 # Proper file naming conventions
 def build_output_name(in_file, out_dir, product):
-    fname = in_file.split("/")[-1]
+    """Derive the output COG name from a Satellogic image basename.
 
-    dt = datetime.strptime("_".join(fname.split("_")[0:2]), "%Y%m%d_%H%M%S")
+    Target (analytic-tiled, verified against real outputs):
+      20260627_140714_051_SN33_L1D_MS_19N_724_1158_analytic.tif
+        -> Satellogic_SN33_<product>_051_724_1158_2026-06-27T14:07:14Z.tif
 
-    return f"{out_dir}/{dt.strftime('%Y%m%d')}_Satellogic_{fname.split('_')[4]}_{product}{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+    Fields are extracted by pattern, not fixed index: satellite (SN\\d+),
+    capture-id (the 3-digit token right after the timestamp; absent on L1B),
+    and the UTM tile's col/row (the two numeric groups of \\d+[A-Z]_(\\d+)_(\\d+);
+    the zone and level are dropped). The band token (TOA/analytic) is ignored —
+    the product comes from `product`. Empty tokens are dropped (no `__`), and the
+    trailing ISO-8601-Zulu is the "already-named" completion marker. Vendor TOA
+    scenes have no UTM tile, so they degrade cleanly to
+    Satellogic_<SAT>_<product>_<capture>_<ISO>.tif with no bogus col/row.
+    """
+    fname = os.path.basename(in_file)
+    parts = fname.split("_")
+
+    dt = datetime.strptime("_".join(parts[0:2]), "%Y%m%d_%H%M%S")
+
+    sat_m = re.search(r"SN\d+", fname)
+    satellite = sat_m.group(0) if sat_m else "SNXX"
+
+    # capture-id: 3-digit token after the timestamp (L1D layouts); absent on L1B
+    capture_id = parts[2] if len(parts) > 2 and parts[2].isdigit() else ""
+
+    # UTM tile col_row (analytic-tiled layout); zone dropped. Absent on TOA scenes.
+    tile_m = re.search(r"\d+[A-Z]_(\d+)_(\d+)", fname)
+    col_row = f"{tile_m.group(1)}_{tile_m.group(2)}" if tile_m else ""
+
+    tokens = [t for t in ("Satellogic", satellite, product, capture_id, col_row) if t]
+    stamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return f"{out_dir}/{'_'.join(tokens)}_{stamp}.tif"
 
 
 # Functions for specific products
 
 def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     red = load_reflectance_band(ds, 3, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
@@ -184,7 +273,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         red, green, blue = apply_mask([red, green, blue], cloud)
 
     if visualize:
@@ -206,7 +295,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
 
 
 def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -214,7 +303,7 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, red, green = apply_mask([nir, red, green], cloud)
 
     if visualize:
@@ -236,14 +325,14 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
 
 
 def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
 
     nir, red = maybe_correct([nir, red], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, red = apply_mask([nir, red], cloud)
 
     ndvi = (nir - red) / (nir + red + 1e-10)
@@ -258,14 +347,14 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
 
 def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
 
     nir, green = maybe_correct([nir, green], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         nir, green = apply_mask([nir, green], cloud)
 
     ndwi = (green - nir) / (green + nir + 1e-10)
@@ -280,7 +369,7 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
 
 def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     blue = load_reflectance_band(ds, 1, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -288,7 +377,7 @@ def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
     blue, red, nir = maybe_correct([blue, red, nir], level, sunzen)
 
-    if use_mask:
+    if use_mask and cloud is not None:
         blue, red, nir = apply_mask([blue, red, nir], cloud)
 
     denom = nir + 6 * red - 7.5 * blue + 1

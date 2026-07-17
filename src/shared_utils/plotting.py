@@ -78,6 +78,78 @@ def plot_cog(src, title=None, max_dim=1024):
     plt.show()
 
 
+def save_cog_png(src, out_path, vmin=None, vmax=None, max_dim=2048):
+    """Render a COG to a standalone PNG quicklook (no axes, no borders).
+
+    RGB composite when the COG has >= 3 bands, grayscale otherwise. Pixel
+    scaling: explicit ``vmin``/``vmax`` when given; else 0-255 for uint8
+    (already display-stretched, e.g. trueColor), else the 2nd-98th percentile
+    of valid pixels (matches the old quickplot behaviour). Uses the headless
+    Agg backend so it works on a DPS worker with no display.
+
+    Args:
+        src: local path, ``/vsis3/...`` URI, or ``s3://...`` URI.
+        out_path: destination .png path.
+        vmin, vmax: manual scaling bounds (float). None = auto (see above).
+        max_dim: max output dimension for the decimated read (default 2048).
+
+    Returns:
+        out_path on success, or None if the band(s) were all-nodata.
+    """
+    import matplotlib
+    matplotlib.use("Agg")  # headless: no display required
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import rasterio
+    from rasterio.enums import Resampling
+
+    if isinstance(src, str) and src.startswith("s3://"):
+        src = src.replace("s3://", "/vsis3/", 1)
+
+    with rasterio.open(src) as ds:
+        scale = max(ds.height, ds.width) / max_dim
+        out_h = int(ds.height / scale) if scale > 1 else ds.height
+        out_w = int(ds.width / scale) if scale > 1 else ds.width
+        count = min(ds.count, 3)
+        arr = ds.read(
+            list(range(1, count + 1)),
+            out_shape=(count, out_h, out_w),
+            resampling=Resampling.average,
+        ).astype(float)
+        nodata = ds.nodata
+        is_uint8 = ds.dtypes[0] == "uint8"
+
+    if nodata is not None:
+        arr = np.where(arr == nodata, np.nan, arr)
+
+    valid = arr[np.isfinite(arr)]
+    if valid.size == 0:
+        print(f"  ⚠️ {src}: all-nodata, skipping png")
+        return None
+
+    if vmin is not None and vmax is not None:
+        lo, hi = float(vmin), float(vmax)
+    elif is_uint8:
+        lo, hi = 0.0, 255.0
+    else:
+        lo, hi = np.nanpercentile(valid, (2, 98))
+    if hi <= lo:
+        hi = lo + 1.0
+
+    scaled = np.clip((arr - lo) / (hi - lo), 0, 1)
+
+    fig, ax = plt.subplots(figsize=(out_w / 100, out_h / 100), dpi=100)
+    ax.axis("off")
+    if arr.shape[0] >= 3:
+        ax.imshow(np.nan_to_num(np.transpose(scaled[:3], (1, 2, 0))))
+    else:
+        ax.imshow(scaled[0], cmap="gray", vmin=0, vmax=1)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    print(f"  saved png: {out_path}")
+    return out_path
+
+
 def preview_cogs(sources, sample_n=4, **kwargs):
     """Render :func:`plot_cog` for up to ``sample_n`` of the provided sources.
 

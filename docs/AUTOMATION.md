@@ -15,6 +15,7 @@ What's automated today:
 | Pre-commit enforcement of the consistency lint | `.pre-commit-config.yaml` (local hook) | Local, opt-in via `pre-commit install` |
 | New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
 | CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job (import-test + `--help`) | CI only |
+| GDAL execution paths (merge / COG / warp / nodata / metadata / `cog_validate`) | `.github/workflows/lint.yml` `pytest` job (real GDAL conda env, Python 3.13) | CI + local (dev image) |
 | Hub image build (prod) | `.github/workflows/build-and-push.yaml` | Push to `main` (code paths only) |
 | Hub image build (dev) | `.github/workflows/build-and-push-dev.yaml` | Push to `dev` (code paths only) |
 | PR shape conventions (target branch, test plan, checklist) | `.github/PULL_REQUEST_TEMPLATE.md` + `.github/RULESETS.md` (one-time setup doc) | Auto-populated on every PR |
@@ -124,6 +125,56 @@ from pyproject. Adding a new sensor (via `tools/new_sensor.py`) gets both
 loops exercised automatically. Combined with `sensor-consistency`, this
 means a green CI = your CLIs at least import cleanly in a fresh env that
 matches the hub image's dep stack.
+
+#### Coverage boundary — what `cli-smoke` does *not* catch
+
+`cli-smoke` proves the CLIs **import and parse args**; it does **not** execute the
+processing path. `<cli> --help` short-circuits through argparse *before* the dispatch
+runs, and the dispatch scripts have no importable `main()` — `process_landsat89.py`
+runs under `if __name__ == "__main__":`, `process_sentinel2.py` at bare module level —
+so the dispatch loop can't be import-tested either. A runtime error there (e.g. a
+`NameError` on a name whose assignment was removed but is still referenced by the index
+products) is invisible to this job.
+
+Two targeted guards cover that path instead (both in `tests/integration/`, see
+`.clinerules.md` rule #21):
+
+- **Product code** — `test_sensor_mask_smoke.py` imports the `src/<sensor>/<sensor>_functions.py`
+  modules (they load under the `tests/conftest.py` osgeo stub) and executes `apply_cloud_mask`.
+- **Dispatch itself** — `test_dispatch_undefined_names.py` uses `symtable` to flag any name
+  referenced-but-never-bound at module scope in `process_*.py` (resolving `from X import *`),
+  catching the undefined-name class statically without a scene fixture or a `main()` refactor.
+
+#### The GDAL-execution suite + the faithful local runtime
+
+Beyond those two guards there is a broader **GDAL-execution suite** (`tests/integration/` +
+GDAL-marked `tests/unit/`): merge, COG creation, reprojection/warp, nodata, metadata embedding,
+and `cog_validate`. It needs a real GDAL conda env (`gdalwarp` + `rio` on PATH, real `osgeo.gdal`),
+so `cli-smoke` (`--help` only) does **not** execute it.
+
+**The `pytest` job runs it in CI** (added to `lint.yml`, Python 3.13 to match the hub image). It
+mirrors `cli-smoke`'s conda bootstrap (`dev-conda-deps.txt` → real GDAL/rio/osgeo, so the integration
+tests actually run instead of skipping), then `pip install '.[test]'` and `python -m pytest -v -ra
+tests/`. `dev-conda-deps.txt` stays unpinned on purpose (mirrors the hub's floating GDAL) — this job
+is the guard that catches when that drift breaks a code path. This closes the gap that let the #31
+stale naming tests and the Sentinel-2 merge defects (rules 26–27) sit red/undetected: the merge/COG
+suite now runs on every push + PR to `dev`/`main`.
+
+The **faithful local runtime is the dev hub image** — `klesinger/disasters-jupyterhub-docker-image-dev:latest`
+(the exact deployment: **GDAL 3.12.3 / PROJ 9.7.1 / Python 3.13 / rio-cogeo 7.0.2**). `tests/` is
+`.dockerignore`'d from the image, so mount the working tree and run against the current source:
+
+```bash
+docker run --rm -v "$PWD":/work -w /work -e PYTHONPATH=/work/src \
+  klesinger/disasters-jupyterhub-docker-image-dev:latest \
+  bash -lc "pip install -q pytest 'moto[s3]' && python -m pytest -ra tests/"
+```
+
+**Validation (2026-07-16):** the pangeo base bump (GDAL 3.10.x→3.12.3, Python 3.12→3.13,
+rio-cogeo 5→7, PROJ 9.5→9.7.1) introduced **no runtime regression** — the full suite (305 tests)
+passes in this image, including the version-sensitive paths (COG/IFD metadata trap, warp, nodata,
+EPSG:3857 reprojection + `cog_validate`, resampling). Use `-ra` and confirm the GDAL-marked tests
+**ran** (no `unavailable` skips) — a green run that silently skipped them proves nothing.
 
 #### When `cli-smoke` fails
 

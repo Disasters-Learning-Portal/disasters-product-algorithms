@@ -5,9 +5,11 @@ CLI processing for Umbra SAR products
 """
 
 import argparse
+import csv
 import os
 from umbra.umbra_v2 import (
     retrieve_umbra_resources,
+    report_umbra_scenes,
     sigmaCalib,
     betaCalib,
     gammaCalib,
@@ -23,8 +25,19 @@ def main():
     parser = argparse.ArgumentParser(description="Process Umbra imagery")
 
     parser.add_argument(
+        "--list_dates",
+        action="store_true",
+        help=(
+            "Report the Umbra scenes available in the vendor bucket "
+            "(--bucket/--prefix), newest first by S3 delivery time, then exit "
+            "without processing. Use it to discover which --date values exist; "
+            "each printed date can be passed straight back as --date. Ignores "
+            "--date/--product."
+        ),
+    )
+
+    parser.add_argument(
         "--product",
-        required=True,
         choices=["sigma", "beta", "gamma", "rcs"],
         help="Calibration product to generate"
     )
@@ -44,7 +57,6 @@ def main():
 
     parser.add_argument(
         "--date",
-        required=True,
         help="Target date (YYYY-MM-DD HH:MM:SS)"
     )
 
@@ -94,6 +106,51 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.list_dates:
+        scenes = report_umbra_scenes(bucket=args.bucket, prefix=args.prefix)
+        print(
+            f"{len(scenes)} available Umbra scene(s) in "
+            f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
+            f"first (top = closest to today). Copy a --date value to process:\n"
+        )
+        # Aligned table; scene folder LAST so the fixed-width columns stay
+        # aligned regardless of the (long) Umbra scene name.
+        print(
+            f"  {'--date':<22}{'acquired (UTC)':<22}"
+            f"{'added to S3 (UTC)':<22}scene folder"
+        )
+        for s in scenes:
+            print(
+                f"  {s['date']:<22}"
+                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
+                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
+                f"{s['scene']}"
+            )
+
+        # Also drop a sortable CSV artifact so the report survives outside the
+        # raw job log (on DPS it lands in output/ -> browsable via the Jobs
+        # panel's "Open in File Browser", rendered as a grid by JupyterLab).
+        os.makedirs(args.output, exist_ok=True)
+        csv_path = os.path.join(args.output, "available_umbra_dates.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["date", "scene", "acquired_utc", "added_to_s3_utc"])
+            for s in scenes:
+                writer.writerow([
+                    s["date"],
+                    s["scene"],
+                    s["acquired"].strftime("%Y-%m-%d %H:%M:%S"),
+                    s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
+                ])
+        print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
+        return
+
+    # --date / --product are optional above so --list_dates can run without
+    # them; enforce them here for the normal processing path.
+    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
 
     dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)

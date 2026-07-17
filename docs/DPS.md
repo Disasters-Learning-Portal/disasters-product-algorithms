@@ -47,21 +47,27 @@ that each cost a failed registration if you get them wrong:
   - multi-choice fields (`product`, `level`) and `products` stay free-text
     strings (run.sh word-splits `products` into multiple `-p` values);
   - toggles use `type: boolean` (renders a true/false control).
-- **CRITICAL — mark every defaulted/optional input `optional` with the `?`
-  type-suffix** (`boolean?`, `string?`, `int?`, `float?`). A `default:` alone does
-  **not** make an input optional in the OGC process description — only the `?`
-  suffix sets OGC `minOccurs: 0` → `optional: true`. The MAAP **Submit Job** form
-  (`dps-jupyter-extension/SubmitJob.tsx`) does `const value = formInputs[key] ||
-  null; if (!input.optional && value == null) errors[key] = "Valid value
-  required."` — so **any input whose value is falsy (`false`, `""`, `0`) and is
-  NOT `optional` blocks submission** with *"Valid value required."* That means a
-  `boolean` toggle defaulting `false`, or a `string` with `default: ""`, jams the
-  form unless its type carries `?`. The OGC description keeps `type` and `optional`
-  as **separate** fields, so `boolean?` still renders as a real toggle (type stays
-  `boolean`) — it just also loads as optional. **Rule of thumb: if it has a
-  `default:`, give it a `?`.** Keep the `?` OFF the genuinely-required inputs
-  (`file_path_of_raw_data`, SAR `date`, `source_label`, `activation_event`) so the
-  form's required-asterisk still nudges operators to fill them.
+- **Two registration paths disagree on the type vocabulary — this repo targets the
+  GUI, so use BASE types only (no `?` suffix).** There are two conflicting MAAP
+  constraints, confirmed in source:
+  - The **Register Algorithm GUI** (`algorithms-jupyter-extension/src/constants.ts`)
+    hard-codes the Type dropdown to exactly `string, int, File, Directory, long,
+    float, boolean, double`. A `?`-suffixed type (`boolean?`, `string?`) is **not a
+    dropdown option**, so importing a config that uses it leaves Type unselected and
+    the form errors *"Please select an item in the list."* → **the GUI cannot
+    register `?` types.**
+  - The **Submit Job** form (`dps-jupyter-extension/src/components/SubmitJob/
+    SubmitJob.tsx`) does `value = formInputs[key] || null; if (!input.optional &&
+    value == null) → "Valid value required."` — so a falsy value (`false`, `""`,
+    `0`) on a **non-`optional`** input blocks submission. OGC `optional` (=
+    `minOccurs: 0`) is only set by the `?` suffix, which is only registrable via the
+    **CLI** `ogc-app-pack-generator` path (`build_cwl_workflow.py` passes the type
+    through verbatim — see its `type: string?` example CWL), **not** the GUI.
+  - **Net:** with GUI registration you're limited to base types, and inputs whose
+    default is falsy (`boolean: false`, `string: ""`) will hit *"Valid value
+    required"* at Submit Job. To fully avoid that you must register via the CLI
+    generator with `type: X?`. Don't put `?` in these configs while the GUI is the
+    registration path — it breaks registration outright (the harder failure).
 - **Metadata fields** (`author`, `contributor`, `license`, `release_notes`,
   `citation`, `keywords`) pre-fill the registration form.
 

@@ -101,9 +101,13 @@ def test_apply_cloud_mask_threeband_runs(modname, tmp_path):
 
     mod.apply_cloud_mask(str(tif), str(mask))
 
-    out = tif.parent / "masked" / "prod_masked.tif"
-    assert out.exists(), "masked output was not written"
-    with rasterio.open(out) as ds:
+    # Each sensor names the masked output by its own convention (landsat appends
+    # `_masked`; sentinel2 inserts `_masked_` before the trailing token), so
+    # assert one output landed under masked/ rather than pinning an exact name.
+    masked_dir = tif.parent / "masked"
+    outputs = sorted(masked_dir.glob("*.tif")) if masked_dir.exists() else []
+    assert len(outputs) == 1, f"expected exactly one masked output, got {outputs}"
+    with rasterio.open(outputs[0]) as ds:
         assert ds.count == 4, "expected a 4-band RGBA (alpha) output"
         alpha = ds.read(4)
     assert (alpha == 0).any(), "cloud pixels should be zeroed in the alpha band"
@@ -124,7 +128,10 @@ def test_apply_cloud_mask_singleband_runs(modname, tmp_path):
 
     mod.apply_cloud_mask(str(tif), str(mask))
 
-    out = tif.parent / "masked" / "prod_masked.tif"
-    assert out.exists(), "masked index output was not written"
-    with rasterio.open(out) as ds:
+    # Sensor-specific masked filename (see threeband test) -> assert on the
+    # single output under masked/, not a hardcoded name.
+    masked_dir = tif.parent / "masked"
+    outputs = sorted(masked_dir.glob("*.tif")) if masked_dir.exists() else []
+    assert len(outputs) == 1, f"expected exactly one masked index output, got {outputs}"
+    with rasterio.open(outputs[0]) as ds:
         assert ds.count == 1

@@ -34,7 +34,7 @@ keywords: satellogic, cog, disasters, flood, fire, ndvi, ndwi, evi
 inputs:
   - name: date
     label: Target datetime
-    doc: "Target acquisition datetime 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected."
+    doc: "Target acquisition datetime 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csda-data-vendor-satellogic/disasters/ (see docs/DPS.md 'Finding available scenes')."
     type: string
   - name: product
     label: Product

@@ -689,6 +689,83 @@ def validate_cog(cog_path: str) -> Tuple[bool, dict]:
         return False, empty_details
 
 
+def _relocate_datetime(base_name: str, extension: str = '.tif') -> str:
+    """Rebuild a product basename to the canonical date/time convention.
+
+    Shared by rename_with_event() (the actual rename) and get_final_filename()
+    (the skip-check predictor) so the two can never drift.
+
+    Convention:
+      - merged mosaics            -> {tokens}_{YYYY-MM-DD}_day         (date only)
+      - individual WITH a time    -> {tokens}_{YYYY-MM-DD}T{HH:MM:SS}Z  (ends in Z)
+      - individual WITHOUT a time -> {tokens}_{YYYY-MM-DD}_day         (date only)
+
+    `{tokens}` is every non-date/-time token in its original order (product,
+    tile / path-row, and merged / masked markers preserved verbatim). Callers
+    are expected to have already short-circuited files that are done (ending in
+    an ISO-Zulu datetime or `_day`).
+
+    Raises:
+        ValueError: no YYYYMMDD / YYYY-MM-DD date token found.
+    """
+    parts = base_name.split('_')
+    is_merged = 'merged' in parts
+
+    # 1) Adjacent acquisition date+time: ..._YYYYMMDD_HHMMSS_...
+    date_index = date_str = time_str = None
+    for i in range(len(parts) - 1):
+        p, nxt = parts[i], parts[i + 1]
+        if len(p) == 8 and p.isdigit() and len(nxt) == 6 and nxt.isdigit():
+            try:
+                datetime.strptime(p, '%Y%m%d')
+                date_str, time_str, date_index = p, nxt, i
+                break
+            except ValueError:
+                continue
+
+    # 2) Lone compact date (no time): ..._YYYYMMDD_...
+    if date_str is None:
+        for i, p in enumerate(parts):
+            if len(p) == 8 and p.isdigit():
+                try:
+                    datetime.strptime(p, '%Y%m%d')
+                    date_str, date_index = p, i
+                    break
+                except ValueError:
+                    continue
+
+    # 3) Lone dashed date (e.g. a raw merged name ..._merged_YYYY-MM-DD): no time.
+    if date_str is None:
+        for i, p in enumerate(parts):
+            if re.fullmatch(r'\d{4}-\d{2}-\d{2}', p):
+                date_str, date_index = p, i
+                break
+
+    if date_str is None:
+        raise ValueError(
+            f"Could not find a date (YYYYMMDD or YYYY-MM-DD) in filename: {base_name}"
+        )
+
+    formatted_date = (
+        date_str if '-' in date_str
+        else f'{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}'
+    )
+
+    # Drop the date (and its adjacent time) token(s); keep the rest in order.
+    drop = {date_index}
+    if time_str is not None:
+        drop.add(date_index + 1)
+    prefix = '_'.join(p for i, p in enumerate(parts) if i not in drop)
+
+    if is_merged or time_str is None:
+        # Merged mosaics (times differ across scenes) + time-less products
+        # -> day granularity.
+        return f"{prefix}_{formatted_date}_day{extension}"
+    # Individual scene with a real acquisition time -> full ISO 8601 Zulu.
+    iso_time = f"{time_str[0:2]}:{time_str[2:4]}:{time_str[4:6]}"
+    return f"{prefix}_{formatted_date}T{iso_time}Z{extension}"
+
+
 def get_final_filename(original_path: str, event_name: Optional[str] = None, tif_only: bool = False) -> str:
     """
     Predict what the final filename will be after COG conversion and/or event renaming.
@@ -714,65 +791,25 @@ def get_final_filename(original_path: str, event_name: Optional[str] = None, tif
         # No renaming, COG converts in place or stays as TIF
         return original_path
 
-    # If event name is provided, simulate the rename logic
+    # If event name is provided, predict the rename via the shared transform so
+    # this predictor and rename_with_event() can never disagree.
     directory = os.path.dirname(original_path)
     filename = os.path.basename(original_path)
-    name_parts = os.path.splitext(filename)
-    base_name = name_parts[0]
-    extension = name_parts[1]
+    base_name, extension = os.path.splitext(filename)
 
-    # Split filename by underscore to extract date
-    parts = base_name.split('_')
-
-    if len(parts) < 3:
-        # If filename doesn't match pattern, return original
+    # Already renamed (ISO-Zulu datetime or _day) -> no change, same as the rename.
+    if _ISO_ZULU_END_RE.search(base_name) or base_name.endswith('_day'):
         return original_path
 
-    # Find the date (8-digit number that parses as YYYYMMDD)
-    # Check multiple positions to support both Landsat and Sentinel-2
-    date_str = None
-    date_index = None
-    for i, part in enumerate(parts):
-        if len(part) == 8 and part.isdigit():
-            try:
-                from datetime import datetime
-                datetime.strptime(part, '%Y%m%d')
-                date_str = part
-                date_index = i
-                break
-            except ValueError:
-                continue
-
-    if date_str is None or date_index is None:
-        # If no valid date found, return original
+    if len(base_name.split('_')) < 3:
+        # Doesn't match the sensor_product_date... pattern -> leave as-is.
         return original_path
 
-    # Parse and format date
     try:
-        from datetime import datetime
-        date_obj = datetime.strptime(date_str, '%Y%m%d')
-        formatted_date = date_obj.strftime('%Y-%m-%d')
+        new_filename = _relocate_datetime(base_name, extension)
     except ValueError:
-        # If date parsing fails, return original
+        # No parseable date -> nothing to relocate, name stays as-is.
         return original_path
-
-    # Check if this is a merged file
-    is_merged = 'merged' in parts
-
-    # Build predicted filename based on whether it's merged or individual
-    if is_merged:
-        # Merged file: sensor_product_merged_YYYY-MM-DD_day.tif (no event prefix)
-        sensor = parts[0]
-        # Product is every token between the sensor prefix and the date token, so
-        # multi-token sensor IDs (e.g. Sentinel-2 "S2B_MSIL2A_<product>") keep the
-        # real product instead of collapsing to the processing-level token.
-        product = '_'.join(parts[1:date_index])
-        new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
-    else:
-        # Individual file: Remove the date from parts and rejoin
-        parts.pop(date_index)
-        base_name_without_date = '_'.join(parts)
-        new_filename = f"{base_name_without_date}_{formatted_date}_day{extension}"
 
     return os.path.join(directory, new_filename)
 
@@ -784,39 +821,30 @@ def rename_with_event(file_path: str, event_name: str, quiet: bool = False) -> s
     NOTE: the event name is intentionally NOT added to the filename. The
     `event_name` parameter is retained for backward compatibility and as the
     rename trigger (callers invoke this only when an event was supplied); only
-    the date/time relocation (+ _day suffix, for legacy shapes) is applied.
+    the date/time relocation to the canonical convention (below) is applied.
  
-    Two distinct filename shapes are supported, disambiguated structurally so
-    callers outside the Landsat89 pipeline (e.g. Sentinel-2) are unaffected:
- 
-    1) Landsat89 shape - date and time are the *last* two tokens, nothing
-       trails them (sensor_product_tile[_masked]_YYYYMMDD_HHMMSS, or
-       sensor_product_merged[_masked]_YYYYMMDD_HHMMSS). Date+time are combined
-       into a single ISO 8601 Zulu datetime and everything before them
-       (sensor, product, tile, merged/masked) is preserved verbatim as a
-       prefix. No _day suffix is added here - the trailing "Z" already marks
-       the file as fully renamed/idempotency-safe:
-        Original: LC08_trueColor_046028_20250922_185617.tif
-        New:      LC08_trueColor_046028_2025-09-22T18:56:17Z.tif
-        Original: LC08_trueColor_merged_masked_20250922_185617.tif
-        New:      LC08_trueColor_merged_masked_2025-09-22T18:56:17Z.tif
- 
-    2) (everything else) - behavior is UNCHANGED from the
-       original implementation, so Sentinel-2 and any other existing caller
-       keep producing exactly the filenames they always have (still using
-       the dashed date + _day suffix as their completion marker):
- 
-       Sentinel-2 individual (date/time NOT last - tile trails):
-        Original: S2B_MSIL2A_colorInfrared_20251111_161419_T17RLN.tif
-        New:      S2B_MSIL2A_colorInfrared_161419_T17RLN_2025-11-11_day.tif
- 
-       Old-style Landsat individual (date/time NOT last - tile trails):
-        Original: LC08_trueColor_20250922_185617_046028.tif
-        New:      LC08_trueColor_185617_046028_2025-09-22_day.tif
- 
-       Merged file with no time component at all:
-        Original: LC08_trueColor_20250922_merged.tif
-        New:      LC08_trueColor_merged_2025-09-22_day.tif
+    The convention is date/time granularity, applied uniformly across sensors
+    (see _relocate_datetime, which this shares with get_final_filename):
+
+      * Individual scene WITH a time -> full ISO 8601 Zulu datetime, ending in
+        "Z" (the completion marker; no _day). The date+time pair is relocated
+        to the end and every other token (product, tile/path-row) is kept:
+         Original: LC08_trueColor_20250922_185617_046028.tif
+         New:      LC08_trueColor_046028_2025-09-22T18:56:17Z.tif
+         Original: S2B_MSIL2A_colorInfrared_20251111_161419_T17RLN.tif
+         New:      S2B_MSIL2A_colorInfrared_T17RLN_2025-11-11T16:14:19Z.tif
+
+      * Merged mosaic -> day granularity (times differ across scenes), so the
+        date only, with a _day suffix. merged/masked markers are preserved:
+         Original: LC08_trueColor_20250922_merged.tif
+         New:      LC08_trueColor_merged_2025-09-22_day.tif
+         Original: LC08_trueColor_merged_masked_20250922_185617.tif
+         New:      LC08_trueColor_merged_masked_2025-09-22_day.tif
+
+      * Individual scene with NO time (e.g. waterExtent) -> _day (there is no
+        HH:MM:SS to build a Z stamp):
+         Original: LC08_waterExtent_NSTD_1_5_20250922.tif
+         New:      LC08_waterExtent_NSTD_1_5_2025-09-22_day.tif
  
     Args:
         file_path: Path to the file to rename
@@ -849,74 +877,16 @@ def rename_with_event(file_path: str, event_name: str, quiet: bool = False) -> s
             print(f"  Already renamed, skipping: {filename}")
         return file_path
  
-    parts = base_name.split('_')
-    if len(parts) < 3:
+    if len(base_name.split('_')) < 3:
         raise ValueError(f"Filename doesn't match expected pattern: {filename}")
- 
-    is_merged = 'merged' in parts
- 
-    # Look for an adjacent date(8-digit YYYYMMDD)+time(6-digit HHMMSS) pair.
-    date_index = None
-    date_str = None
-    time_str = None
-    for i in range(len(parts) - 1):
-        p, nxt = parts[i], parts[i + 1]
-        if len(p) == 8 and p.isdigit() and len(nxt) == 6 and nxt.isdigit():
-            try:
-                datetime.strptime(p, '%Y%m%d')
-                date_str, time_str, date_index = p, nxt, i
-                break
-            except ValueError:
-                continue
- 
-    new_filename = None
- 
-    if date_str is not None and date_index + 2 == len(parts):
-        # Landsat89 shape: nothing trails the time token. Combine
-        # date+time into ISO 8601 Zulu, keep everything before them verbatim.
-        # No _day suffix - the trailing Z is the completion marker.
-        date_obj = datetime.strptime(date_str, '%Y%m%d')
-        iso_datetime = f"{date_obj.strftime('%Y-%m-%d')}T{time_str[0:2]}:{time_str[2:4]}:{time_str[4:6]}Z"
-        prefix = '_'.join(parts[0:date_index])
-        new_filename = f"{prefix}_{iso_datetime}{extension}"
- 
-    elif date_str is not None:
-        # Adjacent date+time pair found, but something trails it (e.g.
-        # Sentinel-2 / old-Landsat tile-after-time). LEGACY behavior,
-        # unchanged: only remove the date token; time and any trailing
-        # tokens stay exactly where they were; formatted date + _day is
-        # appended at the very end.
-        date_obj = datetime.strptime(date_str, '%Y%m%d')
-        formatted_date = date_obj.strftime('%Y-%m-%d')
-        remaining = list(parts)
-        remaining.pop(date_index)
-        new_filename = f"{'_'.join(remaining)}_{formatted_date}_day{extension}"
- 
-    else:
-        # No adjacent date+time pair at all (e.g. a merged file with only a
-        # date, no time - LEGACY behavior, unchanged).
-        lone_date_index = None
-        for i, p in enumerate(parts):
-            if len(p) == 8 and p.isdigit():
-                try:
-                    datetime.strptime(p, '%Y%m%d')
-                    lone_date_index = i
-                    break
-                except ValueError:
-                    continue
-        if lone_date_index is None:
-            raise ValueError(f"Could not find valid date (YYYYMMDD) in filename: {filename}")
-        date_obj = datetime.strptime(parts[lone_date_index], '%Y%m%d')
-        formatted_date = date_obj.strftime('%Y-%m-%d')
-        if is_merged:
-            sensor = parts[0]
-            product = '_'.join(parts[1:lone_date_index])
-            new_filename = f"{sensor}_{product}_merged_{formatted_date}_day{extension}"
-        else:
-            remaining = list(parts)
-            remaining.pop(lone_date_index)
-            new_filename = f"{'_'.join(remaining)}_{formatted_date}_day{extension}"
- 
+
+    # Canonical rename lives in one shared transform so this and
+    # get_final_filename() (the skip-check predictor) can never drift:
+    #   merged            -> ..._YYYY-MM-DD_day        (date only)
+    #   individual +time  -> ..._YYYY-MM-DDTHH:MM:SSZ  (ends in Z)
+    #   individual no-time -> ..._YYYY-MM-DD_day       (date only)
+    new_filename = _relocate_datetime(base_name, extension)
+
     new_path = os.path.join(directory, new_filename)
  
     if not quiet:

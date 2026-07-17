@@ -59,6 +59,52 @@ def retrieve_capella_resources(
     return tifs
 
 
+def report_capella_scenes(
+    bucket: str = "csdap-capellaspace-delivery",
+    prefix: str = "disasters",
+) -> list[dict]:
+    """List the Capella scenes available in the vendor bucket, newest first.
+
+    "Newest" is by S3 delivery time (the most recent ``LastModified`` across a
+    scene's objects) -- i.e. when the vendor added it to the bucket -- so the
+    top rows are the scenes closest to today. Each scene's acquisition datetime
+    is also parsed from the folder name (the value you pass back as ``--date``).
+
+    Returns a list of dicts sorted by ``added_to_s3`` descending::
+
+        {"date": "20231107120000",          # pass back as --date
+         "acquired": datetime(...),          # acquisition time from the key
+         "added_to_s3": datetime(...)}       # newest LastModified for the scene
+    """
+    pairs = retrieve_s3_file_list_with_timestamps(bucket, prefix)
+
+    # scene subdir (parts[1], as in retrieve_capella_resources) -> newest
+    # LastModified seen among its objects.
+    latest: dict = {}
+    for key, last_modified in pairs:
+        parts = key.split("/")
+        if len(parts) <= 2 or not parts[1]:
+            continue
+        subdir = parts[1]
+        if subdir not in latest or last_modified > latest[subdir]:
+            latest[subdir] = last_modified
+
+    scenes = []
+    for subdir, added in latest.items():
+        try:
+            acquired = datetime.strptime(subdir.split("_")[5], "%Y%m%d%H%M%S")
+        except (IndexError, ValueError):
+            continue  # subdir doesn't carry a parseable acquisition date
+        scenes.append({
+            "date": acquired.strftime("%Y%m%d%H%M%S"),
+            "acquired": acquired,
+            "added_to_s3": added,
+        })
+
+    scenes.sort(key=lambda s: s["added_to_s3"], reverse=True)
+    return scenes
+
+
 def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
 
     img_mean = uniform_filter(img, (size, size))

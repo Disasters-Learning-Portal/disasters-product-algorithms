@@ -18,7 +18,7 @@ from pathlib import Path
 from maap.maap import MAAP
 
 DPS_DIR = Path(__file__).resolve().parent
-SENSORS = ["landsat", "sentinel2"]
+SENSORS = ["landsat", "sentinel2", "capella", "umbra", "satellogic"]
 
 
 def main(argv):

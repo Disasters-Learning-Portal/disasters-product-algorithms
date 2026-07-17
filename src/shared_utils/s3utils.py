@@ -51,6 +51,32 @@ def retrieve_s3_file_list(bucket: str, prefix: str) -> list[str]:
     return files
 
 
+def retrieve_s3_file_list_with_timestamps(bucket: str, prefix: str) -> list[tuple[str, datetime]]:
+    """Like ``retrieve_s3_file_list`` but also returns each object's S3
+    ``LastModified`` timestamp -- i.e. *when the object was written to the
+    bucket* (when the vendor delivered it). Used to report available scenes
+    ordered by delivery recency, not just by the acquisition date in the key.
+
+    Returns a list of ``(key, last_modified)`` tuples. ``last_modified`` is the
+    timezone-aware UTC ``datetime`` boto3 returns for the object.
+    """
+    session = _read_session()
+    s3_client = session.client("s3")
+
+    prefix = prefix.strip("/")
+    paginator = s3_client.get_paginator("list_objects_v2")
+
+    files = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/"):
+        files.extend([
+            (x["Key"], x["LastModified"])
+            for x in page.get("Contents", [])
+            if len(x["Key"].split("/")) > 1 and x["Key"].split("/")[1] != ""
+        ])
+
+    return files
+
+
 def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = None) -> list[datetime]:
     """
     Return a sorted list of available capture datetimes for a sensor's S3 layout.

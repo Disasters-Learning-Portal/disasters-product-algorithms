@@ -9,6 +9,7 @@ import os
 
 from capella.capella_v2 import (
     retrieve_capella_resources,
+    report_capella_scenes,
     sigmaCalib
 )
 
@@ -23,8 +24,19 @@ def main():
     )
 
     parser.add_argument(
+        "--list_dates",
+        action="store_true",
+        help=(
+            "Report the Capella scenes available in the vendor bucket "
+            "(--bucket/--prefix), newest first by S3 delivery time, then exit "
+            "without processing. Use it to discover which --date values exist; "
+            "each printed date can be passed straight back as --date. Ignores "
+            "--date/--product."
+        ),
+    )
+
+    parser.add_argument(
         "--product",
-        required=True,
         choices=["sigma"],
         help="Calibration product to generate"
     )
@@ -44,7 +56,6 @@ def main():
 
     parser.add_argument(
         "--date",
-        required=True,
         help="Target date (YYYYMMDDHHMMSS)"
     )
 
@@ -112,6 +123,28 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.list_dates:
+        scenes = report_capella_scenes(bucket=args.bucket, prefix=args.prefix)
+        print(
+            f"{len(scenes)} available Capella scene(s) in "
+            f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
+            f"first (top = closest to today). Pass a --date value to process:\n"
+        )
+        print(f"  {'--date':<16}{'acquired (UTC)':<22}added to S3 (UTC)")
+        for s in scenes:
+            print(
+                f"  {s['date']:<16}"
+                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
+                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        return
+
+    # --date / --product are optional above so --list_dates can run without
+    # them; enforce them here for the normal processing path.
+    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
 
     dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)

@@ -11,12 +11,13 @@ The plumbing lives in [`dps/`](../dps/). This page is the source of truth for th
 ```
 dps/
 ├── environment.yml          # lean conda env (name: disasters_dps) + matplotlib-base
+├── _validate.sh             # shared fail-fast input validators, sourced by every run.sh
 ├── _finalize.sh             # shared output handling, sourced by every run.sh
 ├── register_algorithms.py   # maap-py registration helper (legacy schema; see below)
 ├── README.md
 └── <sensor>/                # landsat, sentinel2, capella, umbra, satellogic
     ├── build-env.sh         # conda env update + pip install repo (+ scm guard)
-    ├── run.sh               # parses --name flags, runs the CLI, sources _finalize.sh
+    ├── run.sh               # validate inputs -> run the CLI -> source _finalize.sh
     └── algorithm_config.yaml
 ```
 
@@ -56,8 +57,14 @@ that each cost a failed registration if you get them wrong:
 DPS passes every input as a **named flag** `--name value` via `"$@"` — NOT
 positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
-run.sh's boolean parser accepts both and **defaults booleans to false** (presence
-sets true) so a config default of `true` round-trips correctly.
+run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
+`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask`/`save_png`/
+`delete_cog` default `true`; satellogic `use_mask`/`visualize` default `false`).
+This way an input left at its form default round-trips correctly **whether or not**
+MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
+config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the
+run.sh defaults all to `false`: if MAAP omits default-`true` booleans, that would
+silently invert `merge`/`mask`/`save_png`/`delete_cog`.)
 
 Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
@@ -79,6 +86,89 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   `_read_session`). Satellogic's bucket/prefix are hardcoded in the CLI (the
   inputs are informational only).
 
+## Finding available scenes / dates (`aws s3 ls`)
+
+The SAR/vendor `--date` input must name a scene that actually exists in the vendor
+bucket (the CLI picks the **closest** scene to the date you give). Discover valid
+dates with the AWS CLI before submitting a job. **Access:** these are private CSDA
+delivery buckets — you need AWS creds with read access (locally: `aws sso login` /
+`aws configure`; on DPS: the worker role). If a listing returns `AccessDenied` only
+because the bucket is requester-pays, append `--request-payer requester`.
+
+**Vendor buckets** (prefix `disasters/` on every one; ✅ = wired as a pipeline in
+this repo, the rest are reference/future):
+
+| Vendor | Bucket URI | Pipeline |
+|---|---|---|
+| Capella (SAR) | `s3://csdap-capellaspace-delivery/disasters/` | ✅ capella |
+| Umbra (SAR) | `s3://csda-data-vendor-umbra/disasters/` | ✅ umbra |
+| Satellogic (optical) | `s3://csda-data-vendor-satellogic/disasters/` | ✅ satellogic |
+| GHGSat | `s3://csdap-ghgsat-delivery/disasters/` | — |
+| Airbus SAR | `s3://csdap-airbus-delivery/disasters/` | — |
+| BlackSky | `s3://csdap-blacksky-delivery/disasters/` | — |
+| SkySat | `s3://csdap-planet-skysat-delivery/disasters/` | — |
+| Airbus optical | `s3://csda-data-vendor-airbus-optical/disasters/` | — |
+| ICEYE | `s3://csdap-iceye-delivery/disasters/` | — |
+
+**Option 1 — list the date "folders" (common prefixes)** — fast, and the folder
+names are what you turn into `--date`:
+
+```bash
+aws s3 ls s3://csdap-capellaspace-delivery/disasters/
+#   PRE 20231107120000_.../     <- each PRE line is a scene/date prefix
+```
+
+**Option 2 — list everything recursively** (add `--summarize` for a count/total,
+`grep` to keep only rasters):
+
+```bash
+aws s3 ls s3://csda-data-vendor-umbra/disasters/ --recursive --human-readable --summarize
+aws s3 ls s3://csda-data-vendor-umbra/disasters/ --recursive | grep -iE '\.tiff?$'
+```
+
+**Option 3 — nearest to today by UPLOAD time** (server-side sort by `LastModified`;
+the last rows are the most recently delivered):
+
+```bash
+aws s3api list-objects-v2 --bucket csdap-capellaspace-delivery --prefix disasters/ \
+  --query 'sort_by(Contents,&LastModified)[-10:].[LastModified,Key]' --output text
+```
+
+**Option 4 — nearest to today by ACQUISITION date in the key** (client-side; the
+date is embedded in the folder name, so sort the prefixes and take the tail):
+
+```bash
+aws s3 ls s3://csdap-capellaspace-delivery/disasters/ | awk '{print $NF}' | sort | tail
+```
+
+Then format the chosen date for the sensor's `--date` (validated in run.sh):
+Capella `YYYYMMDDHHMMSS` (e.g. `20231107120000`), Umbra & Satellogic
+`'YYYY-MM-DD HH:MM:SS'` (e.g. `'2023-11-07 12:00:00'`).
+
+### In-DPS discovery: `list_dates=true` (Capella pilot)
+
+When you *don't* have local read creds to the vendor bucket (only the DPS worker
+role does), you can discover dates **from a DPS job itself**. Capella's
+`algorithm_config.yaml` exposes `list_dates` as its **first** input (boolean,
+default `false`). Submit the Capella algorithm with `list_dates=true` and it runs
+a **report-only** job: `run.sh` short-circuits *before* validation/staging (so
+`date`/`activation_event`/`source_label` are NOT required), calls
+`process_capella --list_dates`, prints the report to the **job log**, and exits —
+no COG, no upload. The report lists one row per scene, **newest first by S3
+delivery time** (`LastModified` — the top rows are the scenes most recently added
+to the bucket, i.e. closest to today), each with the `--date` value to copy, its
+acquisition time, and its S3-delivery time. Read it in the MAAP **Jobs** panel,
+copy a `--date`, then submit again with `list_dates=false`.
+
+Mechanics (the reusable pattern, currently wired for Capella only):
+`shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
+returns `(key, LastModified)` pairs; `capella_v2.report_capella_scenes()` groups
+by scene folder, keeps the newest `LastModified` per scene, parses the acquisition
+date from the folder name, and sorts most-recent-delivered first. Note: a DPS job
+is headless/async — it prints to the log; it **cannot** pop up a browser UI. For
+an interactive date-picker, run `report_capella_scenes()` in a live notebook
+kernel (needs local/hub S3 creds) and render it with `ipywidgets`/`IPython.display`.
+
 ## Output flow (dps/_finalize.sh)
 
 Products → `~/drcs_outputs/<activation_event>/` → optional PNG quicklook →
@@ -96,13 +186,50 @@ parsed from a flag, so operators can't redirect output. To change the target,
 publish a new `algorithm_version` with the two constants edited at the top of each
 `run.sh`. Only `enable_s3_upload` (the on/off toggle) is operator-facing.
 
-## Guard rails in run.sh
+## Guard rails: fail-fast input validation (`dps/_validate.sh`)
+
+The OGC/CWL input schema is `{name,label,doc,type,default}` only — **no `enum`,
+`pattern`, or `min/max`** — so the MAAP form cannot enforce valid values. `run.sh`
+is therefore the ONLY place a bad arg can be caught. Every `run.sh` sources
+**`dps/_validate.sh`** (a shared function library, mirroring `_finalize.sh`) and
+calls the validators **right after flag parsing, before conda/staging/S3** — so a
+bad job fails in ~0s with one clear, actionable message instead of failing late in
+gdalwarp or, worse, "succeeding" with zero output.
+
+Validators (in `dps/_validate.sh`) and what each run.sh enforces:
+
+| Check | Rule | Applies to |
+|---|---|---|
+| `validate_activation_event` | reject placeholder; require `YYYYMM_Hazard_Location` (`^[0-9]{4}(0[1-9]\|1[0-2])_[^_]+_.+$`) | all |
+| `require_nonempty source_label` | non-empty | all |
+| `validate_dst_crs` | `native` or `EPSG:<code>` | all |
+| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all |
+| `validate_number` (nodata / png_min / png_max / gamma / we_nstd) | numeric when set | all |
+| `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
+| `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
+| `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
+| `validate_regex date` | `YYYYMMDDHHMMSS` (Capella) / `YYYY-MM-DD HH:MM:SS` (Umbra, Satellogic) | SAR |
+| `validate_in_set level "L1D L1B"` | valid processing level | Satellogic |
+| `validate_int_range filter_size … 1 101` | integer window when `apply_filter` | Capella, Umbra |
+
+`--product` on the SAR sensors is already enforced by argparse `choices=` in the
+CLI, so bash does not re-check it. Assertions live in
+`tests/integration/test_dps_validate.sh` (run in CI via the `.py` wrapper).
 
 - `activation_event` default is the placeholder **`YYYYMM_Hazard_Location`**, which
   run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
 - `source_label` is **required** (no default; the form marks it `*`).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
   (EPSG:3857 is NOT required for VEDA `build_stac`.)
+
+### Not yet hardened (documented follow-ups)
+
+- **Landsat & Satellogic exit 0 when a valid `date` matches no scene** (Sentinel-2
+  correctly `sys.exit(1)`). Fixing needs a one-line Python change in each processor
+  (raise / `sys.exit(1)` on an empty match) — out of scope for the bash guard layer.
+- **Minimal-inputs trims (deferred):** Satellogic `bucket`/`prefix` are informational
+  (CLI hardcodes them — no effect); Capella `product` is single-valued (`sigma`);
+  Capella/Umbra `bucket`/`prefix` could be locked run.sh constants like `S3_BUCKET`.
 
 ## Registering (from the MAAP hub)
 

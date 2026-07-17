@@ -1564,30 +1564,25 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
   if not ims:
       raise FileNotFoundError(f'No (non-merged) .tif files to merge in: {dir_to_merge}')
 
-  # Sensor + product come from the leading tokens; date + time are extracted
-  # as an ISO 8601 combined string (YYYY-MM-DDTHH:MM:SSZ) via regex below,
-  # supporting both a fresh scene file (..._YYYYMMDD_HHMMSS_PPPRRR.tif) and
-  # an already-renamed one (..._PPPRRR_YYYY-MM-DDTHH:MM:SSZ.tif). Path/row
-  # (PPPRRR) is intentionally NOT carried into the merged filename.
+  # Sensor + product come from the leading tokens. The DATE comes from the
+  # shared single-source extractor (file_naming.extract_datetime_from_filename),
+  # which parses every input shape ls_merge can receive: a fresh scene
+  # (..._YYYYMMDD_HHMMSS_PPPRRR.tif), an already-renamed scene
+  # (..._HHMMSS_PPPRRR_YYYY-MM-DD_day.tif), and an ISO-Zulu scene
+  # (..._YYYY-MM-DDTHH:MM:SSZ.tif). A merged mosaic spans multiple acquisition
+  # times, so only the DATE is carried into the name (day granularity); path/row
+  # is dropped and rename_with_event() later appends the _day suffix.
   basename = os.path.basename(ims[0])
   parts = basename.split('_')
   sat = parts[0]
   prod_type = parts[1]
 
-  iso_match = re.search(r'(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})Z', basename)
-  if iso_match:
-      date_iso, time_iso = iso_match.group(1), iso_match.group(2)
-  else:
-      raw_match = re.search(r'(\d{8})_(\d{6})', basename)
-      if not raw_match:
-          raise ValueError(f'Could not extract date/time from filename: {basename}')
-      date_raw, time_raw = raw_match.group(1), raw_match.group(2)
-      date_iso = f'{date_raw[0:4]}-{date_raw[4:6]}-{date_raw[6:8]}'
-      time_iso = f'{time_raw[0:2]}:{time_raw[2:4]}:{time_raw[4:6]}'
+  matched, _ = extract_datetime_from_filename(basename)
+  if not matched:
+      raise ValueError(f'Could not extract a date from filename: {basename}')
+  date_iso = matched[:10] if '-' in matched else f'{matched[0:4]}-{matched[4:6]}-{matched[6:8]}'
 
-  # apply_cloud_mask() inserts "_masked" right after "_merged":
-  # LC08_trueColor_merged_masked_2025-09-22T18:56:17Z_day.tif
-  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_merged_{date_iso}T{time_iso}Z.tif')
+  merged_output = os.path.join(dir_to_merge, f'{sat}_{prod_type}_merged_{date_iso}.tif')
 
   # merge images
   gen_merge(ims, merged_output, method)

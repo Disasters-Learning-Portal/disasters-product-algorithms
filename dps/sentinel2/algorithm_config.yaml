@@ -41,7 +41,7 @@ inputs:
   - name: products
     label: Products
     doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
-    type: string
+    type: string?
     default: "true swir"
   - name: source_label
     label: Source
@@ -50,67 +50,67 @@ inputs:
   - name: dst_crs
     label: Target CRS
     doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
-    type: string
+    type: string?
     default: "native"
   - name: merge
     label: Merge by date/product
     doc: Mosaic scenes by date and product (-merge).
-    type: boolean
+    type: boolean?
     default: true
   - name: mask
     label: Cloud mask
     doc: Generate and apply a cloud mask (-mask, L2A only).
-    type: boolean
+    type: boolean?
     default: false
   - name: process_date
     label: Process date (optional)
     doc: "Only process this date, YYYYMMDD; leave blank for all dates."
-    type: string
+    type: string?
     default: ""
   - name: process_tile
     label: Process tile (optional)
     doc: "Only process this tile, e.g. T17RLN; leave blank for all tiles."
-    type: string
+    type: string?
     default: ""
   - name: we_nstd
     label: Water-extent std devs (optional)
     doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'
-    type: string
+    type: string?
     default: ""
   - name: compression_level
     label: COG compression level
     doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. ~1 fast, low compression; ~12 balanced; 22 max compression (default)."
-    type: int
+    type: int?
     default: 22
   - name: nodata
     label: No-data value
     doc: "No-data value for the output COGs (Sentinel-2 default 0)."
-    type: string
+    type: string?
     default: "0"
   - name: enable_s3_upload
     label: Publish to S3
     doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless)."
-    type: boolean
+    type: boolean?
     default: false
   - name: save_png
     label: Save PNG quicklook
     doc: Also write a .png quicklook next to each product COG.
-    type: boolean
+    type: boolean?
     default: true
   - name: png_min
     label: PNG min (optional)
     doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
-    type: string
+    type: string?
     default: ""
   - name: png_max
     label: PNG max (optional)
     doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
-    type: string
+    type: string?
     default: ""
   - name: delete_cog
     label: Delete COG from home after upload
     doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
-    type: boolean
+    type: boolean?
     default: true
 outputs:
   - name: output

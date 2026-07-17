@@ -19,6 +19,7 @@ source "${basedir}/../_validate.sh"
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
 # flag; --flag or --flag true|false overrides) ---
+LIST_DATES="false"
 DATE=""
 PRODUCT="sigma"
 BUCKET="csda-data-vendor-umbra"
@@ -44,6 +45,7 @@ DELETE_COG="true"
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --list_dates)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then LIST_DATES="$2"; shift 2; else LIST_DATES="true"; shift; fi ;;
     --date)              DATE="$2"; shift 2;;
     --product)           PRODUCT="$2"; shift 2;;
     --bucket)            BUCKET="$2"; shift 2;;
@@ -63,6 +65,18 @@ while [[ $# -gt 0 ]]; do
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
+
+# --- report mode: list available vendor scene dates (most recently added to S3
+# first) and exit, WITHOUT processing. Runs before input validation because
+# date/activation_event/source_label aren't needed just to discover scenes. ---
+if [[ "${LIST_DATES}" == "true" ]]; then
+  echo "Listing available Umbra scenes in s3://${BUCKET}/${PREFIX} (most recently added to S3 first)..."
+  echo "The report also lands in output/available_umbra_dates.csv (open it from the Jobs panel: Outputs -> Open in File Browser)."
+  # --output output so the CSV artifact is written into the DPS-uploaded dir.
+  conda run --live-stream --name disasters_dps process_umbra \
+    --list_dates --bucket "${BUCKET}" --prefix "${PREFIX}" --output output
+  exit 0
+fi
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 require_nonempty date "${DATE}" "'YYYY-MM-DD HH:MM:SS', to select an Umbra scene"

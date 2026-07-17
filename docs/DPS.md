@@ -46,9 +46,22 @@ that each cost a failed registration if you get them wrong:
   enum, no array**. So:
   - multi-choice fields (`product`, `level`) and `products` stay free-text
     strings (run.sh word-splits `products` into multiple `-p` values);
-  - optional inputs use `type: string` with `default: ""` (the `string?` optional
-    suffix is NOT a dropdown option and loads blank);
   - toggles use `type: boolean` (renders a true/false control).
+- **CRITICAL — mark every defaulted/optional input `optional` with the `?`
+  type-suffix** (`boolean?`, `string?`, `int?`, `float?`). A `default:` alone does
+  **not** make an input optional in the OGC process description — only the `?`
+  suffix sets OGC `minOccurs: 0` → `optional: true`. The MAAP **Submit Job** form
+  (`dps-jupyter-extension/SubmitJob.tsx`) does `const value = formInputs[key] ||
+  null; if (!input.optional && value == null) errors[key] = "Valid value
+  required."` — so **any input whose value is falsy (`false`, `""`, `0`) and is
+  NOT `optional` blocks submission** with *"Valid value required."* That means a
+  `boolean` toggle defaulting `false`, or a `string` with `default: ""`, jams the
+  form unless its type carries `?`. The OGC description keeps `type` and `optional`
+  as **separate** fields, so `boolean?` still renders as a real toggle (type stays
+  `boolean`) — it just also loads as optional. **Rule of thumb: if it has a
+  `default:`, give it a `?`.** Keep the `?` OFF the genuinely-required inputs
+  (`file_path_of_raw_data`, SAR `date`, `source_label`, `activation_event`) so the
+  form's required-asterisk still nudges operators to fill them.
 - **Metadata fields** (`author`, `contributor`, `license`, `release_notes`,
   `citation`, `keywords`) pre-fill the registration form.
 
@@ -145,24 +158,26 @@ Then format the chosen date for the sensor's `--date` (validated in run.sh):
 Capella `YYYYMMDDHHMMSS` (e.g. `20231107120000`), Umbra & Satellogic
 `'YYYY-MM-DD HH:MM:SS'` (e.g. `'2023-11-07 12:00:00'`).
 
-### In-DPS discovery: `list_dates=true` (Capella pilot)
+### In-DPS discovery: `list_dates=true` (all 3 SAR/vendor sensors)
 
 When you *don't* have local read creds to the vendor bucket (only the DPS worker
-role does), you can discover dates **from a DPS job itself**. Capella's
-`algorithm_config.yaml` exposes `list_dates` as its **first** input (boolean,
-default `false`). Submit the Capella algorithm with `list_dates=true` and it runs
-a **report-only** job: `run.sh` short-circuits *before* validation/staging (so
+role does), you can discover dates **from a DPS job itself**. **Capella, Umbra, and
+Satellogic** each expose `list_dates` as their **first** input (boolean, default
+`false`). Submit the algorithm with `list_dates=true` and it runs a **report-only**
+job: `run.sh` short-circuits *before* validation/staging (so
 `date`/`activation_event`/`source_label` are NOT required), calls
-`process_capella --list_dates`, prints the report to the **job log**, and exits —
-no COG, no upload. The report is an **aligned table**, one row per scene, **newest
-first by S3 delivery time** (`LastModified` — the top rows are the scenes most
-recently added to the bucket, i.e. closest to today): columns are the `--date`
-value to copy, acquisition time (UTC), S3-delivery time (UTC), and the **scene
-folder** name (so you can see which scene each `--date` maps to). The same rows are
-also written to **`output/available_capella_dates.csv`**, which DPS uploads — open
-it from the **Jobs** panel via **Outputs → Open in File Browser** and JupyterLab
-renders the CSV as a **sortable grid** (cleaner than scrolling the raw `_stdout.txt`
-log). Copy a `--date`, then submit again with `list_dates=false`.
+`process_<sensor> --list_dates`, prints the report to the **job log**, and exits —
+no COG, no upload. (Satellogic's report is **level-scoped**: it validates `level`
+and lists only that level's scenes, so pick the `level` toggle before submitting.)
+The report is an **aligned table**, one row per scene, **newest first by S3
+delivery time** (`LastModified` — the top rows are the scenes most recently added
+to the bucket, i.e. closest to today): columns are the `--date` value to copy,
+acquisition time (UTC), S3-delivery time (UTC), and the **scene folder** name (so
+you can see which scene each `--date` maps to). The same rows are also written to
+**`output/available_<sensor>_dates.csv`**, which DPS uploads — open it from the
+**Jobs** panel via **Outputs → Open in File Browser** and JupyterLab renders the
+CSV as a **sortable grid** (cleaner than scrolling the raw `_stdout.txt` log). Copy
+a `--date`, then submit again with `list_dates=false`.
 
 Note: a DPS job is **headless/async** — it prints to the log and drops the CSV
 artifact, but **cannot** auto-open a browser UI or push text into the MAAP DPS
@@ -170,15 +185,19 @@ extension panel (the extension only links to a job's output folder; it has no
 inline text/HTML view). So there is no auto-popup either way — you still submit the
 discovery job, wait, then open the log or the CSV.
 
-Mechanics (the reusable pattern, currently wired for Capella only):
+Mechanics (the reusable pattern, wired for all three SAR sensors):
 `shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
-returns `(key, LastModified)` pairs; `capella_v2.report_capella_scenes()` groups
-by scene folder, keeps the newest `LastModified` per scene, parses the acquisition
-date from the folder name, and returns dicts (`date`/`scene`/`acquired`/
-`added_to_s3`) sorted most-recent-delivered first; `process_capella --list_dates`
-formats the table and writes the CSV to `--output` (run.sh passes `--output
-output`). For a truly interactive (auto-rendering) date-picker, run
-`report_capella_scenes()` in a live notebook kernel (needs local/hub S3 creds) and
+returns `(key, LastModified)` pairs; each sensor's
+`report_<sensor>_scenes()` (`capella_v2` / `umbra_v2` / `satellogic_v2`) groups by
+scene folder — Capella `parts[1]`, Umbra `parts[2]`, Satellogic `parts[1]` filtered
+by `level` — keeps the newest `LastModified` per scene, parses the acquisition date
+from the folder name, and returns dicts (`date`/`scene`/`acquired`/`added_to_s3`)
+sorted most-recent-delivered first; `process_<sensor> --list_dates` formats the
+table and writes the CSV to `--output` (run.sh passes `--output output`). The
+`date` field is pre-formatted to the sensor's own `--date` grammar (Capella
+`YYYYMMDDHHMMSS`, Umbra/Satellogic `YYYY-MM-DD HH:MM:SS`) so it round-trips as
+`--date` verbatim. For a truly interactive (auto-rendering) date-picker, run
+`report_<sensor>_scenes()` in a live notebook kernel (needs local/hub S3 creds) and
 render it with `ipywidgets`/`IPython.display` — that is the only path that appears
 inline without a submit-and-wait round-trip.
 

@@ -20,15 +20,19 @@ import pytest
 from shared_utils.cog_utils import get_final_filename, rename_with_event
 
 # (input filename, expected final basename) for individual per-scene products.
+# Individual scenes carry a real acquisition time, so they end in a full ISO 8601
+# Zulu datetime (`...T HH:MM:SS Z`) -- `_day` is reserved for merged mosaics and
+# time-less products. The date+time pair is relocated to the end; every other
+# token (product, path/row, tile) is preserved in order.
 INDIVIDUAL_CASES = [
     ("LC08_trueColor_20250922_185617_046028.tif",
-     "LC08_trueColor_185617_046028_2025-09-22_day.tif"),
+     "LC08_trueColor_046028_2025-09-22T18:56:17Z.tif"),
     ("LC09_NDVI_20250101_120000_012034.tif",
-     "LC09_NDVI_120000_012034_2025-01-01_day.tif"),
+     "LC09_NDVI_012034_2025-01-01T12:00:00Z.tif"),
     ("S2B_MSIL2A_colorInfrared_20251111_161419_T17RLN.tif",
-     "S2B_MSIL2A_colorInfrared_161419_T17RLN_2025-11-11_day.tif"),
-    # waterExtent carries an NSTD token; get_final_filename must still predict the
-    # renamed name (the waterExtent skip check relies on this to be idempotent).
+     "S2B_MSIL2A_colorInfrared_T17RLN_2025-11-11T16:14:19Z.tif"),
+    # waterExtent carries an NSTD token and has NO acquisition time, so it stays
+    # on the day-granularity `_day` form (there is no HH:MM:SS to build a Z stamp).
     ("LC08_waterExtent_NSTD_1_5_20250922.tif",
      "LC08_waterExtent_NSTD_1_5_2025-09-22_day.tif"),
 ]

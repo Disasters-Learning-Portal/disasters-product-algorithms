@@ -144,6 +144,29 @@ Two targeted guards cover that path instead (both in `tests/integration/`, see
   referenced-but-never-bound at module scope in `process_*.py` (resolving `from X import *`),
   catching the undefined-name class statically without a scene fixture or a `main()` refactor.
 
+#### The GDAL-execution suite + the faithful local runtime
+
+Beyond those two guards there is a broader **GDAL-execution suite** (`tests/integration/` +
+GDAL-marked `tests/unit/`): merge, COG creation, reprojection/warp, nodata, metadata embedding,
+and `cog_validate`. It needs a real GDAL conda env (`gdalwarp` + `rio` on PATH, real `osgeo.gdal`);
+`cli-smoke` does **not** execute it.
+
+The **faithful local runtime is the dev hub image** — `klesinger/disasters-jupyterhub-docker-image-dev:latest`
+(the exact deployment: **GDAL 3.12.3 / PROJ 9.7.1 / Python 3.13 / rio-cogeo 7.0.2**). `tests/` is
+`.dockerignore`'d from the image, so mount the working tree and run against the current source:
+
+```bash
+docker run --rm -v "$PWD":/work -w /work -e PYTHONPATH=/work/src \
+  klesinger/disasters-jupyterhub-docker-image-dev:latest \
+  bash -lc "pip install -q pytest 'moto[s3]' && python -m pytest -ra tests/"
+```
+
+**Validation (2026-07-16):** the pangeo base bump (GDAL 3.10.x→3.12.3, Python 3.12→3.13,
+rio-cogeo 5→7, PROJ 9.5→9.7.1) introduced **no runtime regression** — the full suite (305 tests)
+passes in this image, including the version-sensitive paths (COG/IFD metadata trap, warp, nodata,
+EPSG:3857 reprojection + `cog_validate`, resampling). Use `-ra` and confirm the GDAL-marked tests
+**ran** (no `unavailable` skips) — a green run that silently skipped them proves nothing.
+
 #### When `cli-smoke` fails
 
 | Symptom | Likely cause |

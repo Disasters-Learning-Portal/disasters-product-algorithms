@@ -154,20 +154,33 @@ default `false`). Submit the Capella algorithm with `list_dates=true` and it run
 a **report-only** job: `run.sh` short-circuits *before* validation/staging (so
 `date`/`activation_event`/`source_label` are NOT required), calls
 `process_capella --list_dates`, prints the report to the **job log**, and exits —
-no COG, no upload. The report lists one row per scene, **newest first by S3
-delivery time** (`LastModified` — the top rows are the scenes most recently added
-to the bucket, i.e. closest to today), each with the `--date` value to copy, its
-acquisition time, and its S3-delivery time. Read it in the MAAP **Jobs** panel,
-copy a `--date`, then submit again with `list_dates=false`.
+no COG, no upload. The report is an **aligned table**, one row per scene, **newest
+first by S3 delivery time** (`LastModified` — the top rows are the scenes most
+recently added to the bucket, i.e. closest to today): columns are the `--date`
+value to copy, acquisition time (UTC), S3-delivery time (UTC), and the **scene
+folder** name (so you can see which scene each `--date` maps to). The same rows are
+also written to **`output/available_capella_dates.csv`**, which DPS uploads — open
+it from the **Jobs** panel via **Outputs → Open in File Browser** and JupyterLab
+renders the CSV as a **sortable grid** (cleaner than scrolling the raw `_stdout.txt`
+log). Copy a `--date`, then submit again with `list_dates=false`.
+
+Note: a DPS job is **headless/async** — it prints to the log and drops the CSV
+artifact, but **cannot** auto-open a browser UI or push text into the MAAP DPS
+extension panel (the extension only links to a job's output folder; it has no
+inline text/HTML view). So there is no auto-popup either way — you still submit the
+discovery job, wait, then open the log or the CSV.
 
 Mechanics (the reusable pattern, currently wired for Capella only):
 `shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
 returns `(key, LastModified)` pairs; `capella_v2.report_capella_scenes()` groups
 by scene folder, keeps the newest `LastModified` per scene, parses the acquisition
-date from the folder name, and sorts most-recent-delivered first. Note: a DPS job
-is headless/async — it prints to the log; it **cannot** pop up a browser UI. For
-an interactive date-picker, run `report_capella_scenes()` in a live notebook
-kernel (needs local/hub S3 creds) and render it with `ipywidgets`/`IPython.display`.
+date from the folder name, and returns dicts (`date`/`scene`/`acquired`/
+`added_to_s3`) sorted most-recent-delivered first; `process_capella --list_dates`
+formats the table and writes the CSV to `--output` (run.sh passes `--output
+output`). For a truly interactive (auto-rendering) date-picker, run
+`report_capella_scenes()` in a live notebook kernel (needs local/hub S3 creds) and
+render it with `ipywidgets`/`IPython.display` — that is the only path that appears
+inline without a submit-and-wait round-trip.
 
 ## Output flow (dps/_finalize.sh)
 

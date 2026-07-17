@@ -73,6 +73,7 @@ def report_capella_scenes(
     Returns a list of dicts sorted by ``added_to_s3`` descending::
 
         {"date": "20231107120000",          # pass back as --date
+         "scene": "CAPELLA_..._20231107120000_...",  # S3 scene folder name
          "acquired": datetime(...),          # acquisition time from the key
          "added_to_s3": datetime(...)}       # newest LastModified for the scene
     """
@@ -97,6 +98,7 @@ def report_capella_scenes(
             continue  # subdir doesn't carry a parseable acquisition date
         scenes.append({
             "date": acquired.strftime("%Y%m%d%H%M%S"),
+            "scene": subdir,
             "acquired": acquired,
             "added_to_s3": added,
         })

@@ -5,6 +5,7 @@ CLI processing for Capella SAR products
 """
 
 import argparse
+import csv
 import os
 
 from capella.capella_v2 import (
@@ -129,15 +130,38 @@ def main():
         print(
             f"{len(scenes)} available Capella scene(s) in "
             f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
-            f"first (top = closest to today). Pass a --date value to process:\n"
+            f"first (top = closest to today). Copy a --date value to process:\n"
         )
-        print(f"  {'--date':<16}{'acquired (UTC)':<22}added to S3 (UTC)")
+        # Aligned table; scene folder LAST so the fixed-width columns stay
+        # aligned regardless of the (long) Capella scene name.
+        print(
+            f"  {'--date':<16}{'acquired (UTC)':<22}"
+            f"{'added to S3 (UTC)':<22}scene folder"
+        )
         for s in scenes:
             print(
                 f"  {s['date']:<16}"
                 f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S')}"
+                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
+                f"{s['scene']}"
             )
+
+        # Also drop a sortable CSV artifact so the report survives outside the
+        # raw job log (on DPS it lands in output/ -> browsable via the Jobs
+        # panel's "Open in File Browser", rendered as a grid by JupyterLab).
+        os.makedirs(args.output, exist_ok=True)
+        csv_path = os.path.join(args.output, "available_capella_dates.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["date", "scene", "acquired_utc", "added_to_s3_utc"])
+            for s in scenes:
+                writer.writerow([
+                    s["date"],
+                    s["scene"],
+                    s["acquired"].strftime("%Y-%m-%d %H:%M:%S"),
+                    s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
+                ])
+        print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
         return
 
     # --date / --product are optional above so --list_dates can run without

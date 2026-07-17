@@ -73,8 +73,10 @@ done
 # date/activation_event/source_label aren't needed just to discover scenes. ---
 if [[ "${LIST_DATES}" == "true" ]]; then
   echo "Listing available Capella scenes in s3://${BUCKET}/${PREFIX} (most recently added to S3 first)..."
+  echo "The report also lands in output/available_capella_dates.csv (open it from the Jobs panel: Outputs -> Open in File Browser)."
+  # --output output so the CSV artifact is written into the DPS-uploaded dir.
   conda run --live-stream --name disasters_dps process_capella \
-    --list_dates --bucket "${BUCKET}" --prefix "${PREFIX}"
+    --list_dates --bucket "${BUCKET}" --prefix "${PREFIX}" --output output
   exit 0
 fi
 

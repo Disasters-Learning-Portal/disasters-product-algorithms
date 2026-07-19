@@ -1,4 +1,7 @@
 name: Register DPS algorithm (OGC)
+# Per-run title in the Actions list, so you can see WHICH config is registering
+# and whether it's a live register vs a dry run.
+run-name: Register ${{ inputs.algorithm }} ${{ inputs.register_to_maap && '→ MAAP (deploy)' || '(dry-run)' }}
 
 # Builds the DPS worker image + generates the OGC CWL for a sensor and
 # (optionally) registers it to MAAP, via MAAP-Project/ogc-app-pack-generator.
@@ -29,10 +32,16 @@ name: Register DPS algorithm (OGC)
 on:
   workflow_dispatch:
     inputs:
-      config_path:
-        description: "OGC algorithm config to register (repo path), e.g. dps/ogc/capella.yml"
-        required: true
-        default: dps/ogc/capella.yml
+      algorithm:
+        # Dropdown of the registerable algorithms. Maps to dps/ogc/<name>.yml.
+        description: "Which algorithm to register"
+        type: choice
+        options:
+          - capella
+          - umbra
+          - satellogic
+          - list_dates
+        default: capella
       register_to_maap:
         # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless
         # you deliberately check it — a safe dry run is the default.
@@ -56,7 +65,7 @@ jobs:
       - name: Build image + generate CWL + (optionally) register
         uses: MAAP-Project/ogc-app-pack-generator@main
         with:
-          algorithm-configuration-path: ${{ inputs.config_path }}
+          algorithm-configuration-path: dps/ogc/${{ inputs.algorithm }}.yml
           # Build the worker image in-workflow from this Dockerfile and push to
           # ghcr.io; the action injects it into the generated CWL.
           dockerfile-path: dps/Dockerfile

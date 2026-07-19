@@ -1,0 +1,46 @@
+# =============================================================================
+# OGC Application Package config for the list-dates DISCOVERY tool — registered
+# via the GitHub Action (.github/workflows/register-dps.yml). Pick a sensor and
+# Submit to print the available vendor-bucket scene dates (report + CSV); no
+# raster fetch, no COG. Inputs are OGC-optional (`?`); run.sh validates the
+# sensor selector. No container field: the Action builds the image from
+# dps/Dockerfile and injects it, so run_command is an ABSOLUTE in-image path.
+# =============================================================================
+algorithm_name: list-dates-ogc-test
+algorithm_version: dev
+algorithm_description: >-
+  Discovery tool. Pick a SENSOR (capella | umbra | satellogic) and Submit to
+  print the scenes currently available in that sensor's CSDA vendor S3 bucket,
+  newest first by S3 delivery time (report to the job log + CSV in output/). No
+  processing, no COG. Sentinel-2/Landsat are file-input and not options here.
+keywords: discovery, list-dates, capella, umbra, satellogic, disasters
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: OGC registration — sensor-selector discovery tool; image built in-workflow from dps/Dockerfile.
+run_command: /app/disasters-product-algorithms/dps/list_dates/run.sh
+ram_min: 2
+cores_min: 1
+outdir_max: 1
+
+inputs:
+  - name: sensor
+    label: Sensor
+    doc: >-
+      Which vendor bucket to list scene dates for: capella | umbra | satellogic.
+      (Sentinel-2 and Landsat are file-input and have no vendor-bucket discovery.)
+    type: string?
+    default: "capella"
+  - name: level
+    label: Processing level (Satellogic only)
+    doc: >-
+      Satellogic processing level to report — L1D | L1B. ONLY used when
+      sensor=satellogic; ignored for capella and umbra.
+    type: string?
+    default: "L1D"
+
+outputs:
+  - name: output
+    type: Directory

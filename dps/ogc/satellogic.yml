@@ -1,0 +1,121 @@
+# =============================================================================
+# OGC Application Package config for Satellogic — registered via the GitHub
+# Action (.github/workflows/register-dps.yml → MAAP ogc-app-pack-generator).
+# EVERY input is OGC-optional (`?` → minOccurs:0) so the Submit form never blocks;
+# run.sh stays the real validator. No container field: the Action builds the image
+# from dps/Dockerfile and injects it, so run_command is an ABSOLUTE in-image path.
+# =============================================================================
+algorithm_name: satellogic-ogc-test
+algorithm_version: dev
+algorithm_description: >-
+  Generate a Satellogic disaster-response product (true color, color IR, NDVI,
+  NDWI, or EVI) from CSDA vendor L1B/L1D rasters and write a Cloud Optimized
+  GeoTIFF. OGC build: every input optional in the schema; run.sh enforces the real
+  requirements (date, source, non-placeholder activation_event, level).
+keywords: satellogic, cog, disasters, flood, fire, ndvi, ndwi, evi
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: OGC registration — all inputs optional; image built in-workflow from dps/Dockerfile.
+run_command: /app/disasters-product-algorithms/dps/satellogic/run.sh
+ram_min: 32
+cores_min: 4
+outdir_max: 20
+
+inputs:
+  - name: date
+    label: Target datetime
+    doc: "Target acquisition datetime 'YYYY-MM-DD HH:MM:SS'. REQUIRED for a real run. Discover valid dates with the list-dates algorithm (sensor=satellogic, level=<L1D|L1B>)."
+    type: string?
+    default: ""
+  - name: product
+    label: Product
+    doc: "One of: truecolor, colorir, ndvi, ndwi, evi."
+    type: string?
+    default: "truecolor"
+  - name: level
+    label: Processing level
+    doc: "Satellogic processing level: L1D or L1B."
+    type: string?
+    default: "L1D"
+  - name: bucket
+    label: Vendor S3 bucket (informational)
+    doc: "CSDA vendor bucket the rasters are read from. The CLI hardcodes this; changing it has no effect (documented for the AWS read-access requirement)."
+    type: string?
+    default: "csda-data-vendor-satellogic"
+  - name: prefix
+    label: Vendor S3 prefix (informational)
+    doc: "Key prefix under the vendor bucket. The CLI hardcodes this; changing it has no effect."
+    type: string?
+    default: "disasters"
+  - name: use_mask
+    label: Apply cloud mask
+    doc: Apply the cloud mask (index/water products only).
+    type: boolean?
+    default: false
+  - name: visualize
+    label: Visualize (RGB only)
+    doc: Apply normalization + gamma correction for RGB products.
+    type: boolean?
+    default: false
+  - name: gamma
+    label: Gamma correction
+    doc: Gamma correction for RGB products (only used when visualize is true).
+    type: float?
+    default: 0.7
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default) | EPSG:3857 | EPSG:4326."
+    type: string?
+    default: "native"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is REJECTED at run time."
+    type: string?
+    default: "YYYYMM_Hazard_Location"
+  - name: source_label
+    label: Source
+    doc: "Data origin, e.g. USGS, NASA, NOAA, Satellogic. REQUIRED for a real run."
+    type: string?
+    default: ""
+  - name: compression_level
+    label: COG compression level
+    doc: "ZSTD level 1-22 (22 = max, default)."
+    type: int?
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string?
+    default: ""
+  - name: enable_s3_upload
+    label: Publish to S3
+    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination)."
+    type: boolean?
+    default: false
+  - name: save_png
+    label: Save PNG quicklook
+    doc: Also write a .png quicklook next to each product COG.
+    type: boolean?
+    default: true
+  - name: png_min
+    label: PNG min (optional)
+    doc: "Manual lower bound for PNG scaling; blank = auto."
+    type: string?
+    default: ""
+  - name: png_max
+    label: PNG max (optional)
+    doc: "Manual upper bound for PNG scaling; blank = auto."
+    type: string?
+    default: ""
+  - name: delete_cog
+    label: Delete COG from home after upload
+    doc: "Delete the COG from ~/drcs_outputs after copy to output/ + upload (PNG + output/ copy kept)."
+    type: boolean?
+    default: true
+
+outputs:
+  - name: output
+    type: Directory

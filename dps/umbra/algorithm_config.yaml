@@ -31,24 +31,9 @@ keywords: umbra, sar, cog, disasters, flood, sigma0, calibration
 # the CSDA vendor bucket (default csda-data-vendor-umbra, prefix 'disasters') at
 # run time. The DPS-worker role needs read access to that bucket (confirmed available).
 inputs:
-  - name: list_dates
-    label: List available scene dates (report only)
-    doc: >-
-      Discovery / dry-run switch. Set TRUE to make this job print a REPORT of the
-      Umbra scenes available in the vendor bucket instead of processing anything:
-      one row per scene, newest first by S3 delivery time (the top rows are the
-      scenes most recently added to S3, i.e. closest to today), showing the value
-      to copy into the 'date' input plus its acquisition and S3-delivery
-      timestamps. The report is written to the job log and to
-      output/available_umbra_dates.csv; no COG is produced, nothing is uploaded,
-      and date/activation_event/source_label are NOT required in this mode. Use
-      it to find a valid 'date', then run again with this set FALSE (the default)
-      to actually process the chosen scene.
-    type: boolean
-    default: false
   - name: date
     label: Target date
-    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. To discover valid dates, run once with list_dates=true (prints a report of available scenes, newest first) or use: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
+    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. To discover valid dates, run the standalone 'list-dates' discovery algorithm (sensor=umbra) or use: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
     type: string
   - name: product
     label: Calibration product

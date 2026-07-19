@@ -164,17 +164,16 @@ Then format the chosen date for the sensor's `--date` (validated in run.sh):
 Capella `YYYYMMDDHHMMSS` (e.g. `20231107120000`), Umbra & Satellogic
 `'YYYY-MM-DD HH:MM:SS'` (e.g. `'2023-11-07 12:00:00'`).
 
-### In-DPS discovery: `list_dates=true` (all 3 SAR/vendor sensors)
+### Scene-date discovery: the standalone `list-dates` algorithm
 
 When you *don't* have local read creds to the vendor bucket (only the DPS worker
-role does), you can discover dates **from a DPS job itself**. **Capella, Umbra, and
-Satellogic** each expose `list_dates` as their **first** input (boolean, default
-`false`). Submit the algorithm with `list_dates=true` and it runs a **report-only**
-job: `run.sh` short-circuits *before* validation/staging (so
-`date`/`activation_event`/`source_label` are NOT required), calls
-`process_<sensor> --list_dates`, prints the report to the **job log**, and exits —
+role does), you can discover dates **from a DPS job itself**. Discovery is the dedicated
+**`list-dates`** algorithm (`dps/list_dates/`) — a **separate registered
+algorithm**, not a per-sensor toggle. Pick a **`sensor`** input (capella | umbra |
+satellogic) and Submit: `run.sh` validates the selector and dispatches to
+`process_<sensor> --list_dates --output output`, running a **report-only** job —
 no COG, no upload. (Satellogic's report is **level-scoped**: it validates `level`
-and lists only that level's scenes, so pick the `level` toggle before submitting.)
+and lists only that level's scenes, so set the `level` input before submitting.)
 The report is an **aligned table**, one row per scene, **newest first by S3
 delivery time** (`LastModified` — the top rows are the scenes most recently added
 to the bucket, i.e. closest to today): columns are the `--date` value to copy,
@@ -183,7 +182,10 @@ you can see which scene each `--date` maps to). The same rows are also written t
 **`output/available_<sensor>_dates.csv`**, which DPS uploads — open it from the
 **Jobs** panel via **Outputs → Open in File Browser** and JupyterLab renders the
 CSV as a **sortable grid** (cleaner than scrolling the raw `_stdout.txt` log). Copy
-a `--date`, then submit again with `list_dates=false`.
+a `--date`, then submit that sensor's processing algorithm with it. The
+`list-dates` algorithm's only inputs are non-falsy strings (`sensor`/`level`), so
+it registers + submits cleanly through the normal Register-Algorithm GUI — no
+"Valid value required" trap (see the schema section above).
 
 Note: a DPS job is **headless/async** — it prints to the log and drops the CSV
 artifact, but **cannot** auto-open a browser UI or push text into the MAAP DPS
@@ -191,7 +193,7 @@ extension panel (the extension only links to a job's output folder; it has no
 inline text/HTML view). So there is no auto-popup either way — you still submit the
 discovery job, wait, then open the log or the CSV.
 
-Mechanics (the reusable pattern, wired for all three SAR sensors):
+Mechanics (the `list-dates` algorithm reuses each sensor's kept `process_<sensor> --list_dates` CLI path):
 `shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
 returns `(key, LastModified)` pairs; each sensor's
 `report_<sensor>_scenes()` (`capella_v2` / `umbra_v2` / `satellogic_v2`) groups by

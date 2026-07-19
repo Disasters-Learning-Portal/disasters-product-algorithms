@@ -248,7 +248,7 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 7188d12450431ba539de534082c0e3d753c305b7
+s:commitHash: 50d49db8eaf8bdf283085057f6c44020e9def661
 s:dateCreated: 2026-07-19
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0

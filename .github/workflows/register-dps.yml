@@ -13,8 +13,9 @@ name: Register DPS algorithm (OGC)
 # ⚠️ RUN THIS FROM AN UNPROTECTED BRANCH. Step 4 pushes a commit to the branch
 #    this run executes on. `dev` and `main` are PROTECTED, so the bot's push is
 #    rejected ("GH006: Protected branch update failed") and the run fails AFTER
-#    the image + CWL are already built. Use a normal branch (e.g. dps-ogc-test)
-#    that has the OGC files. (Alternative: allow the github-actions bot to bypass
+#    the image + CWL are already built. Run it from the unprotected
+#    `deploy-algorithm` branch (one step up from dev; has the OGC files).
+#    (Alternative: allow the github-actions bot to bypass
 #    branch protection on the target branch in repo Settings.)
 #
 # ── PREREQUISITES (one-time) ────────────────────────────────────────────────

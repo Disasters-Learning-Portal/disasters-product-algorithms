@@ -1,0 +1,63 @@
+algorithm_name: list-dates
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Discovery / dry-run tool. Pick a SENSOR and Submit to print a REPORT of the
+  scenes currently available in that sensor's CSDA vendor S3 bucket -- one row
+  per scene, newest first by S3 delivery time (top rows = most recently added to
+  S3, i.e. closest to today), showing the value to copy into that sensor's
+  processing-job 'date' input plus its acquisition and S3-delivery timestamps.
+  No rasters are fetched, nothing is processed, and no COG is produced -- the
+  report goes to the job log AND to a CSV artifact in output/. Covers the
+  fetch/vendor-bucket sensors only: capella, umbra, satellogic. (Sentinel-2 and
+  Landsat are file-input algorithms with no vendor-bucket discovery.)
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/list_dates/build-env.sh
+run_command: disasters-product-algorithms/dps/list_dates/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements. This only LISTS S3 objects (no raster I/O), so keep it
+# tiny.
+ram_min: 2
+cores_min: 1
+outdir_max: 1
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS discovery tool -- list available vendor-bucket scene dates for a chosen sensor.
+citation: NASA Disasters Program
+keywords: discovery, list-dates, capella, umbra, satellogic, disasters
+# AWS read access: NO file input -- the underlying process_<sensor> --list_dates
+# path LISTS the sensor's CSDA vendor bucket at run time. The DPS-worker role
+# needs read access to those buckets (the same buckets the per-sensor processing
+# algorithms already use). A single list-dates worker now touches all three.
+inputs:
+  # Both inputs are base-type strings with NON-FALSY defaults, so this algorithm
+  # registers + submits cleanly via the normal Register-Algorithm GUI (no `?`
+  # optional-suffix / OGC generator / prebuilt image needed): the Submit Job form
+  # only errors "Valid value required" on a falsy value (false/""/0), and neither
+  # default is falsy. See docs/DPS.md.
+  - name: sensor
+    label: Sensor
+    doc: >-
+      Which vendor bucket to list scene dates for. One of: capella | umbra |
+      satellogic. (Sentinel-2 and Landsat are file-input and have no
+      vendor-bucket discovery -- they are intentionally NOT options here.)
+    type: string
+    default: "capella"
+  - name: level
+    label: Processing level (Satellogic only)
+    doc: >-
+      Satellogic processing level to report -- L1D | L1B. ONLY used when
+      sensor=satellogic (Satellogic's discovery is level-scoped); ignored for
+      capella and umbra. Leave at the default otherwise.
+    type: string
+    default: "L1D"
+outputs:
+  - name: output
+    type: Directory

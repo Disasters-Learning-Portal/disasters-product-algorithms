@@ -21,6 +21,10 @@ name: Register DPS algorithm (OGC)
 # ── PREREQUISITES (one-time) ────────────────────────────────────────────────
 #   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (only used when
 #     register_to_maap is checked).
+#   • Admin approval: create a GitHub Environment named `maap-registration`
+#     (repo Settings → Environments → New environment) with **Required reviewers**
+#     = the admin(s). When register_to_maap is checked, the run PAUSES until an
+#     admin approves before it registers. Dry runs are NOT gated.
 #   • After the first build, make the ghcr.io package PUBLIC so MAAP's ADES can
 #     pull it (GitHub → repo → Packages → the image → make public). One-time,
 #     needed before you SUBMIT A JOB (not for registration itself).
@@ -40,6 +44,13 @@ on:
         type: boolean
         required: false
         default: false
+      algorithm_version:
+        # Stamped into the OGC config's `algorithm_version` before the generator
+        # runs, so it becomes the registered process's version in MAAP. Use 'dev'
+        # for iterating, or a release tag like v1.0 / v1.1 / v2.0 to pin one.
+        description: "Algorithm version to register (e.g. dev, v1.0, v1.1, v2.0). Overrides algorithm_version in the OGC config."
+        required: true
+        default: dev
 
 permissions:
   contents: write  # the generator commits the generated CWL and pushes it
@@ -49,9 +60,26 @@ jobs:
   register:
     name: Build image + generate CWL + (optionally) register to MAAP
     runs-on: ubuntu-latest
+    # Admin-approval gate — ONLY when actually registering. When register_to_maap
+    # is checked, the job targets the `maap-registration` GitHub Environment
+    # (required reviewers = admins), so it PAUSES for approval before registering.
+    # When unchecked, the name evaluates to '' (no environment) so dry runs run
+    # freely with no approval.
+    environment: ${{ inputs.register_to_maap && 'maap-registration' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Stamp algorithm_version into the OGC config
+        # Overwrite the config's algorithm_version with the dispatch input so the
+        # registered process carries that version (dev, v1.0, ...). Passed via env
+        # to avoid injecting the expression straight into the shell.
+        env:
+          ALG_VER: ${{ inputs.algorithm_version }}
+          CONFIG: ${{ inputs.config_path }}
+        run: |
+          sed -i -E "s|^algorithm_version:.*|algorithm_version: ${ALG_VER}|" "${CONFIG}"
+          echo "algorithm_version stamped:"; grep -E '^algorithm_version:' "${CONFIG}"
 
       - name: Build image + generate CWL + (optionally) register
         uses: MAAP-Project/ogc-app-pack-generator@main

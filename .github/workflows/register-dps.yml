@@ -1,0 +1,65 @@
+name: Register DPS algorithm (OGC)
+
+# Registers a DPS sensor as an OGC process on MAAP via MAAP's
+# ogc-app-pack-generator action. Because we pass `dockerfile-path: dps/Dockerfile`,
+# the action:
+#   1. BUILDS the DPS worker image from dps/Dockerfile on the ref this run uses
+#      and PUSHES it to ghcr.io (docker/build-push-action + GITHUB_TOKEN),
+#   2. generates a CWL workflow from the OGC config (dps/ogc/<sensor>.yml) and
+#      injects the freshly-built image into it,
+#   3. validates the CWL, commits it, and — if deploy=true — POST/PUTs it to the
+#      OGC processes API (prod).
+# So every run rebuilds the image fresh from the branch — no separate prebuilt
+# image to maintain, and no Docker Hub. (BuildKit uses dps/Dockerfile.dockerignore,
+# which re-includes dps/ + src/ that the repo-root .dockerignore excludes.)
+#
+# Manual only: registration is a deliberate act against a LIVE MAAP endpoint.
+#
+# ── PREREQUISITES (one-time) ────────────────────────────────────────────────
+#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (same MAAP_PGT you
+#     put in the hub's MAAP Settings). Passed to the action via env.
+#   • After the FIRST build, make the ghcr.io package PUBLIC so MAAP's ADES can
+#     pull it (GitHub → repo → Packages → the image → Package settings → make
+#     public). One-time.
+#   • The "Run workflow" button only appears once THIS file exists on the default
+#     branch (main). Pick the ref (e.g. dev) to actually run against — the run
+#     uses THAT ref's workflow file + code.
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: OGC algorithm config to register (dps/ogc/<sensor>.yml)
+        required: true
+        default: dps/ogc/capella.yml
+      deploy:
+        description: Register to MAAP prod? (false = build + generate + validate CWL only)
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: write  # the generator commits the generated CWL and pushes it
+  packages: write  # push the built DPS worker image to ghcr.io
+
+jobs:
+  register:
+    name: Build image + generate + register OGC application package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build + register OGC application package
+        uses: MAAP-Project/ogc-app-pack-generator@main
+        with:
+          algorithm-configuration-path: ${{ inputs.config_path }}
+          # Build the worker image in-workflow from this Dockerfile and push to
+          # ghcr.io; the action injects it into the generated CWL.
+          dockerfile-path: dps/Dockerfile
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-app-pack: ${{ inputs.deploy }}
+          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT would be
+          # https://api.dit.maap-project.org/api/ogc/processes.
+          app-pack-register-endpoint: https://api.maap-project.org/api/ogc/processes
+        env:
+          MAAP_PGT: ${{ secrets.MAAP_PGT }}

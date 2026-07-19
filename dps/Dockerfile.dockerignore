@@ -1,0 +1,58 @@
+# =============================================================================
+# Per-Dockerfile BuildKit ignore file for dps/Dockerfile.
+# =============================================================================
+# WHY THIS FILE EXISTS (critical): BuildKit uses "<dockerfile-path>.dockerignore"
+# -- i.e. THIS file -- IN PLACE OF the repo-root .dockerignore when the build is
+# invoked with `-f dps/Dockerfile`. The repo-root .dockerignore EXCLUDES dps/
+# (it's tuned for the Pangeo hub image, which doesn't ship DPS scripts). If that
+# root file applied here, `COPY . /app/disasters-product-algorithms` would
+# SILENTLY DROP the entire dps/ tree -> no run.sh -> a broken DPS image. This
+# file overrides it so dps/ (and everything pip needs) is kept.
+#
+# STRATEGY: allowlist. Ignore everything, then explicitly un-ignore only what
+# the image needs. This fails safe -- new heavy files added to the repo are
+# excluded by default rather than silently bloating the image.
+#
+# Requires BuildKit (DOCKER_BUILDKIT=1 / buildx), which handles `!`-unignore of
+# paths inside re-included directories correctly. The build workflow uses buildx.
+# =============================================================================
+
+# 1) Ignore everything by default.
+*
+
+# 2) Un-ignore what `pip install /app/disasters-product-algorithms` needs.
+#    setuptools src-layout: [tool.setuptools.packages.find] where=["src"], so
+#    src/ is REQUIRED. pyproject.toml declares readme="README.md", so README.md
+#    is REQUIRED (its absence fails the build backend).
+!pyproject.toml
+!README.md
+!src/
+
+# 3) Un-ignore the DPS runtime: per-sensor run.sh/build-env.sh/algorithm_config,
+#    plus the shared environment.yml + _validate.sh + _finalize.sh that every
+#    run.sh sources. dps/environment.yml is what Layer 1 of the Dockerfile
+#    COPYs to create the disasters_dps env.
+!dps/
+
+# 4) Keep the dep source-of-truth (referenced by docs/tooling; cheap to ship).
+!dev-conda-deps.txt
+
+# 5) Re-exclude noise that lives INSIDE the re-included trees above, so it never
+#    rides along into the image (stale versions / churn / cache-busting).
+#    These `**` patterns re-ignore matches even under `!src/` and `!dps/`.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/*.egg
+**/.DS_Store
+**/.pytest_cache/
+**/*.swp
+**/*.swo
+
+# NOTE ON WHAT STAYS DROPPED (never un-ignored, so excluded):
+#   .git/  .github/  .claude/  .cline/  .cursor/  .clinerules.md
+#   .pre-commit-config.yaml  .playwright-mcp/  .gitignore  .gitattributes
+#   notebooks/  docs/  tests/  tools/  bin/  image/  dist/  build/
+#   .venv/ venv/ env/  .idea/ .vscode/
+# None of these are needed to build the package or run the DPS CLIs.

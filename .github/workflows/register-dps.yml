@@ -1,40 +1,43 @@
 name: Register DPS algorithm (OGC)
 
-# Registers a DPS sensor as an OGC process on MAAP via MAAP's
-# ogc-app-pack-generator action. Because we pass `dockerfile-path: dps/Dockerfile`,
-# the action:
-#   1. BUILDS the DPS worker image from dps/Dockerfile on the ref this run uses
-#      and PUSHES it to ghcr.io (docker/build-push-action + GITHUB_TOKEN),
-#   2. generates a CWL workflow from the OGC config (dps/ogc/<sensor>.yml) and
-#      injects the freshly-built image into it,
-#   3. validates the CWL, commits it, and — if deploy=true — POST/PUTs it to the
-#      OGC processes API (prod).
-# So every run rebuilds the image fresh from the branch — no separate prebuilt
-# image to maintain, and no Docker Hub. (BuildKit uses dps/Dockerfile.dockerignore,
-# which re-includes dps/ + src/ that the repo-root .dockerignore excludes.)
+# Builds the DPS worker image + generates the OGC CWL for a sensor and
+# (optionally) registers it to MAAP, via MAAP-Project/ogc-app-pack-generator.
+# Because we pass `dockerfile-path: dps/Dockerfile`, the action:
+#   1. BUILDS the worker image from dps/Dockerfile on the ref this run uses and
+#      PUSHES it to ghcr.io,
+#   2. generates a CWL from the OGC config (dps/ogc/<sensor>.yml) with that image,
+#   3. validates the CWL (cwltool + ap-validator),
+#   4. COMMITS the generated CWL to cwl_workflows/ and PUSHES it, then
+#   5. if register_to_maap is checked, registers it to the OGC processes API.
 #
-# Manual only: registration is a deliberate act against a LIVE MAAP endpoint.
+# ⚠️ RUN THIS FROM AN UNPROTECTED BRANCH. Step 4 pushes a commit to the branch
+#    this run executes on. `dev` and `main` are PROTECTED, so the bot's push is
+#    rejected ("GH006: Protected branch update failed") and the run fails AFTER
+#    the image + CWL are already built. Use a normal branch (e.g. dps-ogc-test)
+#    that has the OGC files. (Alternative: allow the github-actions bot to bypass
+#    branch protection on the target branch in repo Settings.)
 #
 # ── PREREQUISITES (one-time) ────────────────────────────────────────────────
-#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (same MAAP_PGT you
-#     put in the hub's MAAP Settings). Passed to the action via env.
-#   • After the FIRST build, make the ghcr.io package PUBLIC so MAAP's ADES can
-#     pull it (GitHub → repo → Packages → the image → Package settings → make
-#     public). One-time.
-#   • The "Run workflow" button only appears once THIS file exists on the default
-#     branch (main). Pick the ref (e.g. dev) to actually run against — the run
-#     uses THAT ref's workflow file + code.
+#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (only used when
+#     register_to_maap is checked).
+#   • After the first build, make the ghcr.io package PUBLIC so MAAP's ADES can
+#     pull it (GitHub → repo → Packages → the image → make public). One-time,
+#     needed before you SUBMIT A JOB (not for registration itself).
+#   • The "Run workflow" button appears because this file is on the default
+#     branch (main); pick the UNPROTECTED ref in "Use workflow from" to run.
 on:
   workflow_dispatch:
     inputs:
       config_path:
-        description: OGC algorithm config to register (dps/ogc/<sensor>.yml)
+        description: "OGC algorithm config to register (repo path), e.g. dps/ogc/capella.yml"
         required: true
         default: dps/ogc/capella.yml
-      deploy:
-        description: Register to MAAP prod? (false = build + generate + validate CWL only)
+      register_to_maap:
+        # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless
+        # you deliberately check it — a safe dry run is the default.
+        description: "UNCHECKED = safe dry run (build image + validate CWL only; registers NOTHING). CHECK to REGISTER the algorithm to MAAP (LIVE)."
         type: boolean
-        required: true
+        required: false
         default: false
 
 permissions:
@@ -43,13 +46,13 @@ permissions:
 
 jobs:
   register:
-    name: Build image + generate + register OGC application package
+    name: Build image + generate CWL + (optionally) register to MAAP
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build + register OGC application package
+      - name: Build image + generate CWL + (optionally) register
         uses: MAAP-Project/ogc-app-pack-generator@main
         with:
           algorithm-configuration-path: ${{ inputs.config_path }}
@@ -57,9 +60,10 @@ jobs:
           # ghcr.io; the action injects it into the generated CWL.
           dockerfile-path: dps/Dockerfile
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          deploy-app-pack: ${{ inputs.deploy }}
-          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT would be
-          # https://api.dit.maap-project.org/api/ogc/processes.
+          # Checkbox: false (default) = build + validate only; true = register.
+          deploy-app-pack: ${{ inputs.register_to_maap }}
+          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT (test)
+          # would be https://api.dit.maap-project.org/api/ogc/processes.
           app-pack-register-endpoint: https://api.maap-project.org/api/ogc/processes
         env:
           MAAP_PGT: ${{ secrets.MAAP_PGT }}

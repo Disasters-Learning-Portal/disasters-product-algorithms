@@ -40,7 +40,16 @@ that each cost a failed registration if you get them wrong:
   clones the repo to `/app/<repo-name>/` and runs the command from `/app`.
 - **`code_repository`**, not `repository_url`.
 - **Resources: `ram_min` / `cores_min` / `outdir_max`**, not `queue` /
-  `disk_space`.
+  `disk_space`. These are `_min` scheduling **floors** MAAP uses to pick a
+  worker — **not runtime caps**, and there is **no `cores_max`/`ram_max`**. The
+  processing code sets `NUM_THREADS=ALL_CPUS` (gdalwarp / rio-cogeo) and
+  `os.cpu_count()` (rasterio reproject), so a job uses **every core on whatever
+  worker it lands on**, regardless of `cores_min` — the declared value only
+  biases instance selection, it doesn't throttle the process. `outdir_max` (GB)
+  bounds the **aggregated** output: a job keeps *all* the COGs + PNGs it produces
+  (multi-product / multi-scene runs accumulate — `dps/_finalize.sh` globs every
+  `**/*.tif`+`**/*.png`), and they must all fit under `outdir_max` before
+  `delete_cog` frees the home dir.
 - **`inputs` is a flat list** of `{name, label, doc, type, default}`. Valid
   `type`: `string, int, File, Directory, long, float, boolean, double` — **no
   enum, no array**. So:
@@ -219,6 +228,14 @@ copy are kept). Controlled by inputs `save_png` (default true), `png_min`/
 `png_max` (blank = auto 2–98 pct, or 0–255 for uint8), `enable_s3_upload`,
 `delete_cog` (default true). PNGs come from
 `shared_utils.plotting.save_cog_png` (needs `matplotlib-base`, in the DPS env).
+
+`_finalize.sh` globs **every** `**/*.tif`+`**/*.png` under `~/drcs_outputs`, so a
+job that produces many COGs (Satellogic multi-tile, Landsat/S2 multi-product,
+Capella/Umbra multi-scene) keeps them all. The S3 key is the **OUT_HOME-relative
+path** (`os.path.relpath`), not the bare basename — so same-named products in
+different subdirs don't overwrite each other in the bucket (this nests optical
+products under `<date>/<product>/` and Capella/Umbra multi-scene output under
+`scene_1/`, `scene_2/`). All of it must fit under `outdir_max` before deletion.
 
 The S3 destination (`S3_BUCKET=nasa-disasters`, `S3_DEST_BASE=drcs_activations_new`)
 is **locked per algorithm_version** — it is intentionally NOT a job input and NOT

@@ -9,6 +9,7 @@ import csv
 import os
 from umbra.umbra_v2 import (
     retrieve_umbra_resources,
+    group_umbra_scenes,
     report_umbra_scenes,
     sigmaCalib,
     betaCalib,
@@ -162,65 +163,95 @@ def main():
         prefix=args.prefix
     )
 
-    print(f"Generating {args.product}...")
+    # One group per GEC band = one genuine scene. Pooled folders may hold other
+    # bands/levels; only GEC is calibrated, so grouping by GEC drops the unused
+    # ones and, when several scenes share a timestamp, processes every one.
+    scenes = group_umbra_scenes(tifs)
 
-    outfile = None
-
-    if args.product == "sigma":
-        outfile = sigmaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-    
-            # remove raw tif
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-    
-    elif args.product == "beta":
-        outfile = betaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-    
-    elif args.product == "gamma":
-        outfile = gammaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-    
-    elif args.product == "rcs":
-        outfile = rcsCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-
-    # COG Conversion Step
-    if outfile:
-        print("\nConverting to COG...")
-
-        cog_path = convert_to_cog(
-            outfile,
-            nodata=args.nodata,
-            dst_crs=dst_crs_value,
-            compression=args.compression,
-            compression_level=args.compression_level,
-            metadata=metadata,
+    if not scenes:
+        raise FileNotFoundError(
+            f"No Umbra GEC band found for --date {args.date} "
+            f"in s3://{args.bucket}/{args.prefix}"
         )
 
-        print(f"COG created: {cog_path}")
+    print(f"Found {len(scenes)} Umbra scene(s) for --date {args.date}")
+
+    cog_paths = []
+
+    for i, scene_tifs in enumerate(scenes, start=1):
+
+        print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
+
+        # Keep single-scene output flat (byte-identical to before). Isolate each
+        # scene in its own subdir only when there are several, so identically
+        # named (same-timestamp) COGs don't clobber each other locally or in S3.
+        scene_out = (
+            args.output if len(scenes) == 1
+            else os.path.join(args.output, f"scene_{i}")
+        )
+
+        print(f"Generating {args.product}...")
+
+        outfile = None
+
+        if args.product == "sigma":
+            outfile = sigmaCalib(scene_tifs, scene_out)
+
+            if args.apply_filter:
+                raw_outfile = outfile
+                outfile = apply_filter(outfile, size=args.filter_size)
+
+                # remove raw tif
+                if os.path.exists(raw_outfile):
+                    os.remove(raw_outfile)
+
+        elif args.product == "beta":
+            outfile = betaCalib(scene_tifs, scene_out)
+
+            if args.apply_filter:
+                raw_outfile = outfile
+                outfile = apply_filter(outfile, size=args.filter_size)
+
+                if os.path.exists(raw_outfile):
+                    os.remove(raw_outfile)
+
+        elif args.product == "gamma":
+            outfile = gammaCalib(scene_tifs, scene_out)
+
+            if args.apply_filter:
+                raw_outfile = outfile
+                outfile = apply_filter(outfile, size=args.filter_size)
+
+                if os.path.exists(raw_outfile):
+                    os.remove(raw_outfile)
+
+        elif args.product == "rcs":
+            outfile = rcsCalib(scene_tifs, scene_out)
+
+            if args.apply_filter:
+                raw_outfile = outfile
+                outfile = apply_filter(outfile, size=args.filter_size)
+
+                if os.path.exists(raw_outfile):
+                    os.remove(raw_outfile)
+
+        # COG Conversion Step
+        if outfile:
+            print("Converting to COG...")
+
+            cog_path = convert_to_cog(
+                outfile,
+                nodata=args.nodata,
+                dst_crs=dst_crs_value,
+                compression=args.compression,
+                compression_level=args.compression_level,
+                metadata=metadata,
+            )
+
+            print(f"COG created: {cog_path}")
+            cog_paths.append(cog_path)
+
+    print(f"\nCreated {len(cog_paths)} COG(s).")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,14 @@ def retrieve_capella_resources(
     bucket: str = "csdap-capellaspace-delivery",
     prefix: str = "disasters"
 ) -> list[str]:
+    """Return every Capella tif for the acquisition closest to ``date``.
+
+    One acquisition can appear under more than one folder (different processing
+    levels -- e.g. ``_GEO_`` and ``_SLC_``), so all folders whose timestamp
+    matches are pooled into one flat list. ``sigmaCalib`` reads the ``_GEO_``
+    band; pass the result through :func:`group_capella_scenes` to split it into
+    one group per GEO band (i.e. per genuine scene). Real-case S3 keys preserved.
+    """
 
     files = retrieve_s3_file_list(bucket, prefix)
 
@@ -57,6 +65,17 @@ def retrieve_capella_resources(
     tifs = [f"s3://{bucket}/{x}" for x in tifs]
 
     return tifs
+
+
+def group_capella_scenes(tifs: list[str]) -> list[list[str]]:
+    """Split pooled Capella tifs into one group per scene (one per GEO band).
+
+    ``sigmaCalib`` only reads the ``_GEO_`` band, so each GEO file is a distinct
+    scene; folders without a GEO band (e.g. an ``_SLC_``-only level) contribute
+    nothing. Returns one single-element ``[geo]`` list per GEO band so the caller
+    loops and emits one COG per scene instead of silently keeping only the first.
+    """
+    return [[geo] for geo in tifs if "_GEO_" in geo]
 
 
 def report_capella_scenes(

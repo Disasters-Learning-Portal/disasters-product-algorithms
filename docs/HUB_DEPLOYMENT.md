@@ -127,6 +127,10 @@ Need a new dep?
 
 Three files, three audiences, no cross-repo PR ceremony.
 
+For a curated shortlist of **JupyterLab extensions that complement the MAAP DPS workflow**
+(COG preview, notebook productivity, MAAP ecosystem tiles) — plus what's already in the Pangeo
+base and what to skip — see [HUB_EXTENSIONS.md](HUB_EXTENSIONS.md).
+
 ## Pulling upstream image changes
 
 The `image/` subtree was added via

@@ -1,68 +1,63 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: capella-ogc-test
-  doc: 'Process Capella SAR scenes into Cloud Optimized GeoTIFF disaster-response
-    products (sigma-naught, optional Lee filter). Fetches source rasters from the
-    CSDA Capella vendor S3 bucket keyed by date. OGC test build: every input is optional
-    in the schema so the Submit form never blocks; run.sh enforces the real requirements
-    (date, source, non-placeholder activation_event).'
-  id: capella-ogc-test
+  label: umbra-ogc-test
+  doc: 'Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response products
+    (sigma/beta/gamma/rcs calibration, optional Lee filter). Fetches the source GEC
+    raster from the CSDA Umbra vendor S3 bucket keyed by date. OGC build: every input
+    optional in the schema; run.sh enforces the real requirements.'
+  id: umbra-ogc-test
   inputs:
     date:
-      doc: Target acquisition date, YYYYMMDDHHMMSS. Closest matching Capella scene
-        is selected. Discover valid dates via the 'list-dates' algorithm (sensor=capella).
-        REQUIRED for a real run (run.sh rejects an empty date).
+      doc: Target acquisition date 'YYYY-MM-DD HH:MM:SS'. REQUIRED for a real run
+        (run.sh rejects an empty date). Discover valid dates with the list-dates algorithm
+        (sensor=umbra).
       label: Target date
       type: string?
       default: ''
     product:
-      doc: Calibration product to generate. Only 'sigma' (sigma-naught) is supported.
+      doc: 'Calibration product to generate: sigma, beta, gamma, or rcs.'
       label: Calibration product
       type: string?
       default: sigma
     bucket:
-      doc: CSDA Capella vendor S3 bucket to fetch source rasters from (DPS worker
-        needs read access).
+      doc: CSDA Umbra vendor S3 bucket (DPS worker needs read access).
       label: Vendor S3 bucket
       type: string?
-      default: csdap-capellaspace-delivery
+      default: csda-data-vendor-umbra
     prefix:
       doc: Key prefix within the vendor bucket to search for scenes.
-      label: Vendor S3 prefix
+      label: S3 prefix
       type: string?
       default: disasters
     apply_filter:
-      doc: Apply a Lee speckle filter to the sigma0 product.
+      doc: Apply a Lee speckle filter to the product.
       label: Apply Lee filter
       type: boolean?
       default: false
     filter_size:
-      doc: Lee filter window size in pixels (only used when apply_filter is true).
+      doc: Lee filter window size (only used when apply_filter is true).
       label: Lee filter window size
       type: int?
       default: 5
     dst_crs:
-      doc: 'Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857
-        | EPSG:4326.'
+      doc: 'Target CRS: native (default) | EPSG:3857 | EPSG:4326.'
       label: Target CRS
       type: string?
       default: native
     activation_event:
       doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
-        is REJECTED at run time -- set a real value for a real run.
+        is REJECTED at run time.
       label: Activation event
       type: string?
       default: YYYYMM_Hazard_Location
     source_label:
-      doc: Data origin, e.g. USGS, NASA, NOAA, Capella Space. REQUIRED for a real
-        run (run.sh rejects an empty source).
+      doc: Data origin, e.g. USGS, NASA, NOAA, Umbra. REQUIRED for a real run.
       label: Source
       type: string?
       default: ''
     compression_level:
-      doc: ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max
-        (default).
+      doc: ZSTD level 1-22 (22 = max, default).
       label: COG compression level
       type: int?
       default: 22
@@ -73,7 +68,7 @@ $graph:
       default: ''
     enable_s3_upload:
       doc: Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/
-        (locked destination; DPS also uploads output/ regardless).
+        (locked destination).
       label: Publish to S3
       type: boolean?
       default: false
@@ -83,20 +78,18 @@ $graph:
       type: boolean?
       default: true
     png_min:
-      doc: Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0
-        for uint8 RGB).
+      doc: Manual lower bound for PNG scaling; blank = auto.
       label: PNG min (optional)
       type: string?
       default: ''
     png_max:
-      doc: Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255
-        for uint8 RGB).
+      doc: Manual upper bound for PNG scaling; blank = auto.
       label: PNG max (optional)
       type: string?
       default: ''
     delete_cog:
-      doc: Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded
-        (PNG + output/ copy kept).
+      doc: Delete the COG from ~/drcs_outputs after copy to output/ + upload (PNG
+        + output/ copy kept).
       label: Delete COG from home after upload
       type: boolean?
       default: true
@@ -137,7 +130,7 @@ $graph:
       ramMin: 32
       coresMin: 4
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/capella/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/umbra/run.sh
   inputs:
     date:
       type: string?
@@ -156,7 +149,7 @@ $graph:
       inputBinding:
         position: 3
         prefix: --bucket
-      default: csdap-capellaspace-delivery
+      default: csda-data-vendor-umbra
     prefix:
       type: string?
       inputBinding:
@@ -248,14 +241,14 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: a3d34e579f5156d9149cf26725abaaeb1b97b7b4
+s:commitHash: 273d2791cc86836d9ac19aef629d1e49faffd551
 s:dateCreated: 2026-07-19
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 all inputs optional (no \"Valid value\
-  \ required\") + image built in-workflow from dps/Dockerfile."
-s:keywords: capella, sar, sigma0, cog, disasters, flood
+s:releaseNotes: "OGC registration \u2014 all inputs optional; image built in-workflow\
+  \ from dps/Dockerfile."
+s:keywords: umbra, sar, cog, disasters, flood, calibration
 $namespaces:
   s: https://schema.org/
 $schemas:

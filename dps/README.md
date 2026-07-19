@@ -40,6 +40,13 @@ are used by every algorithm. Everything else lives in a per-algorithm `<name>/` 
 The existing algorithms (`landsat`, `sentinel2`, `capella`, `umbra`, `satellogic`) are
 concrete examples of the pattern — copy the closest one when adding a new algorithm.
 
+One algorithm deliberately deviates: **`list_dates/`** (registered as `list-dates`)
+is a **discovery** tool, not a processing algorithm — it takes a `sensor` selector
+(capella|umbra|satellogic), multiplexes across the three `process_<sensor>
+--list_dates` CLIs to print available vendor-bucket scene dates, and has **no
+`_finalize.sh` step** (no COG; only an `available_<sensor>_dates.csv` artifact).
+See `docs/DPS.md` "Scene-date discovery".
+
 ## The run.sh contract
 
 Every `run.sh` has the same skeleton, whatever the CLI underneath:

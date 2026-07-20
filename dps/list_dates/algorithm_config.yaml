@@ -46,16 +46,19 @@ inputs:
     label: Sensor
     doc: >-
       Which vendor bucket to list scene dates for. One of: capella | umbra |
-      satellogic. (Sentinel-2 and Landsat are file-input and have no
-      vendor-bucket discovery -- they are intentionally NOT options here.)
+      satellogic (case-insensitive, surrounding spaces ignored -- 'Capella'
+      works). Any OTHER value aborts the job immediately, before any S3 listing.
+      (Sentinel-2 and Landsat are file-input and have no vendor-bucket discovery
+      -- they are intentionally NOT options here.)
     type: string
     default: "capella"
   - name: level
     label: Processing level (Satellogic only)
     doc: >-
-      Satellogic processing level to report -- L1D | L1B. ONLY used when
-      sensor=satellogic (Satellogic's discovery is level-scoped); ignored for
-      capella and umbra. Leave at the default otherwise.
+      Satellogic processing level to report -- L1D | L1B (case-insensitive; an
+      invalid value aborts before listing). ONLY used when sensor=satellogic
+      (Satellogic's discovery is level-scoped); ignored (with a NOTE in the log)
+      for capella and umbra. Leave at the default otherwise.
     type: string
     default: "L1D"
 outputs:

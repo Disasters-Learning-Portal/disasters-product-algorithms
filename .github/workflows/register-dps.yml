@@ -71,6 +71,19 @@ permissions:
   contents: write  # the generator commits the generated CWL and pushes it
   packages: write  # push the built DPS worker image to ghcr.io
 
+# Serialize against sync-deploy-algorithm.yml. BOTH workflows push to the
+# unprotected `deploy-algorithm` branch — this one commits+pushes the generated
+# CWL, the sync merges `dev` in on every dev push. With no coordination, a sync
+# push that lands AFTER this run checked out `deploy-algorithm` makes this run's
+# CWL push a non-fast-forward -> rejected, and the run dies before registering
+# (observed 2026-07-20, run 29755367859). Sharing ONE concurrency group makes
+# GitHub run the two one-at-a-time (queue, never overlap). The group string MUST
+# match sync-deploy-algorithm.yml's `concurrency.group` verbatim. cancel-in-progress
+# false = queue behind an in-flight run, never kill a build/register mid-flight.
+concurrency:
+  group: sync-dev-to-deploy-algorithm
+  cancel-in-progress: false
+
 jobs:
   register:
     name: Build image + generate CWL + (optionally) register to MAAP

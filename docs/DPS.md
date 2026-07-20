@@ -372,6 +372,22 @@ Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registere
   from upstream is deploying at the just-pushed `HEAD` (`git rev-parse HEAD`) — so
   a **single run registers its own CWL**. Re-pin the SHA when pulling upstream
   changes into the fork.
+- **The fork is SELF-RETIRING (two monthly Jules jobs, one per repo).** Jules opens
+  PRs in the repo it's invoked from, so the automation is split:
+  - the **fork's** `.github/workflows/check-upstream.yml` (monthly) reconciles the
+    fork via Jules **only while upstream is still buggy** (it greps upstream's deploy
+    step for `github.sha`); if upstream is fixed it no-ops.
+  - **this repo's** `.github/workflows/retire-fork-if-upstream-fixed.yml` (monthly,
+    **on `main`** — scheduled/dispatch workflows only run from the *default* branch)
+    detects that upstream fixed the bug **and** that `register-dps.yml` still pins the
+    fork, then opens a Jules PR **to `dev`** switching `uses:` back to
+    `MAAP-Project/ogc-app-pack-generator@<sha>` and updating these docs.
+  Jules mechanics (both jobs): `google-labs-code/jules-action@v1.0.0` + repo secret
+  `JULES_API_KEY` + the Jules GitHub app installed on the repo. Its PRs are **async**
+  (a session is created; the PR lands minutes later — the action exposes no
+  session-URL output). **Jules honors `starting_branch` as the PR base** (verified:
+  `starting_branch: dev` → PR base `dev`). Canonical bug write-up (also fileable as an
+  upstream issue): the fork's `ONE_BEHIND_BUG.md`.
 - **Admin-approval gate:** the job sets `environment: maap-registration` when
   `register_to_maap` is checked. Create that **GitHub Environment with Required
   reviewers** (Settings → Environments) to actually gate live registrations —

@@ -1,9 +1,41 @@
 import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
 from datetime import datetime
 from typing import Optional, Union
 import os
 import shutil
 from urllib.parse import urlparse
+
+
+def explain_s3_read_failure(exc, bucket: str, prefix: str) -> Optional[str]:
+    """Translate a vendor-bucket read failure into ONE operator-facing line.
+
+    Returns ``None`` when ``exc`` is not a recognized access/credential error
+    (so the caller can fall back to the raw string). Used by the ``--list_dates``
+    discovery path so a missing DPS-worker read role prints an actionable message
+    instead of a raw boto3 traceback.
+    """
+    loc = f"s3://{bucket}/{prefix}"
+    if isinstance(exc, NoCredentialsError):
+        return (
+            f"No AWS credentials available to read {loc}. On MAAP DPS the worker "
+            "role must have read access to the vendor bucket; locally, configure "
+            "AWS credentials or set READ_ROLE_ARN (see docs/DPS.md)."
+        )
+    if isinstance(exc, ClientError):
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in ("AccessDenied", "AccessDeniedException", "403"):
+            return (
+                f"Access denied reading {loc}. The DPS-worker role (or your local "
+                "credentials / READ_ROLE_ARN) lacks s3:ListBucket on this vendor "
+                "bucket -- grant read access and retry (see docs/DPS.md)."
+            )
+        if code in ("NoSuchBucket", "404"):
+            return (
+                f"Bucket s3://{bucket} does not exist or is not visible to these "
+                "credentials -- check the sensor selection and READ_ROLE_ARN."
+            )
+    return None
 
 
 def _read_session(region: str = "us-west-2"):

@@ -7,6 +7,9 @@ CLI processing for Capella SAR products
 import argparse
 import csv
 import os
+import sys
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from capella.capella_v2 import (
     retrieve_capella_resources,
@@ -17,6 +20,7 @@ from capella.capella_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.s3utils import explain_s3_read_failure
 
 
 def main():
@@ -127,7 +131,13 @@ def main():
     args = parser.parse_args()
 
     if args.list_dates:
-        scenes = report_capella_scenes(bucket=args.bucket, prefix=args.prefix)
+        try:
+            scenes = report_capella_scenes(bucket=args.bucket, prefix=args.prefix)
+        except (ClientError, BotoCoreError) as e:
+            msg = explain_s3_read_failure(e, args.bucket, args.prefix)
+            print(msg or f"Failed to list s3://{args.bucket}/{args.prefix}: {e}",
+                  file=sys.stderr)
+            sys.exit(2)
         print(
             f"{len(scenes)} available Capella scene(s) in "
             f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
@@ -163,6 +173,13 @@ def main():
                     s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
                 ])
         print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
+        if not scenes:
+            print(
+                f"\nNo scenes found at s3://{args.bucket}/{args.prefix} (read "
+                "access OK). Double-check the sensor/prefix, or the vendor may "
+                "not have delivered any scenes yet.",
+                file=sys.stderr,
+            )
         return
 
     # --date / --product are optional above so --list_dates can run without

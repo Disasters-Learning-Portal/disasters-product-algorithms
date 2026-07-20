@@ -476,3 +476,4 @@ ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
   `build-env.sh`, and every `conda run --name` in run.sh / `_finalize.sh`.
 - **`dps/` is excluded from the hub image** (`.dockerignore`); DPS clones git
   directly, so that's fine.
+<!-- jules dev-branch smoke test -->

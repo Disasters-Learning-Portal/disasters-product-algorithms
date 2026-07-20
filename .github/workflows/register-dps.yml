@@ -97,7 +97,13 @@ jobs:
           echo "algorithm_version stamped:"; grep -E '^algorithm_version:' "${CONFIG}"
 
       - name: Build image + generate CWL + (optionally) register
-        uses: MAAP-Project/ogc-app-pack-generator@main
+        # Our FORK of MAAP's generator, pinned to a SHA — it patches the ONE-BEHIND
+        # deploy so a single run registers its OWN CWL (upstream deploys the CWL at
+        # github.sha = the CHECKOUT commit, which is the PREVIOUS run's CWL because
+        # the CWL filename is branch-based and overwritten each run). Fork main =
+        # upstream main + that one-line fix. Re-pin this SHA when pulling upstream
+        # updates into the fork. Upstream: MAAP-Project/ogc-app-pack-generator.
+        uses: Disasters-Learning-Portal/ogc-app-pack-generator@3c95ec1ee5b737a9be0e6fb2449a7fd1686f5259
         with:
           algorithm-configuration-path: dps/ogc/${{ inputs.algorithm }}.yml
           # Build the worker image in-workflow from this Dockerfile and push to

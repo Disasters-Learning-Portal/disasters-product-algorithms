@@ -23,12 +23,29 @@ def explain_s3_read_failure(exc, bucket: str, prefix: str) -> Optional[str]:
             "AWS credentials or set READ_ROLE_ARN (see docs/DPS.md)."
         )
     if isinstance(exc, ClientError):
+        op = getattr(exc, "operation_name", "") or ""
         code = str(exc.response.get("Error", {}).get("Code", ""))
+        read_role = os.environ.get("READ_ROLE_ARN", "<unset>")
         if code in ("AccessDenied", "AccessDeniedException", "403"):
+            # Distinguish WHICH call was denied. When READ_ROLE_ARN is set,
+            # _read_session first calls sts:AssumeRole -- a denial there (the
+            # worker role may not assume it, or the target's trust policy doesn't
+            # list it) needs a DIFFERENT fix than an s3:ListBucket denial, yet both
+            # surface as AccessDenied. operation_name tells them apart, and echoing
+            # READ_ROLE_ARN shows whether the assume was even attempted.
+            if op == "AssumeRole":
+                return (
+                    f"Access denied on sts:AssumeRole of READ_ROLE_ARN={read_role}. "
+                    "The current identity is not allowed to assume that role -- add "
+                    "the DPS-worker role to the target role's trust policy (Action "
+                    "sts:AssumeRole, no ExternalId needed). See docs/DPS.md "
+                    "'Vendor read access'."
+                )
             return (
-                f"Access denied reading {loc}. The DPS-worker role (or your local "
-                "credentials / READ_ROLE_ARN) lacks s3:ListBucket on this vendor "
-                "bucket -- grant read access and retry (see docs/DPS.md)."
+                f"Access denied reading {loc} (operation {op or 's3'}, "
+                f"READ_ROLE_ARN={read_role}). The effective identity lacks "
+                "s3:ListBucket on this vendor bucket -- grant read access (or "
+                "set/fix READ_ROLE_ARN) and retry (see docs/DPS.md)."
             )
         if code in ("NoSuchBucket", "404"):
             return (

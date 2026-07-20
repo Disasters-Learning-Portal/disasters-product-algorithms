@@ -17,6 +17,8 @@ mkdir -p output
 
 # shared input validators (fail fast, before conda/fetch)
 source "${basedir}/../_validate.sh"
+# assume disasters-prod for CSDA vendor-bucket reads (sets READ_ROLE_ARN)
+source "${basedir}/../_env.sh"
 
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the

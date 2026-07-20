@@ -179,10 +179,19 @@ When you *don't* have local read creds to the vendor bucket (only the DPS worker
 role does), you can discover dates **from a DPS job itself**. Discovery is the dedicated
 **`list-dates`** algorithm (`dps/list_dates/`) — a **separate registered
 algorithm**, not a per-sensor toggle. Pick a **`sensor`** input (capella | umbra |
-satellogic) and Submit: `run.sh` validates the selector and dispatches to
-`process_<sensor> --list_dates --output output`, running a **report-only** job —
-no COG, no upload. (Satellogic's report is **level-scoped**: it validates `level`
-and lists only that level's scenes, so set the `level` input before submitting.)
+satellogic) and Submit: `run.sh` **normalizes** the selector (trims whitespace and
+folds case via `normalize_token`, so `Capella`/` umbra ` work) then **validates**
+it — an unrecognized `sensor`/`level` **aborts in ~0s, before any S3 listing or
+dispatch**, so the job never "runs" on bad criteria. On a clean selector it
+dispatches to `process_<sensor> --list_dates --output output`, a **report-only**
+job — no COG, no upload. (Satellogic's report is **level-scoped**: `level` is
+validated up front too, so set it before submitting; for capella/umbra a
+deliberately-set `level` is ignored with a `NOTE` in the log.) If the DPS worker
+lacks read access to the vendor bucket, the report path prints **one actionable
+line** (via `shared_utils.s3utils.explain_s3_read_failure`: missing credentials /
+access denied / no-such-bucket) and exits non-zero — no raw boto3 traceback; a
+valid selector that simply returns nothing prints a "no scenes (read access OK)"
+hint so an empty result isn't confused with a permissions problem.
 The report is an **aligned table**, one row per scene, **newest first by S3
 delivery time** (`LastModified` — the top rows are the scenes most recently added
 to the bucket, i.e. closest to today): columns are the `--date` value to copy,
@@ -268,6 +277,7 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | `validate_regex date` | `YYYYMMDDHHMMSS` (Capella) / `YYYY-MM-DD HH:MM:SS` (Umbra, Satellogic) | SAR |
 | `validate_in_set level "L1D L1B"` | valid processing level | Satellogic |
 | `validate_int_range filter_size … 1 101` | integer window when `apply_filter` | Capella, Umbra |
+| `normalize_token` + `validate_in_set sensor "capella umbra satellogic"` | case/space-tolerant selector; unknown value aborts before any S3 listing | list-dates |
 
 `--product` on the SAR sensors is already enforced by argparse `choices=` in the
 CLI, so bash does not re-check it. Assertions live in
@@ -313,6 +323,63 @@ tabs (the menu-bar version is the archived JL2 `maap-jupyter-ide`).
 
 `algorithm_version: dev` makes DPS clone the `dev` branch; pin a tag for
 reproducible production runs.
+
+## Registering via the OGC / GitHub Action path (the only way to get OPTIONAL inputs)
+
+The Register Algorithm GUI can only emit **required** inputs (base types, no `?`),
+so any falsy default (`boolean: false`, `string: ""`) hits *"Valid value required"*
+at Submit Job (see "The OGC/CWL registration schema" above). To register inputs as
+**optional** — so the Submit form never blocks — register via MAAP's
+**`ogc-app-pack-generator`**, driven by **`.github/workflows/register-dps.yml`**
+(manual `workflow_dispatch`).
+
+**How it works:** pick an **`algorithm`** (dropdown → `dps/ogc/<name>.yml`), an
+**`algorithm_version`** (default `dev`), and **`register_to_maap`** (checkbox;
+unchecked = safe dry-run). Via `dockerfile-path: dps/Dockerfile` the action
+**builds the DPS worker image in-workflow and pushes it to ghcr.io**, generates +
+validates the CWL (injecting that image), and — if checked — registers it to the
+prod OGC processes API. `run-name` shows which algorithm/version is registering.
+
+**The `dps/ogc/<name>.yml` configs** mirror `dps/<sensor>/algorithm_config.yaml`
+but mark **every input `type: X?`** (OGC-optional → `minOccurs:0`), carry **no
+container field** (the Action supplies the built image), and use an **absolute
+in-image `run_command`** (`/app/disasters-product-algorithms/dps/<sensor>/run.sh`).
+Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registered
+`capella`/`umbra`/etc.
+
+**Non-obvious operational rules — each costs a failed or confusing run if missed:**
+
+- **Run it from the UNPROTECTED `deploy-algorithm` branch.** The generator commits
+  the generated CWL and pushes it to the run branch; `dev`/`main` are protected and
+  reject the bot's push (`GH006: Protected branch update failed`) *after* the image
+  is already built. `deploy-algorithm` is protected against **deletion only**
+  (admins bypass), so normal pushes still work.
+- **The ghcr image must be PUBLIC** — MAAP's ADES pulls it anonymously at job time.
+  New ghcr packages default private, and the org may **disable public packages**
+  outright (org Settings → Packages must allow public first, then the package →
+  Change visibility → Public). This gates SUBMITTING A JOB, not registration.
+- **Registration is ASYNC.** A successful run returns `status: "accepted"` + a
+  `deploymentJobID` + a `deploy-ogc-hysds` pipeline link; the process appears in the
+  **Submit Jobs** dropdown only after that pipeline finishes (a few min). The
+  `maap-dps-jupyter-extension` DOES list OGC-registered processes (confirmed —
+  `cardamom-ogc-process` and our four show up there).
+- **ONE-BEHIND DEPLOY (generator quirk, not yet hardened).** The deploy step
+  registers the CWL at the **checkout** commit (`github.sha`) — i.e. the CWL the
+  *previous* run generated (the CWL filename is branch-based,
+  `process_<repo>_<branch>.cwl`, overwritten each run). So registering **N
+  algorithms needs N+1 runs** (a final "flush" run of the last one deploys it); a
+  **single** algorithm must be run **twice**.
+- **Admin-approval gate:** the job sets `environment: maap-registration` when
+  `register_to_maap` is checked. Create that **GitHub Environment with Required
+  reviewers** (Settings → Environments) to actually gate live registrations —
+  until it exists *with reviewers*, GitHub auto-creates it unprotected and runs
+  ungated.
+- **`gh workflow run` validates inputs against the target `--ref`'s** workflow file
+  (not only the default branch), so a new input (e.g. `algorithm`) must be pushed to
+  the branch you run from before dispatching.
+
+Prereq: repo secret **`MAAP_PGT`** (only used when `register_to_maap` is checked).
+This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub UI.
 
 ## Deploying a code change (push → re-register)
 

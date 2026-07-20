@@ -21,6 +21,13 @@ no() { local d="$1"; shift
     fail=$((fail+1)); echo "FAIL (expected fail): $d"
   else pass=$((pass+1)); fi; }
 
+# eq DESC WANT CALL... -- the call's stdout (in a subshell) must equal WANT.
+# Used for pure transforms like normalize_token.
+eq() { local d="$1" want="$2"; shift 2
+  local got; got="$( source "$VALIDATE"; "$@" )"
+  if [[ "$got" == "$want" ]]; then pass=$((pass+1))
+  else fail=$((fail+1)); echo "FAIL (want '$want' got '$got'): $d"; fi; }
+
 # --- activation_event -------------------------------------------------------
 ok "event ok"            validate_activation_event 202511_Flood_TX
 ok "event loc underscore" validate_activation_event 202501_Flood_CA_extra
@@ -57,6 +64,27 @@ no "num empty"           validate_number nodata ""
 ok "level L1D"           validate_in_set level L1D "L1D L1B"
 ok "level L1B"           validate_in_set level L1B "L1D L1B"
 no "level L1C"           validate_in_set level L1C "L1D L1B"
+
+# --- in_set (sensor selector: list-dates) -----------------------------------
+ok "sensor capella"      validate_in_set sensor capella "capella umbra satellogic"
+ok "sensor umbra"        validate_in_set sensor umbra "capella umbra satellogic"
+ok "sensor satellogic"   validate_in_set sensor satellogic "capella umbra satellogic"
+no "sensor sentinel2"    validate_in_set sensor sentinel2 "capella umbra satellogic"
+no "sensor landsat"      validate_in_set sensor landsat "capella umbra satellogic"
+no "sensor typo"         validate_in_set sensor capel "capella umbra satellogic"
+no "sensor empty"        validate_in_set sensor "" "capella umbra satellogic"
+no "sensor raw Capella"  validate_in_set sensor Capella "capella umbra satellogic"
+
+# --- normalize_token (trim + case-fold; feeds validate_in_set) --------------
+eq "norm Capella->capella"  capella     normalize_token "Capella" lower
+eq "norm CAPELLA->capella"  capella     normalize_token "CAPELLA" lower
+eq "norm spaces trimmed"    capella     normalize_token "  capella  " lower
+eq "norm ' Capella '"       capella     normalize_token " Capella " lower
+eq "norm l1d->L1D"          L1D         normalize_token "l1d" upper
+eq "norm ' L1b '->L1B"      L1B         normalize_token " L1b " upper
+eq "norm default L1D"       L1D         normalize_token "L1D" upper
+eq "norm satellogic keep"   satellogic  normalize_token "  SateLLogic " lower
+eq "norm unknown untouched" sentinel2   normalize_token " Sentinel2 " lower
 
 # --- date regexes -----------------------------------------------------------
 ok "capella date"        validate_regex date 20231107120000 '^[0-9]{14}$' ts

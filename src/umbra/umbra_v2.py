@@ -27,6 +27,14 @@ from shared_utils.geotools import *
 from shared_utils.s3utils import *
 
 def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-data-vendor-umbra", prefix : str = "disasters") -> list[str]:
+    """Return every Umbra tif for the acquisition closest to ``date``.
+
+    All scene folders whose timestamp matches are pooled into one flat list --
+    the old code took only ``selected_subdir[...][0]``, silently dropping any
+    others. The calibration functions read the ``_gec.tif`` band; pass the result
+    through :func:`group_umbra_scenes` to split it into one group per GEC band
+    (i.e. per genuine scene). Real-case S3 keys preserved so fetches don't 404.
+    """
     files = retrieve_s3_file_list(bucket, prefix)
     filtered_files = [x for x in files if len(x.split("/")) > 2]
     subdirs = list(set([x.split("/")[2] for x in filtered_files]))
@@ -38,12 +46,27 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
     closest_date = min(dates, key=lambda d: abs(d - date))
     date_prefix = closest_date.strftime("%Y-%m-%d-%H-%M-%S")
 
-    selected_subdir = [x for x in subdirs if x.startswith(date_prefix)][0]
+    selected_subdirs = [x for x in subdirs if x.startswith(date_prefix)]
 
-    tifs = [x for x in filtered_files if ((x.split("/")[2] == selected_subdir) and (x.lower().endswith(".tif")))]
-    tifs = [f"s3://{bucket}/{x}" for x in tifs]
+    tifs = [
+        f"s3://{bucket}/{x}"
+        for x in filtered_files
+        if ((x.split("/")[2] in selected_subdirs) and (x.lower().endswith(".tif")))
+    ]
 
     return tifs
+
+
+def group_umbra_scenes(tifs: list[str]) -> list[list[str]]:
+    """Split pooled Umbra tifs into one group per scene (one per GEC band).
+
+    The calibration functions (``sigmaCalib``/``betaCalib``/``gammaCalib``/
+    ``rcsCalib``) read the ``_gec.tif`` band, so each GEC file is a distinct
+    scene; folders without one contribute nothing. Returns one single-element
+    ``[gec]`` list per GEC band so the caller loops and emits one COG per scene
+    instead of silently keeping only the first.
+    """
+    return [[gec] for gec in tifs if gec.lower().endswith("_gec.tif")]
 
 def report_umbra_scenes(
     bucket: str = "csda-data-vendor-umbra",

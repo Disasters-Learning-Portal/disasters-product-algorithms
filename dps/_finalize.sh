@@ -43,7 +43,11 @@ bucket, prefix, out_home = sys.argv[1], sys.argv[2], sys.argv[3]
 files = sorted(glob.glob(os.path.join(out_home, "**", "*.tif"), recursive=True) +
                glob.glob(os.path.join(out_home, "**", "*.png"), recursive=True))
 for f in files:
-    upload_file_to_s3(f, f"s3://{bucket}/{prefix}/{os.path.basename(f)}")
+    # Preserve the sub-path under OUT_HOME in the S3 key (mirrors the output/
+    # cp -r tree) so same-named COGs in different scene/product subdirs don't
+    # overwrite each other. For the flat single-file case relpath == basename.
+    rel = os.path.relpath(f, out_home)
+    upload_file_to_s3(f, f"s3://{bucket}/{prefix}/{rel}")
 print(f"Uploaded {len(files)} file(s) to s3://{bucket}/{prefix}/")
 PY
 fi

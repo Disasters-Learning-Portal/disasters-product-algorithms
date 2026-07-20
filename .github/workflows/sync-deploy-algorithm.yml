@@ -1,0 +1,157 @@
+# .github/workflows/sync-deploy-algorithm.yml
+#
+# Keeps `deploy-algorithm` in sync with `dev` (changes land on dev; we deploy /
+# register from deploy-algorithm). On every push to `dev` it merges `dev` into
+# `deploy-algorithm`:
+#   • CLEAN merge  -> pushes the merge commit straight to deploy-algorithm
+#                     (that branch is UNPROTECTED, so GITHUB_TOKEN can push it).
+#   • CONFLICT     -> aborts (deploy-algorithm left byte-for-byte untouched) and
+#                     opens/updates a tracking Issue, then fails the run so it's
+#                     visible. Nothing is ever force-pushed.
+#
+# WHY DIRECT-PUSH + ISSUE (and not an auto-PR):
+#   This org DISALLOWS the GitHub Actions token from creating pull requests
+#   ("The organization does not allow GitHub Actions to create or approve pull
+#   requests"), so a `gh pr create` from GITHUB_TOKEN 409s. The org does still
+#   allow Actions to PUSH to a branch and to OPEN ISSUES, so we sync by pushing
+#   clean merges and routing conflicts to an Issue for a human. This mirrors how
+#   register-dps.yml already pushes generated CWL to deploy-algorithm.
+#   (If you later want mandatory PR review instead, swap GITHUB_TOKEN for a PAT /
+#   GitHub App token with pull-requests:write and open a PR — a user/app token is
+#   not subject to the org's Actions-PR restriction.)
+#
+# --- WHERE THIS FILE MUST LIVE -----------------------------------------------
+#   The `push` trigger runs the workflow DEFINITION FROM THE PUSHED COMMIT — the
+#   copy of this file on `dev`. So `on: push: branches: [dev]` only fires while
+#   this file exists on `dev` (land changes via a PR into dev; it's protected).
+#   `workflow_dispatch` (manual button) and `schedule` (nightly) read the file
+#   from the DEFAULT branch (`main`) — they only appear/run if this file is ALSO
+#   on `main`. It never needs to live on deploy-algorithm.
+#
+# RECURSION: the merge push uses GITHUB_TOKEN, so it does NOT trigger further
+# workflow runs, and nothing triggers on push to deploy-algorithm anyway — no loop.
+
+name: Sync dev -> deploy-algorithm (auto-merge)
+run-name: >-
+  Sync dev -> deploy-algorithm
+  (${{ github.event_name == 'workflow_dispatch' && 'manual'
+      || github.event_name == 'schedule' && 'scheduled'
+      || format('push {0}', github.sha) }})
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"   # 06:17 UTC daily; catches any missed dev push (needs file on main)
+
+# contents:write -> push the merge to the UNPROTECTED deploy-algorithm.
+# issues:write   -> open/update the conflict-notification issue.
+# No pull-requests: this workflow never creates a PR (the org blocks that anyway).
+permissions:
+  contents: write
+  issues: write
+
+# Serialize so two dev pushes can't race two merges into the same branch.
+concurrency:
+  group: sync-dev-to-deploy-algorithm
+  cancel-in-progress: false
+
+env:
+  SOURCE_BRANCH: dev
+  TARGET_BRANCH: deploy-algorithm
+
+jobs:
+  sync:
+    name: Merge dev into deploy-algorithm (push if clean, issue if conflict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout deploy-algorithm (full history)
+        uses: actions/checkout@v4
+        with:
+          # Check out the TARGET so we merge dev INTO it and push it back. A
+          # merge needs real history of both branches -> fetch-depth: 0.
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          # Persist GITHUB_TOKEN as the push credential.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity (github-actions[bot])
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch source branch
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "${SOURCE_BRANCH}"
+
+      - name: Merge dev into deploy-algorithm (push if clean)
+        id: sync
+        run: |
+          set -euo pipefail
+          # No-op fast path: if deploy-algorithm already contains every dev
+          # commit, there is nothing to sync.
+          if git merge-base --is-ancestor "origin/${SOURCE_BRANCH}" HEAD; then
+            echo "deploy-algorithm already contains all of ${SOURCE_BRANCH} - nothing to sync."
+            echo "result=in-sync" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-ff: always record a merge commit (traceable; guarantees
+          # deploy-algorithm's own commits stay on the graph). --no-edit: default
+          # message. We branch on the exit code to handle conflicts.
+          if git merge --no-ff --no-edit \
+               -m "Merge ${SOURCE_BRANCH} into ${TARGET_BRANCH} (automated sync)" \
+               "origin/${SOURCE_BRANCH}"; then
+            # Plain (non-force) push: only ever APPENDS the merge commit, never
+            # rewrites deploy-algorithm's history. If a concurrent bot push (e.g.
+            # a register-dps CWL commit) landed since checkout, this push is
+            # REJECTED (not forced) and the run fails loudly; the next dev push
+            # re-syncs from the new tip.
+            git push origin "HEAD:${TARGET_BRANCH}"
+            echo "result=pushed" >> "$GITHUB_OUTPUT"
+            echo "Merged ${SOURCE_BRANCH} into ${TARGET_BRANCH} and pushed."
+          else
+            # CONFLICT: restore the pristine tree and DO NOT push. Hand off to the
+            # issue step. deploy-algorithm on origin is never touched.
+            git merge --abort || true
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "::warning::${SOURCE_BRANCH} -> ${TARGET_BRANCH} merge CONFLICTED; ${TARGET_BRANCH} left untouched. Opening/refreshing an issue."
+          fi
+
+      - name: Open or refresh the conflict issue
+        if: steps.sync.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Sync blocked: dev -> deploy-algorithm merge conflict"
+          # printf (not a heredoc): an unquoted heredoc delimiter must be at
+          # column 0, impossible inside an indented run: block.
+          BODY="$(printf '%s\n' \
+            "The automated ${SOURCE_BRANCH} -> ${TARGET_BRANCH} sync could not merge cleanly at commit ${GITHUB_SHA}." \
+            "" \
+            "\`${TARGET_BRANCH}\` was left byte-for-byte untouched (its own commits are safe). Reconcile manually:" \
+            "" \
+            "    git switch ${TARGET_BRANCH} && git pull" \
+            "    git merge origin/${SOURCE_BRANCH}   # resolve conflicts (usually take dev's side on shared CI files)" \
+            "    git push" \
+            "" \
+            "Likely conflict files: \`.github/workflows/register-dps.yml\`, \`dps/ogc/*.yml\`." \
+            "Once ${TARGET_BRANCH} contains ${SOURCE_BRANCH} again, the next sync goes green — close this issue.")"
+          # Idempotent: reuse an open issue with this exact title instead of
+          # stacking a new one on every dev push.
+          NUM="$(gh issue list --state open --search "${TITLE} in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "Still conflicting at ${GITHUB_SHA}."$'\n\n'"${BODY}"
+            echo "Updated tracking issue #${NUM}."
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Fail the run so the conflict is visible
+        if: steps.sync.outputs.result == 'conflict'
+        run: |
+          echo "::error::${SOURCE_BRANCH} -> ${TARGET_BRANCH} merge conflicted; see the tracking issue. ${TARGET_BRANCH} was NOT modified."
+          exit 1

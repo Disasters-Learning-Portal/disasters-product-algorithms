@@ -1,5 +1,6 @@
 import os
-import sys                                     
+import sys  
+import argparse
 import numpy as np
 from osgeo import gdal, osr
 from PIL import Image, ImageEnhance
@@ -13,7 +14,7 @@ from pathlib import Path
 import requests
 import shutil
 from scipy.signal import medfilt2d
-from scipy.ndimage import uniform_filter
+from scipy.ndimage import uniform_filter, variance
 from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
@@ -45,7 +46,21 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
 
     return tifs
 
-def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+def lee_filter(img, size):
+    print(f"Lee filter size = {size}")
+    img_mean = uniform_filter(img, (size, size))
+    img_sqr_mean = uniform_filter(img**2, (size, size))
+    img_variance = img_sqr_mean - img_mean**2
+
+    overall_variance = np.nanvar(img)
+
+    eps = 1e-10
+
+    img_weights = img_variance / (img_variance + overall_variance + eps)
+    img_output = img_mean + img_weights * (img - img_mean)
+    return img_output
+
+def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
@@ -74,7 +89,13 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     print(sigma_val)
     print(type(sigma_val))
     
-    sigma_0 = 20. * np.log10(float(sigma_val) * dn)
+    sigma_linear = float(sigma_val) * dn
+
+    sigma_linear = lee_filter(sigma_linear, size=filter_size)
+    
+    sigma_linear = np.clip(sigma_linear, 1e-10, None)
+    
+    sigma_0 = 20.0 * np.log10(sigma_linear)
     print(np.max(sigma_0), np.min(sigma_0))
     
     outfile = (
@@ -89,7 +110,7 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     print(f"Generation completed, file saved to {outfile}")
     return outfile
     
-def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
@@ -118,7 +139,11 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     print(beta_val)
     print(type(beta_val))
   
-    beta_0 = 20. * np.log10(float(beta_val) * dn)
+    beta_linear = float(beta_val) * dn
+    
+    beta_linear = lee_filter(beta_linear, size=filter_size)
+    
+    beta_0 = 20.0 * np.log10(beta_linear)
     print(np.max(beta_0), np.min(beta_0))
 
     outfile = (
@@ -133,7 +158,7 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     print("Collecting needed files...")
@@ -162,7 +187,13 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     print(gamma_val)
     print(type(gamma_val))
   
-    gamma_0 = 20. * np.log10(float(gamma_val) * dn)
+    gamma_linear = float(gamma_val) * dn
+
+    gamma_linear = lee_filter(gamma_linear, size=filter_size)
+    
+    gamma_linear = np.clip(gamma_linear, 1e-10, None)
+    
+    gamma_0 = 20.0 * np.log10(gamma_linear)
     print(np.max(gamma_0), np.min(gamma_0))
 
     outfile = (
@@ -177,91 +208,44 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def rcsCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
-    if save_location.endswith("/"):
-        save_location = save_location[:-1]
-    print("Collecting needed files...")
-    in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
-    if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
-        print("GEC file not found, downloading from s3")
-        in_file = download_s3_file(in_filepath)
-    else:
-        print("GEC file found, proceeding")
-        in_file = f'/tmp/s3_temp/{local_tif_basename(in_filepath)}'
-    print('Generating RCS Naught')
-    print("\n\t* Opening GEC File")
-    ds = gdal.Open(in_file)
-    cols = ds.RasterXSize
-    rows = ds.RasterYSize
-    in_geo = ds.GetGeoTransform()
-    projref = ds.GetProjectionRef()
-    dn = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
-    print(np.max(dn), np.min(dn))
-    #print(cols, rows)
-
-    metadata = ds.GetMetadata()
-    print(metadata)
-
-    rcs_val = ds.GetMetadataItem('DN_TO_RCS')
-    print(rcs_val)
-    print(type(rcs_val))
-  
-    rcs_0 = 20. * np.log10(float(rcs_val) * dn)
-    print(np.max(rcs_0), np.min(rcs_0))
-
-    outfile = (
-        f"{save_location}/"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
-        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
-        f"rcs0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+if __name__ == "__main__":
+    
+    parser = argparse.ArgumentParser(
+        description="Process Umbra SAR imagery."
     )
-    dump_geotiff_float(outfile, rcs_0, projref, in_geo)
 
-    print(f"Generation completed, file saved to {outfile}")
-    return outfile
+    parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Input Umbra GEC TIFF"
+    )
 
-def apply_filter(input_tif, size=5, output_tif=None):
-    with rio.open(input_tif) as src:
-        img = src.read(1).astype(float)
-        profile = src.profile.copy()
+    parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output directory"
+    )
 
-    # preserve nodata mask
-    mask = np.isnan(img)
+    parser.add_argument(
+        "--filter_size",
+        type=int,
+        choices=[3, 5, 7],
+        default=5,
+        help="Lee filter window size (3, 5, or 7)"
+    )
 
-    # percentile stretch
-    if 'rcs' in input_tif:
-        out_min, out_max = -40, 0
-    else:
-        out_min, out_max = -25, 10
+    args = parser.parse_args()
 
-    p_low, p_high = np.nanpercentile(img, (2, 98))
+    if not os.path.exists(args.output):
+        os.makedirs(args.output)
 
-    img = np.interp(img, (p_low, p_high), (out_min, out_max))
+    sigmaCalib([args.input], args.output, filter_size=args.filter_size)
+    betaCalib([args.input], args.output, filter_size=args.filter_size)
+    gammaCalib([args.input], args.output, filter_size=args.filter_size)
 
-    img_mean = uniform_filter(img, (size, size))
-    img_sqr_mean = uniform_filter(img**2, (size, size))
-    img_variance = img_sqr_mean - img_mean**2
-
-    overall_variance = np.nanvar(img)
-
-    eps = 1e-10
-    weights = img_variance / (img_variance + overall_variance + eps)
-
-    img_out = img_mean + weights * (img - img_mean)
-
-    # restore nodata
-    img_out[mask] = np.nan
-
-    if output_tif is None:
-        output_tif = input_tif.replace(".tif", "_filtered.tif")
-
-    profile.update(dtype=rio.float32, nodata=np.nan)
-
-    with rio.open(output_tif, "w", **profile) as dst:
-        dst.write(img_out.astype(np.float32), 1)
-
-    return output_tif
+    print("Processing complete.")
 
 ######################################################################
 #f_path = '/mnt/disasters1/data/esops/eventData/2026/wintWeatherJan2026/umbra/Greenville'

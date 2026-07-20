@@ -10,9 +10,7 @@ from umbra.umbra_v2 import (
     retrieve_umbra_resources,
     sigmaCalib,
     betaCalib,
-    gammaCalib,
-    rcsCalib,
-    apply_filter
+    gammaCalib
 )
 
 from shared_utils.cog_utils import convert_to_cog
@@ -25,21 +23,16 @@ def main():
     parser.add_argument(
         "--product",
         required=True,
-        choices=["sigma", "beta", "gamma", "rcs"],
+        choices=["sigma", "beta", "gamma"],
         help="Calibration product to generate"
-    )
-    
-    parser.add_argument(
-        "--apply_filter",
-        action="store_true",
-        help="Apply filtering to the selected product"
     )
 
     parser.add_argument(
         "--filter_size",
         type=int,
+        choices=[3, 5, 7],
         default=5,
-        help="Lee filter window size (e.g. 3, 5, 7)"
+        help="Lee filter window size (3, 5, or 7)"
     )
 
     parser.add_argument(
@@ -110,45 +103,25 @@ def main():
     outfile = None
 
     if args.product == "sigma":
-        outfile = sigmaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-    
-            # remove raw tif
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-    
+        outfile = sigmaCalib(
+            tifs,
+            args.output,
+            filter_size=args.filter_size,
+        )
+        
     elif args.product == "beta":
-        outfile = betaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
+        outfile = betaCalib(
+            tifs,
+            args.output,
+            filter_size=args.filter_size,
+        )
     
     elif args.product == "gamma":
-        outfile = gammaCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
-    
-    elif args.product == "rcs":
-        outfile = rcsCalib(tifs, args.output)
-    
-        if args.apply_filter:
-            raw_outfile = outfile
-            outfile = apply_filter(outfile, size=args.filter_size)
-            
-            if os.path.exists(raw_outfile):
-                os.remove(raw_outfile)
+        outfile = gammaCalib(
+            tifs,
+            args.output,
+            filter_size=args.filter_size,
+        )
 
     # COG Conversion Step
     if outfile:

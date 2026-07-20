@@ -1,0 +1,22 @@
+name: Jules dev-branch smoke test (TEMPORARY - delete after verifying)
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+      - uses: google-labs-code/jules-action@v1.0.0
+        with:
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          starting_branch: dev
+          prompt: |
+            Append exactly one line to the very END of docs/DPS.md:
+            `<!-- jules dev-branch smoke test -->`
+            Make ONLY that one-line change. Then open a pull request whose BASE
+            branch is `dev` (NOT main), titled "test: jules dev-branch smoke (close me)".
+            The PR base branch MUST be `dev`.

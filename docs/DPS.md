@@ -106,13 +106,48 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
 - **SAR/vendor (capella, umbra, satellogic):** **no file input** — the CLI
   fetches source rasters from a CSDA vendor bucket keyed by `--date`/`--bucket`/
   `--prefix` (capella `csdap-capellaspace-delivery`, umbra `csda-data-vendor-umbra`,
-  satellogic `csda-data-vendor-satellogic`). The **DPS-worker IAM role must have
-  read access** to that bucket (you can't set that role from this repo or the
-  hub — it's MAAP infra; request it from MAAP, or grant cross-account on the
-  bucket). Optional code lever: set **`READ_ROLE_ARN`** (+ `READ_ROLE_EXTERNAL_ID`)
-  so `shared_utils.s3utils` assumes a role with vendor access (see s3utils
-  `_read_session`). Satellogic's bucket/prefix are hardcoded in the CLI (the
-  inputs are informational only).
+  satellogic `csda-data-vendor-satellogic`). Satellogic's bucket/prefix are
+  hardcoded in the CLI (the inputs are informational only).
+
+### Vendor read access — the `AccessDenied` fix (2026-07-20)
+
+A DPS worker runs as **`dps-verdi-role`** (account `884094767067`). That role can
+*write* to `nasa-disasters` (the `_finalize.sh` upload uses plain
+`boto3.client("s3")` = ambient creds) but has **no `s3:ListBucket`** on the
+cross-account CSDA vendor buckets — so an un-assisted `list-dates` / SAR fetch dies
+with `AccessDenied ... s3:ListBucket ... csdap-*`. The hub reads those same buckets
+as the **`disasters-prod`** role (account `515966502221`, granted via EKS/IRSA). So
+DPS must **assume `disasters-prod`** for vendor reads.
+
+This is now wired by default: **`dps/_env.sh`** exports
+`READ_ROLE_ARN=arn:aws:iam::515966502221:role/disasters-prod` and is `source`d by
+the four vendor-reading run.sh (capella / umbra / satellogic / list_dates), right
+after `_validate.sh`. `s3utils._read_session()` then assumes it for **every** vendor
+read (list + download), passing **no `ExternalId`**. `${READ_ROLE_ARN:-…}` lets an
+operator override it; set `READ_ROLE_EXTERNAL_ID` too only if you switch to an
+ExternalId-gated role. The upload path is untouched — it stays on `dps-verdi-role`.
+
+- **NOT a library default, on purpose.** On the hub the ambient identity already
+  *is* `disasters-prod`, so an unconditional assume would force a self-assume, which
+  the role's trust policy rejects. Keep the export DPS-only (that's why it lives in
+  `dps/_env.sh`, not in `_read_session`).
+- **One infra prerequisite, not settable from this repo.** `disasters-prod`'s
+  **trust policy** must let `dps-verdi-role` assume it — add a statement alongside
+  the existing EKS `AssumeRoleWithWebIdentity` one:
+  ```json
+  { "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::884094767067:role/dps-verdi-role" },
+    "Action": "sts:AssumeRole" }
+  ```
+  No `ExternalId`. This is a manual IAM edit in account `515966502221`.
+- **You cannot test the assume from the hub notebook** — the notebook *is*
+  `disasters-prod`, and a role can't assume itself, so that `AccessDenied ...
+  sts:AssumeRole` is expected and tells you nothing. Test inside a DPS job.
+- **Error taxonomy after a re-register** (the log tells you exactly where you are):
+  scene table + CSV = fixed; `AccessDenied ... sts:AssumeRole` = code is assuming
+  correctly, the trust grant above is still missing; `AccessDenied ... s3:ListBucket`
+  (unchanged) = the rebuild didn't pick up the push, i.e. the code isn't on
+  `origin/dev` yet (the #1 "re-registered but nothing changed" trap).
 
 ## Finding available scenes / dates (`aws s3 ls`)
 

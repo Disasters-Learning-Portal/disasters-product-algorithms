@@ -9,14 +9,16 @@ $graph:
   id: list-dates-ogc-test
   inputs:
     sensor:
-      doc: 'Which vendor bucket to list scene dates for: capella | umbra | satellogic.
+      doc: 'Which vendor bucket to list scene dates for: capella | umbra | satellogic
+        (case-insensitive, spaces trimmed). Any other value aborts before any S3 listing.
         (Sentinel-2 and Landsat are file-input and have no vendor-bucket discovery.)'
       label: Sensor
       type: string?
       default: capella
     level:
-      doc: "Satellogic processing level to report \u2014 L1D | L1B. ONLY used when\
-        \ sensor=satellogic; ignored for capella and umbra."
+      doc: "Satellogic processing level to report \u2014 L1D | L1B (case-insensitive;\
+        \ an invalid value aborts before listing). ONLY used when sensor=satellogic;\
+        \ ignored (with a NOTE in the log) for capella and umbra."
       label: Processing level (Satellogic only)
       type: string?
       default: L1D
@@ -70,8 +72,8 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 6a04a16f48c333016bb0809f9f0041337e1a8d7a
-s:dateCreated: 2026-07-19
+s:commitHash: 95f54109ebdda21e90e13f08db6b885e8fd9dc77
+s:dateCreated: 2026-07-20
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev

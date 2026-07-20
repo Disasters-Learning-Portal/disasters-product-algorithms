@@ -363,12 +363,15 @@ Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registere
   **Submit Jobs** dropdown only after that pipeline finishes (a few min). The
   `maap-dps-jupyter-extension` DOES list OGC-registered processes (confirmed —
   `cardamom-ogc-process` and our four show up there).
-- **ONE-BEHIND DEPLOY (generator quirk, not yet hardened).** The deploy step
-  registers the CWL at the **checkout** commit (`github.sha`) — i.e. the CWL the
-  *previous* run generated (the CWL filename is branch-based,
-  `process_<repo>_<branch>.cwl`, overwritten each run). So registering **N
-  algorithms needs N+1 runs** (a final "flush" run of the last one deploys it); a
-  **single** algorithm must be run **twice**.
+- **ONE-BEHIND DEPLOY — FIXED via our pinned fork of the generator.** Upstream's
+  deploy step registered the CWL at the **checkout** commit (`github.sha`) = the
+  *previous* run's CWL (the filename is branch-based, `process_<repo>_<branch>.cwl`,
+  overwritten each run), so registering **N algorithms needed N+1 runs** and a
+  **single** one needed **two**. `register-dps.yml` now pins
+  **`Disasters-Learning-Portal/ogc-app-pack-generator@<sha>`**, whose only delta
+  from upstream is deploying at the just-pushed `HEAD` (`git rev-parse HEAD`) — so
+  a **single run registers its own CWL**. Re-pin the SHA when pulling upstream
+  changes into the fork.
 - **Admin-approval gate:** the job sets `environment: maap-registration` when
   `register_to_maap` is checked. Create that **GitHub Environment with Required
   reviewers** (Settings → Environments) to actually gate live registrations —

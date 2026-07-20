@@ -1,70 +1,58 @@
 # .github/workflows/sync-deploy-algorithm.yml
 #
-# Keeps `deploy-algorithm` in sync with `dev` by opening (or refreshing) ONE
-# pull request whose base is `deploy-algorithm` and whose head is `dev`. It
-# NEVER pushes to deploy-algorithm and NEVER force-pushes (it holds no
-# `contents: write`), so deploy-algorithm's own extra commits — the OGC configs
-# in dps/ogc/*.yml, the register-dps.yml tweaks, and the github-actions[bot]
-# "Committed workflow via github actions" CWL pushes — cannot be clobbered.
+# Keeps `deploy-algorithm` in sync with `dev` (changes land on dev; we deploy /
+# register from deploy-algorithm). On every push to `dev` it merges `dev` into
+# `deploy-algorithm`:
+#   • CLEAN merge  -> pushes the merge commit straight to deploy-algorithm
+#                     (that branch is UNPROTECTED, so GITHUB_TOKEN can push it).
+#   • CONFLICT     -> aborts (deploy-algorithm left byte-for-byte untouched) and
+#                     opens/updates a tracking Issue, then fails the run so it's
+#                     visible. Nothing is ever force-pushed.
 #
-# WHY A PR AND NOT A DIRECT AUTO-PUSH (repo-specific, empirically verified):
-#   `dev` and `deploy-algorithm` independently edited the SAME files
-#   (.github/workflows/register-dps.yml + dps/ogc/{umbra,satellogic,list_dates}.yml).
-#   A dry-run `git merge dev` into deploy-algorithm currently succeeds with NO
-#   text conflict — but that "clean" merge is a SEMANTIC landmine: dev added a
-#   "Stamp algorithm_version" step that runs `sed` on ${{ inputs.config_path }},
-#   while deploy-algorithm DELETED config_path and replaced it with an
-#   `algorithm` choice dropdown. Git splices the disjoint hunks happily and
-#   yields a register-dps.yml whose Stamp step references an input that no
-#   longer exists. A direct auto-push would ship that broken workflow to the
-#   very branch the Register-Algorithm Action runs FROM, with zero review.
-#   Routing every sync through a PR lets a human (and CI) catch it, and matches
-#   this repo's PR-protected culture (dev + main are protected).
+# WHY DIRECT-PUSH + ISSUE (and not an auto-PR):
+#   This org DISALLOWS the GitHub Actions token from creating pull requests
+#   ("The organization does not allow GitHub Actions to create or approve pull
+#   requests"), so a `gh pr create` from GITHUB_TOKEN 409s. The org does still
+#   allow Actions to PUSH to a branch and to OPEN ISSUES, so we sync by pushing
+#   clean merges and routing conflicts to an Issue for a human. This mirrors how
+#   register-dps.yml already pushes generated CWL to deploy-algorithm.
+#   (If you later want mandatory PR review instead, swap GITHUB_TOKEN for a PAT /
+#   GitHub App token with pull-requests:write and open a PR — a user/app token is
+#   not subject to the org's Actions-PR restriction.)
 #
 # --- WHERE THIS FILE MUST LIVE -----------------------------------------------
 #   The `push` trigger runs the workflow DEFINITION FROM THE PUSHED COMMIT — the
-#   copy of this file on `dev`. So `on: push: branches: [dev]` only fires if THIS
-#   FILE EXISTS ON `dev`. `dev` is branch-protected, so land it via a PR into
-#   `dev` (build-and-push-dev.yaml already lives on dev and fires the same way).
+#   copy of this file on `dev`. So `on: push: branches: [dev]` only fires while
+#   this file exists on `dev` (land changes via a PR into dev; it's protected).
+#   `workflow_dispatch` (manual button) and `schedule` (nightly) read the file
+#   from the DEFAULT branch (`main`) — they only appear/run if this file is ALSO
+#   on `main`. It never needs to live on deploy-algorithm.
 #
-#   `workflow_dispatch` (manual button) and `schedule` (nightly safety net) read
-#   the copy of this workflow on the DEFAULT branch (`main`). They only appear /
-#   run if this file is ALSO committed to `main` (a second PR — main is
-#   protected). The push-to-dev path does not need the file on main.
-#
-#   Placement cheat-sheet:
-#     • file on dev only     -> push-to-dev auto-sync (no manual button / cron)
-#     • file on main only    -> manual button + nightly cron (no push auto-sync)
-#     • file on dev AND main -> all three (recommended)
-#   It never needs to live on deploy-algorithm.
+# RECURSION: the merge push uses GITHUB_TOKEN, so it does NOT trigger further
+# workflow runs, and nothing triggers on push to deploy-algorithm anyway — no loop.
 
-name: Sync dev -> deploy-algorithm (auto-PR)
+name: Sync dev -> deploy-algorithm (auto-merge)
 run-name: >-
-  Sync PR dev -> deploy-algorithm
+  Sync dev -> deploy-algorithm
   (${{ github.event_name == 'workflow_dispatch' && 'manual'
       || github.event_name == 'schedule' && 'scheduled'
       || format('push {0}', github.sha) }})
 
 on:
-  # Primary: fires whenever dev advances. Uses THIS file as it exists on the
-  # pushed dev commit -> file must be on `dev`.
   push:
     branches: [dev]
-  # Manual button + nightly reconciliation. These read the file on the DEFAULT
-  # branch (main) -> only active once this file is also committed to `main`.
   workflow_dispatch:
   schedule:
-    - cron: "17 6 * * *"   # 06:17 UTC daily; catches any missed dev push
+    - cron: "17 6 * * *"   # 06:17 UTC daily; catches any missed dev push (needs file on main)
 
-# Only the PR API is needed. `contents: read` to check out + run the local
-# merge-base / conflict probe; `pull-requests: write` to open/edit/label the PR.
-# NO `contents: write` -> structurally incapable of pushing to (or force-pushing
-# over) deploy-algorithm.
+# contents:write -> push the merge to the UNPROTECTED deploy-algorithm.
+# issues:write   -> open/update the conflict-notification issue.
+# No pull-requests: this workflow never creates a PR (the org blocks that anyway).
 permissions:
-  contents: read
-  pull-requests: write
+  contents: write
+  issues: write
 
-# Serialize so two dev pushes can't race two PR-refresh runs.
+# Serialize so two dev pushes can't race two merges into the same branch.
 concurrency:
   group: sync-dev-to-deploy-algorithm
   cancel-in-progress: false
@@ -74,119 +62,96 @@ env:
   TARGET_BRANCH: deploy-algorithm
 
 jobs:
-  open-sync-pr:
-    name: Open or refresh dev -> deploy-algorithm PR
+  sync:
+    name: Merge dev into deploy-algorithm (push if clean, issue if conflict)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history so merge-base checks are accurate)
+      - name: Checkout deploy-algorithm (full history)
         uses: actions/checkout@v4
         with:
-          # A merge-base / dry-run-merge needs the real history of BOTH
-          # branches; checkout's default shallow clone cannot compute it.
+          # Check out the TARGET so we merge dev INTO it and push it back. A
+          # merge needs real history of both branches -> fetch-depth: 0.
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
+          # Persist GITHUB_TOKEN as the push credential.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git identity
+      - name: Configure git identity (github-actions[bot])
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch both branches
+      - name: Fetch source branch
         run: |
           set -euo pipefail
-          git fetch --no-tags origin "${SOURCE_BRANCH}" "${TARGET_BRANCH}"
+          git fetch --no-tags origin "${SOURCE_BRANCH}"
 
-      - name: Skip if deploy-algorithm already contains dev (clean no-op)
-        id: gate
+      - name: Merge dev into deploy-algorithm (push if clean)
+        id: sync
         run: |
           set -euo pipefail
-          # If every commit on dev is already an ancestor of deploy-algorithm,
-          # there is nothing to sync -> open no PR.
-          if git merge-base --is-ancestor "origin/${SOURCE_BRANCH}" "origin/${TARGET_BRANCH}"; then
+          # No-op fast path: if deploy-algorithm already contains every dev
+          # commit, there is nothing to sync.
+          if git merge-base --is-ancestor "origin/${SOURCE_BRANCH}" HEAD; then
             echo "deploy-algorithm already contains all of ${SOURCE_BRANCH} - nothing to sync."
-            echo "need_pr=false" >> "$GITHUB_OUTPUT"
+            echo "result=in-sync" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-ff: always record a merge commit (traceable; guarantees
+          # deploy-algorithm's own commits stay on the graph). --no-edit: default
+          # message. We branch on the exit code to handle conflicts.
+          if git merge --no-ff --no-edit \
+               -m "Merge ${SOURCE_BRANCH} into ${TARGET_BRANCH} (automated sync)" \
+               "origin/${SOURCE_BRANCH}"; then
+            # Plain (non-force) push: only ever APPENDS the merge commit, never
+            # rewrites deploy-algorithm's history. If a concurrent bot push (e.g.
+            # a register-dps CWL commit) landed since checkout, this push is
+            # REJECTED (not forced) and the run fails loudly; the next dev push
+            # re-syncs from the new tip.
+            git push origin "HEAD:${TARGET_BRANCH}"
+            echo "result=pushed" >> "$GITHUB_OUTPUT"
+            echo "Merged ${SOURCE_BRANCH} into ${TARGET_BRANCH} and pushed."
           else
-            echo "${SOURCE_BRANCH} has commits missing from ${TARGET_BRANCH} - PR needed."
-            echo "need_pr=true" >> "$GITHUB_OUTPUT"
+            # CONFLICT: restore the pristine tree and DO NOT push. Hand off to the
+            # issue step. deploy-algorithm on origin is never touched.
+            git merge --abort || true
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "::warning::${SOURCE_BRANCH} -> ${TARGET_BRANCH} merge CONFLICTED; ${TARGET_BRANCH} left untouched. Opening/refreshing an issue."
           fi
 
-      - name: Detect whether the merge will TEXT-conflict (informational label only)
-        id: conflict
-        if: steps.gate.outputs.need_pr == 'true'
-        run: |
-          set -euo pipefail
-          # Dry-run a merge of dev INTO deploy-algorithm in a throwaway worktree.
-          # This never touches the real branch and never pushes; it only decides
-          # which label to put on the PR. A "false" here means no TEXTUAL
-          # conflict only -- it does NOT prove the merge is semantically safe
-          # (see the register-dps.yml Stamp-step hazard in the header), which is
-          # exactly why we still gate every sync behind a reviewable PR.
-          WT="$(mktemp -d)"
-          git worktree add --quiet --detach "$WT" "origin/${TARGET_BRANCH}"
-          conflict=false
-          if git -C "$WT" merge --no-commit --no-ff "origin/${SOURCE_BRANCH}" >/dev/null 2>&1; then
-            conflict=false
-          else
-            conflict=true
-          fi
-          git -C "$WT" merge --abort >/dev/null 2>&1 || true
-          git worktree remove --force "$WT" >/dev/null 2>&1 || true
-          echo "conflict=${conflict}" >> "$GITHUB_OUTPUT"
-          echo "Merge would TEXT-conflict: ${conflict}"
-
-      - name: Create or update the sync PR (idempotent)
-        if: steps.gate.outputs.need_pr == 'true'
+      - name: Open or refresh the conflict issue
+        if: steps.sync.outputs.result == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CONFLICT: ${{ steps.conflict.outputs.conflict }}
         run: |
           set -euo pipefail
-          BASE="${TARGET_BRANCH}"
-          HEAD="${SOURCE_BRANCH}"
-          TITLE="Sync: merge ${SOURCE_BRANCH} -> ${TARGET_BRANCH}"
-
-          # Body built with printf (NOT a heredoc): an unquoted heredoc delimiter
-          # must sit at column 0, impossible inside an indented run: block.
+          TITLE="Sync blocked: dev -> deploy-algorithm merge conflict"
+          # printf (not a heredoc): an unquoted heredoc delimiter must be at
+          # column 0, impossible inside an indented run: block.
           BODY="$(printf '%s\n' \
-            "Automated sync PR: brings new **${SOURCE_BRANCH}** commits into **${TARGET_BRANCH}**," \
-            "preserving ${TARGET_BRANCH}'s own commits (OGC configs, register-dps tweaks," \
-            "github-actions[bot] CWL pushes)." \
+            "The automated ${SOURCE_BRANCH} -> ${TARGET_BRANCH} sync could not merge cleanly at commit ${GITHUB_SHA}." \
             "" \
-            "- Merges (never rebases / force-pushes) \`${SOURCE_BRANCH}\` into \`${TARGET_BRANCH}\`." \
-            "- REVIEW the register-dps.yml + dps/ogc/*.yml diff: both branches edit these, and a" \
-            "  text-clean merge can still be semantically wrong (e.g. dev's config_path Stamp step" \
-            "  vs deploy-algorithm's algorithm dropdown)." \
-            "- On conflicts: resolve via GitHub's web editor, or locally" \
-            "  \`git switch ${TARGET_BRANCH} && git merge origin/${SOURCE_BRANCH}\`." \
-            "- Merge as a MERGE COMMIT (do NOT squash/rebase) to keep both histories." \
+            "\`${TARGET_BRANCH}\` was left byte-for-byte untouched (its own commits are safe). Reconcile manually:" \
             "" \
-            "_Opened/refreshed by .github/workflows/sync-deploy-algorithm.yml._")"
-
-          # Idempotent: reuse the one open PR for this exact base<-head pair.
-          # An open head=dev PR already auto-reflects newly pushed dev commits,
-          # so we never stack duplicates.
-          EXISTING="$(gh pr list --base "$BASE" --head "$HEAD" --state open \
-                        --json number --jq '.[0].number // empty')"
-
-          if [ -n "$EXISTING" ]; then
-            echo "Reusing open PR #${EXISTING} (it auto-reflects new ${SOURCE_BRANCH} commits)."
-            PR="$EXISTING"
-            gh pr edit "$PR" --title "$TITLE" --body "$BODY" >/dev/null
+            "    git switch ${TARGET_BRANCH} && git pull" \
+            "    git merge origin/${SOURCE_BRANCH}   # resolve conflicts (usually take dev's side on shared CI files)" \
+            "    git push" \
+            "" \
+            "Likely conflict files: \`.github/workflows/register-dps.yml\`, \`dps/ogc/*.yml\`." \
+            "Once ${TARGET_BRANCH} contains ${SOURCE_BRANCH} again, the next sync goes green — close this issue.")"
+          # Idempotent: reuse an open issue with this exact title instead of
+          # stacking a new one on every dev push.
+          NUM="$(gh issue list --state open --search "${TITLE} in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "Still conflicting at ${GITHUB_SHA}."$'\n\n'"${BODY}"
+            echo "Updated tracking issue #${NUM}."
           else
-            echo "No open PR yet - creating one."
-            gh pr create --base "$BASE" --head "$HEAD" --title "$TITLE" --body "$BODY" >/dev/null
-            PR="$(gh pr list --base "$BASE" --head "$HEAD" --state open --json number --jq '.[0].number')"
-            echo "Created PR #${PR}."
+            gh issue create --title "$TITLE" --body "$BODY"
           fi
 
-          # Best-effort labels (won't be auto-created; tolerate absence).
-          if [ "$CONFLICT" = "true" ]; then
-            gh pr edit "$PR" --add-label "sync-conflict" --remove-label "sync-clean" 2>/dev/null || true
-            echo "::warning::${SOURCE_BRANCH} -> ${TARGET_BRANCH} merge has TEXT CONFLICTS. Resolve PR #${PR} manually; ${TARGET_BRANCH}'s commits are untouched."
-          else
-            gh pr edit "$PR" --add-label "sync-clean" --remove-label "sync-conflict" 2>/dev/null || true
-            echo "::notice::${SOURCE_BRANCH} -> ${TARGET_BRANCH} PR #${PR} has no text conflicts. Review register-dps.yml + dps/ogc/*.yml before merging (text-clean != semantically safe), then merge as a merge commit."
-          fi
-          # NOTE: repo 'Allow auto-merge' is off, so we deliberately do NOT call
-          # `gh pr merge --auto` (it would just error). The PR is left for CI +
-          # a human to merge -- the intended, culture-matching behavior.
+      - name: Fail the run so the conflict is visible
+        if: steps.sync.outputs.result == 'conflict'
+        run: |
+          echo "::error::${SOURCE_BRANCH} -> ${TARGET_BRANCH} merge conflicted; see the tracking issue. ${TARGET_BRANCH} was NOT modified."
+          exit 1

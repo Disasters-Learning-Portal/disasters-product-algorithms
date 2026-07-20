@@ -53,6 +53,9 @@ permissions:
   issues: write
 
 # Serialize so two dev pushes can't race two merges into the same branch.
+# SHARED with register-dps.yml: it uses this SAME group so a register run (which
+# also pushes to deploy-algorithm) and a sync run can never overlap. If you rename
+# this group, rename it there too or the race protection silently breaks.
 concurrency:
   group: sync-dev-to-deploy-algorithm
   cancel-in-progress: false

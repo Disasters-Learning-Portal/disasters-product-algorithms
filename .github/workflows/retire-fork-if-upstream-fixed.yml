@@ -1,0 +1,116 @@
+name: Retire ogc-app-pack-generator fork (when upstream fixes the one-behind bug)
+
+# register-dps.yml pins our FORK of MAAP-Project/ogc-app-pack-generator, whose only
+# delta is a one-line fix for an upstream "one-behind" deploy bug. Full write-up:
+#   https://github.com/Disasters-Learning-Portal/ogc-app-pack-generator/blob/main/ONE_BEHIND_BUG.md
+#   (also docs/DPS.md "Registering via the OGC / GitHub Action path").
+# The fork is a STOPGAP. This monthly job watches upstream; once upstream FIXES the bug
+# itself, the fork is dead weight, so it opens a PR to `dev` that switches
+# register-dps.yml back to upstream and retires the fork.
+#
+# Companion: the fork's own check-upstream.yml reconciles the fork WHILE upstream is
+# still buggy. Each job runs Jules on its OWN repo (no cross-repo Jules, no PAT).
+#
+# PREREQUISITES: secret JULES_API_KEY on this repo + the Jules GitHub app connected to
+# this repo (both already in place).
+on:
+  schedule:
+    - cron: '0 11 1 * *'      # 11:00 UTC on the 1st (after the fork's 09:00 reconcile check)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force the Jules retire step even if upstream isn't auto-detected as fixed (for testing)."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read              # read-only detection; Jules opens the PR via its own app auth
+
+jobs:
+  retire-if-upstream-fixed:
+    name: Retire the fork once upstream fixes the one-behind bug
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect (a) is upstream fixed? (b) do we still pin the fork?
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # (a) Upstream fixed? Its deploy RAW_URL no longer uses github.sha.
+          UP="$(gh api /repos/MAAP-Project/ogc-app-pack-generator/contents/action.yml -H 'Accept: application/vnd.github.raw' 2>/dev/null \
+             || gh api /repos/MAAP-Project/ogc-app-pack-generator/contents/action.yaml -H 'Accept: application/vnd.github.raw' 2>/dev/null)"
+          if printf '%s' "$UP" | grep -qE 'RAW_URL=.*github\.sha'; then FIXED=false; else FIXED=true; fi
+          UP_SHA="$(gh api /repos/MAAP-Project/ogc-app-pack-generator/commits/main --jq .sha 2>/dev/null)"
+
+          # (b) Do we still pin the fork on dev? (idempotent: skip once already retired)
+          REG="$(gh api '/repos/${{ github.repository }}/contents/.github/workflows/register-dps.yml?ref=dev' -H 'Accept: application/vnd.github.raw' 2>/dev/null)"
+          if printf '%s' "$REG" | grep -q 'Disasters-Learning-Portal/ogc-app-pack-generator@'; then ON_FORK=true; else ON_FORK=false; fi
+
+          echo "fixed=$FIXED"     >> "$GITHUB_OUTPUT"
+          echo "on_fork=$ON_FORK" >> "$GITHUB_OUTPUT"
+          echo "up_sha=$UP_SHA"   >> "$GITHUB_OUTPUT"
+          {
+            echo "## Retire-fork check"
+            echo "- upstream fixed the one-behind bug (auto-detected): **$FIXED**  (upstream main @ \`${UP_SHA:0:12}\`)"
+            echo "- register-dps.yml@dev still pins the fork: **$ON_FORK**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Kick off Jules to retire the fork (PR to dev)
+        if: (steps.detect.outputs.fixed == 'true' || github.event.inputs.force == 'true') && steps.detect.outputs.on_fork == 'true'
+        uses: google-labs-code/jules-action@v1.0.0
+        with:
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          starting_branch: dev
+          prompt: |
+            CONTEXT — the "one-behind" deploy bug:
+            MAAP's GitHub action `ogc-app-pack-generator` had a bug: its "Deploy
+            application package" step built the CWL URL from `github.sha` (the CHECKOUT
+            commit), but the CWL is committed+pushed two steps earlier and its filename
+            is branch-based and overwritten every run — so `github.sha` pointed at the
+            PREVIOUS run's CWL (the deploy was "one behind"). Full write-up:
+            https://github.com/Disasters-Learning-Portal/ogc-app-pack-generator/blob/main/ONE_BEHIND_BUG.md
+            (also summarized in this repo's docs/DPS.md "Registering via the OGC /
+            GitHub Action path").
+
+            To work around it we PINNED a fork
+            (`Disasters-Learning-Portal/ogc-app-pack-generator`) whose ONLY change is
+            deploying the CWL at the just-pushed commit (`git rev-parse HEAD`) instead
+            of `github.sha`. `.github/workflows/register-dps.yml` uses that fork.
+
+            Our automation has detected that UPSTREAM now appears FIXED, so the fork
+            should be retired. Please:
+
+            0. VERIFY THE FIX FIRST. Fetch upstream
+               MAAP-Project/ogc-app-pack-generator's `action.yml`, find the "Deploy
+               application package" step, and confirm the CWL URL / `--process-cwl-url`
+               is built from the just-pushed commit (`git rev-parse HEAD`,
+               `github.event.after`, or a captured post-commit SHA), NOT from
+               `github.sha`. If it STILL uses `github.sha`, upstream is NOT fixed —
+               STOP, open NO PR, and just report that in your session notes.
+
+            If genuinely fixed, open a pull request whose BASE branch is `dev` (NOT main)
+            that RETIRES the fork:
+            1. In `.github/workflows/register-dps.yml`, change the generator action from
+               `uses: Disasters-Learning-Portal/ogc-app-pack-generator@<sha>` to
+               `uses: MAAP-Project/ogc-app-pack-generator@${{ steps.detect.outputs.up_sha }}`
+               (pin that exact upstream commit) and delete the "# Our FORK ..." comment
+               block directly above that `uses:` line.
+            2. Update the ONE-BEHIND passages in `docs/DPS.md`, `.clinerules.md`, and the
+               `register-dps.yml` header comment to say the fork was RETIRED because
+               upstream fixed the bug (we now pin upstream directly).
+            3. In the PR body, note that the fork repo
+               `Disasters-Learning-Portal/ogc-app-pack-generator` can now be archived.
+
+            Keep the diff minimal and targeted. PR title:
+            "Retire ogc-app-pack-generator fork (upstream fixed the one-behind deploy)".
+            IMPORTANT: the PR base branch MUST be `dev`.
+
+      - name: Note that Jules was invoked
+        if: (steps.detect.outputs.fixed == 'true' || github.event.inputs.force == 'true') && steps.detect.outputs.on_fork == 'true'
+        run: |
+          {
+            echo "## ✅ Jules invoked to retire the fork"
+            echo "It opens the PR to \`dev\` asynchronously (a couple of minutes after this run). Watch:"
+            echo "- ${{ github.server_url }}/${{ github.repository }}/pulls"
+            echo "- https://jules.google.com"
+          } >> "$GITHUB_STEP_SUMMARY"

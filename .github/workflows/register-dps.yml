@@ -19,12 +19,12 @@ run-name: Register ${{ inputs.algorithm }} (${{ inputs.algorithm_version }}) ${{
 #    the image + CWL are already built. Run it from the unprotected
 #    `deploy-algorithm` branch (one step up from dev; has the OGC files).
 #
-# ⚠️ ONE-BEHIND DEPLOY: the generator's deploy step registers the CWL at the
-#    CHECKOUT commit (github.sha) — i.e. the CWL the PREVIOUS run generated (the
-#    CWL filename is branch-based and overwritten every run). Consequence:
-#    registering N algorithms needs N+1 runs (a final "flush" run of the last
-#    algorithm deploys it); a SINGLE algorithm must be run TWICE. See docs/DPS.md
-#    "Registering via the OGC / GitHub Action path".
+# ✅ ONE-BEHIND DEPLOY — FIXED by our pinned fork of the generator (see the `uses:`
+#    step below). Upstream deployed the CWL at the CHECKOUT commit (github.sha) =
+#    the PREVIOUS run's CWL (the CWL filename is branch-based and overwritten each
+#    run), so registering N algorithms needed N+1 runs / a single one needed 2.
+#    Our fork deploys at the just-pushed HEAD, so a SINGLE run now registers its
+#    OWN CWL. Detail: docs/DPS.md "Registering via the OGC / GitHub Action path".
 #
 # ── PREREQUISITES (one-time) ────────────────────────────────────────────────
 #   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (only used when

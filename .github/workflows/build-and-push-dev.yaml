@@ -3,14 +3,20 @@ name: Build & push hub image (dev)
 on:
   push:
     branches: [dev]
-    paths-ignore:
-      - 'docs/**'
-      - 'notebooks/**'
-      - 'tests/**'
-      - 'tools/**'
-      - '**.md'
-      - '.clinerules.md'
-      - '.pre-commit-config.yaml'
+    # Allowlist (not denylist): only rebuild when something that actually
+    # lands in the image changes. The image is `image/**` (Dockerfile + env
+    # + overrides + scripts) plus the pip-installed package (`src/**` +
+    # `pyproject.toml`). Everything else — dps/, docs/, notebooks/, tests/,
+    # tools/, bin/, .github/ — is .dockerignore'd out of the build context,
+    # so a push touching only those rebuilds a byte-identical image. The old
+    # paths-ignore denylist leaked (dps/ wasn't on it, so every dps/ push
+    # triggered a redundant rebuild); an allowlist is exhaustive by
+    # construction. Manual rebuilds still available via workflow_dispatch.
+    paths:
+      - 'image/**'
+      - 'src/**'
+      - 'pyproject.toml'
+      - '.github/workflows/build-and-push-dev.yaml'
   workflow_dispatch:
 
 jobs:

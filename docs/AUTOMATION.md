@@ -254,10 +254,15 @@ workflows, one Docker Hub tag each.
 - `.github/workflows/build-and-push-dev.yaml` — fires on push to `dev`,
   pushes `klesinger/disasters-jupyterhub-docker-image-dev:{<sha-12>,latest}`.
 
-Both expose `workflow_dispatch` for manual re-runs. Both filter
-`paths-ignore: [docs/**, notebooks/**, tests/**, tools/**, **.md,
-.clinerules.md, .pre-commit-config.yaml]` — doc-only pushes don't trigger
-a rebuild (saves ~2-4 min per push).
+Both expose `workflow_dispatch` for manual re-runs. Both filter on a
+**`paths` allowlist** (switched 2026-07-21 from a `paths-ignore`
+denylist): `paths: [image/**, src/**, pyproject.toml, <the workflow
+file>]`. A build fires ONLY when a real image input changes; a push
+touching only `dps/`, `docs/`, `notebooks/`, `tests/`, `tools/`, or
+`.github/` (all `.dockerignore`d out of the image) triggers no rebuild.
+The allowlist is exhaustive by construction — the old denylist leaked
+(`dps/` wasn't listed, so every `dps/` push rebuilt a byte-identical
+image).
 
 ### Two cache layers (image/Dockerfile)
 

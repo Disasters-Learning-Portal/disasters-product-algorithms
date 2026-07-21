@@ -13,7 +13,7 @@ disasters-product-algorithms (this repo)
         │
         │ .github/workflows/build-and-push{,-dev}.yaml
         │   on: push: branches: [<branch>]
-        │   paths-ignore: docs/**, notebooks/**, tests/**, tools/**, **.md
+        │   paths (allowlist): image/**, src/**, pyproject.toml, <workflow file>
         ▼
   docker build -f image/Dockerfile .   (build context = repo root)
         │
@@ -176,13 +176,20 @@ Order of checks:
    Look for a green run whose SHA matches the algorithms commit you
    expect to be in the pod.
 
-2. **Was the push doc-only?** `paths-ignore` on both workflows excludes
-   `docs/**`, `notebooks/**`, `tests/**`, `tools/**`, `**.md`,
-   `.clinerules.md`, `.pre-commit-config.yaml`. A push touching ONLY
-   those paths fires no rebuild. Intentional — saves ~2-4 min per
-   doc-only push — but it does mean a CLI added in the same commit
-   as a README change won't ship until a subsequent code-touching
-   push lands.
+2. **Did the push touch a real image input?** Both workflows use a
+   **`paths` allowlist** (switched 2026-07-21 from a `paths-ignore`
+   denylist): a build fires ONLY when `image/**`, `src/**`,
+   `pyproject.toml`, or the build workflow file itself changes. A push
+   touching only `dps/`, `docs/`, `notebooks/`, `tests/`, `tools/`,
+   `.github/` (other workflows), `bin/`, `dev-conda-deps.txt`, etc.
+   fires no rebuild — all of those are `.dockerignore`d out of the
+   build context, so they can't change image content anyway. The
+   allowlist is exhaustive by construction (the old denylist leaked:
+   `dps/` wasn't on it, so every `dps/` push triggered a redundant
+   byte-identical rebuild). Caveat: a CLI added in the same commit as
+   a `docs/`-only README change still ships because that commit also
+   touches `src/`; but a `dps/`-only commit won't rebuild the hub
+   image (correct — `dps/` isn't in the image).
 
 3. **Did `lint.yml` (`sensor-consistency` + `cli-smoke`) fail on the
    same commit?** The build workflow doesn't gate on lint, so a broken
@@ -234,10 +241,11 @@ of the build itself.
 **Red flags in build logs:**
 
 - A build that finishes in under 60 seconds when you'd expect a real
-  rebuild → check `paths-ignore`: maybe only doc files changed and the
-  build shouldn't have fired at all (in which case it didn't), or
-  Layer 2's COPY didn't actually pick up the file you expected (check
-  `.dockerignore` for an accidental over-exclusion).
+  rebuild → check the `paths` allowlist: maybe the push touched nothing
+  in `image/**`, `src/**`, or `pyproject.toml`, so the build shouldn't
+  have fired at all (in which case it didn't), or Layer 2's COPY didn't
+  actually pick up the file you expected (check `.dockerignore` for an
+  accidental over-exclusion).
 - "Successfully installed disasters-product-algorithms-..." line is
   **missing** from the build log → Layer 2 was cached entirely. Means
   the COPYed file tree post-`.dockerignore` was bit-identical to the
@@ -299,7 +307,7 @@ Non-obvious rules when editing it:
   Then check **Help → Disasters Resources**. `python -m json.tool
   image/overrides.json` catches syntax errors before you build.
 - **It is its own COPY layer** (between Layer 1 and Layer 2 in the Dockerfile),
-  and `image/**` is **not** in the workflows' `paths-ignore` — so editing
+  and `image/**` **is** in the workflows' `paths` allowlist — so editing
   `overrides.json` *does* trigger a hub rebuild (unlike a docs-only change). It
   busts its own layer + Layer 2 (~30-60s); conda Layer 1 stays cached.
 

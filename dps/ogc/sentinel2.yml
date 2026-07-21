@@ -4,13 +4,13 @@
 # Registered via MAAP-Project/ogc-app-pack-generator (.github/workflows/register-dps.yml)
 # instead of the Register Algorithm GUI. What this buys us over the GUI:
 #
-#   1. Every input EXCEPT the granule File is OGC-optional (the `?` type-suffix
-#      -> minOccurs:0). The GUI cannot express optional (its Type dropdown rejects
-#      `?`), so on a GUI-registered algorithm the Submit Job form errors "Valid
-#      value required" on any falsy value (a toggle left off, a blank box). Here
-#      only file_path_of_raw_data is required — nothing else blocks Submit. run.sh
-#      remains the real enforcement point (it rejects a missing granule, blank
-#      source, and the placeholder activation_event). See docs/DPS.md.
+#   1. Every input is OGC-optional (the `?` type-suffix -> minOccurs:0). The GUI
+#      cannot express optional (its Type dropdown rejects `?`), so on a
+#      GUI-registered algorithm the Submit Job form errors "Valid value required"
+#      on any falsy value (a toggle left off, a blank box). Here nothing blocks
+#      Submit — you can submit with the defaults untouched. run.sh remains the
+#      real enforcement point (it rejects an empty tile, a placeholder
+#      activation_event, and unreadable Copernicus secrets). See docs/DPS.md.
 #
 #   2. No prebuilt image to maintain. register-dps.yml passes `dockerfile-path:
 #      dps/Dockerfile`, so the Action BUILDS the DPS worker image from the branch
@@ -20,10 +20,13 @@
 #      the repo at /app/disasters-product-algorithms); the CWL baseCommand runs
 #      from the ADES job CWD, so a repo-relative path would not resolve.
 #
-# UNLIKE the SAR/discovery OGC configs (capella/umbra/satellogic/list_dates), this
-# is a FILE-INPUT algorithm: file_path_of_raw_data is a REQUIRED `File` (no `?`,
-# minOccurs:1) — you cannot process without a granule, so the Submit form should
-# require one. Every other input stays optional.
+# Sentinel-2 is DOWNLOAD-then-process (unlike Landsat, which takes a granule File
+# input): run.sh downloads L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+# MGRS tile(s) + date, then runs process_sentinel2. Copernicus credentials are
+# NOT inputs — run.sh pulls them from MAAP's encrypted secret store at run time
+# (maap.secrets.get_secret, default names COP_USER / COP_PASS), so the password
+# never appears in the job parameters or log. Store them once from a MAAP notebook:
+#   maap.secrets.add_secret("COP_USER", ...); maap.secrets.add_secret("COP_PASS", ...)
 #
 # algorithm_name is intentionally distinct ("sentinel-2-ogc-test") so registering
 # this does NOT overwrite the existing GUI-registered "sentinel-2" process.
@@ -31,19 +34,19 @@
 algorithm_name: sentinel-2-ogc-test
 algorithm_version: dev
 algorithm_description: >-
-  Process Sentinel-2 L2A granule archives (.zip) into Cloud Optimized GeoTIFF
-  disaster-response products (true color, SWIR, NDVI, water extent, etc.) with
-  reprojection and activation-event GeoTIFF metadata tags. OGC test build: the
-  granule File is required, every other input is optional in the schema so the
-  Submit form never blocks on a falsy default; run.sh enforces the real
-  requirements (granule, source, non-placeholder activation_event).
-keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent
+  Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+  MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
+  products (true color, SWIR, NDVI, water extent, etc.). OGC test build: every
+  input is optional in the schema so the Submit form never blocks; run.sh enforces
+  the real requirements (tile, non-placeholder activation_event, readable
+  Copernicus secrets). Credentials come from MAAP secrets, never the job inputs.
+keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent, copernicus
 code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 citation: NASA Disasters Program
 author: NASA Disasters
 contributor: NASA Disasters
 license: Apache-2.0
-release_notes: OGC registration test — file input required, all other inputs optional (no "Valid value required") + image built in-workflow from dps/Dockerfile.
+release_notes: OGC registration test — download-from-Copernicus (creds via MAAP secrets, not job inputs); all inputs optional; image built in-workflow from dps/Dockerfile.
 # Absolute path INSIDE the built image (Dockerfile bakes the repo at
 # /app/disasters-product-algorithms). Not repo-relative.
 run_command: /app/disasters-product-algorithms/dps/sentinel2/run.sh
@@ -51,20 +54,46 @@ ram_min: 64
 cores_min: 8
 outdir_max: 20
 
-# INPUTS — file_path_of_raw_data is REQUIRED (`File`, no `?`); all others are
-# optional (`?`) so no falsy value trips the Submit form's "Valid value required"
-# check. Defaults mirror dps/sentinel2/run.sh; run.sh does the real validation
-# after parsing.
+# INPUTS — ALL optional (`?`), so no falsy value can trip the Submit form's
+# "Valid value required" check. Defaults mirror dps/sentinel2/run.sh; run.sh does
+# the real validation after parsing. NO Copernicus credential VALUE inputs — only
+# the NAMES of the MAAP secrets that hold them (names are not sensitive).
 inputs:
-  - name: file_path_of_raw_data
-    label: Raw data file
-    doc: A Sentinel-2 L2A granule archive (.zip). REQUIRED.
-    type: File
+  - name: tile
+    label: MGRS tile(s)
+    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several: "T17RLN T17RLM"). REQUIRED for a real run (run.sh rejects an empty tile).'
+    type: string?
+    default: ""
   - name: activation_event
     label: Activation event
     doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is REJECTED at run time -- set a real value for a real run."
     type: string?
     default: "YYYYMM_Hazard_Location"
+  - name: download_date
+    label: Download date (optional)
+    doc: "Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated). Blank = the CLI's recent-scenes default (~past 10 days)."
+    type: string?
+    default: ""
+  - name: level
+    label: Processing level
+    doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance, default), 1 = L1C (top-of-atmosphere)."
+    type: string?
+    default: "2"
+  - name: limit
+    label: Search result limit
+    doc: "Maximum number of Copernicus search results to download for the tile/date."
+    type: int?
+    default: 50
+  - name: cop_user_secret_name
+    label: Copernicus username secret name
+    doc: "Name of the MAAP secret holding your Copernicus username/email (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_USER."
+    type: string?
+    default: "COP_USER"
+  - name: cop_pass_secret_name
+    label: Copernicus password secret name
+    doc: "Name of the MAAP secret holding your Copernicus password (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_PASS."
+    type: string?
+    default: "COP_PASS"
   - name: products
     label: Products
     doc: "Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'."
@@ -72,9 +101,9 @@ inputs:
     default: "true swir"
   - name: source_label
     label: Source
-    doc: "Data origin, e.g. USGS, NASA, NOAA, Copernicus. REQUIRED for a real run (run.sh rejects an empty source)."
+    doc: "Data origin, e.g. Copernicus, ESA."
     type: string?
-    default: ""
+    default: "Copernicus"
   - name: dst_crs
     label: Target CRS
     doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
@@ -90,16 +119,6 @@ inputs:
     doc: Generate and apply a cloud mask (-mask, L2A only).
     type: boolean?
     default: false
-  - name: process_date
-    label: Process date (optional)
-    doc: "Only process this date, YYYYMMDD; leave blank for all dates."
-    type: string?
-    default: ""
-  - name: process_tile
-    label: Process tile (optional)
-    doc: "Only process this tile, e.g. T17RLN; leave blank for all tiles."
-    type: string?
-    default: ""
   - name: we_nstd
     label: Water-extent std devs (optional)
     doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'

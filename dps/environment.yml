@@ -54,6 +54,11 @@ dependencies:
     # maap-py: lets a run.sh pull data-provider credentials from MAAP's encrypted
     # secret store at runtime (maap.secrets.get_secret via dps/_get_secret.py) so
     # they never pass through the DPS job's parameters or log. Used by the
-    # Sentinel-2 job for Copernicus COP_USER/COP_PASS. Pinned to the same version
-    # as the hub image (image/environment.yml). pip-only (not on conda-forge).
-    - maap-py==4.2.0
+    # Sentinel-2 job for Copernicus COP_USER/COP_PASS. pip-only (not on conda-forge).
+    # v5.1.0 is the OGC-compliant client (MAAP guidance 2026-07-21: "use maap-py
+    # 5.1.0 for OGC"); the DPS worker image is plain miniforge (NOT the MAAP base),
+    # so unlike the hub image it does NOT inherit maap-py and must pin it here.
+    # The v5 "breaking" changes are in the LEGACY register path we don't use;
+    # `from maap.maap import MAAP` + `MAAP().secrets.get_secret()` are unchanged in
+    # 5.1.0 (verified against the 5.1.0 source), so _get_secret.py needs no change.
+    - maap-py==5.1.0

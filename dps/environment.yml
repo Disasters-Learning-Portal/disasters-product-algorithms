@@ -21,6 +21,16 @@ dependencies:
   - python=3.12
   # --- Geospatial stack (conda only) ---
   - gdal
+  # Sentinel-2 bands ship as JPEG2000 (.jp2). conda-forge GDAL 3.9+ moved the
+  # OpenJPEG JP2 driver into a SEPARATE plugin package that a bare `gdal` install
+  # does NOT pull in -- without it every S2 band read fails with
+  # "gdal_JP2OpenJPEG.so is not available" and process_sentinel2 produces ZERO
+  # products (empty-success job: downloads + unzips fine, then can't open a
+  # single .jp2 band). The hub image gets JP2 for free from the MAAP base; this
+  # lean DPS worker env must pin the plugin explicitly. The version floats to
+  # match whatever `gdal`/`libgdal-core` conda resolves (plugin ABI is pinned to
+  # the core GDAL build, so do NOT hard-pin a version here).
+  - libgdal-jp2openjpeg
   - rasterio
   - rio-cogeo
   - geopandas

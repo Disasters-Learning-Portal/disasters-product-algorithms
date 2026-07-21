@@ -578,3 +578,13 @@ ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
   `build-env.sh`, and every `conda run --name` in run.sh / `_finalize.sh`.
 - **`dps/` is excluded from the hub image** (`.dockerignore`); DPS clones git
   directly, so that's fine.
+- **Sentinel-2 "empty success" = missing JP2 driver.** A green Sentinel-2 job that
+  downloads + unzips scenes but produces **zero** COGs (its output folder has only
+  logs/JSON, no `.tif`) is almost always the OpenJPEG driver. S2 bands are JPEG2000
+  (`.jp2`); conda-forge GDAL 3.9+ ships the JP2 driver as a **separate plugin**
+  (`libgdal-jp2openjpeg`) that a bare `gdal` install doesn't pull in. Without it every
+  band read fails `gdal_JP2OpenJPEG.so is not available`, `process_sentinel2` catches
+  it per-product, and you get `✗ ERROR processing … .jp2 not recognized` → all products
+  skipped → 0 files uploaded. It's pinned in `dps/environment.yml`. The hub image gets
+  JP2 for free from the MAAP base, so this only ever bites the DPS worker env. Confirm
+  from a worker/job log: `grep -i jp2 _stderr.txt`.

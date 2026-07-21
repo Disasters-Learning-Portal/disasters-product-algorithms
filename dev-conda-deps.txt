@@ -24,6 +24,12 @@
 
 # --- Geospatial stack (GDAL must come from conda, not pip — see hard rule #6) ---
 gdal
+# JPEG2000 (.jp2) driver for Sentinel-2 bands. conda-forge GDAL 3.9+ ships it as a
+# separate plugin a bare `gdal` install doesn't pull in; without it every S2 band
+# read fails "gdal_JP2OpenJPEG.so is not available" and process_sentinel2 yields
+# zero products. UNPINNED (ABI-locked to libgdal-core; let conda match GDAL).
+# Mirrors image/environment.yml + dps/environment.yml so local dev / CI / DPS agree.
+libgdal-jp2openjpeg
 rasterio
 rio-cogeo
 geopandas

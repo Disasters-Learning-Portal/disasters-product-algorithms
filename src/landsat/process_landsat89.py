@@ -924,6 +924,12 @@ if __name__ == "__main__":
                 if existing_merged and not args.force:
                     print(f'\n* Merged cloud mask already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
                     continue
+                # Skip a product dir that generated no output: ls_merge would raise
+                # FileNotFoundError on the empty dir and abort the whole merge. Let
+                # one failed product not kill the rest (mirrors the Sentinel-2 loop).
+                if not [im for im in glob.glob(os.path.join(cm_dir, '*.tif')) if 'merged' not in os.path.basename(im)]:
+                    print(f'\n* Skipping {os.path.basename(os.path.normpath(cm_dir))} -- no output generated (see errors above).')
+                    continue
                 print('Merging:', cm_dir)
                 merged_file = ls_merge(cm_dir, mask=False)
 
@@ -954,6 +960,12 @@ if __name__ == "__main__":
                 existing_merged = glob.glob(os.path.join(prod_dir, '*merged*.tif'))
                 if existing_merged and not args.force:
                     print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
+                    continue
+                # Skip a product dir that generated no output: ls_merge would raise
+                # FileNotFoundError on the empty dir and abort the whole merge. Let
+                # one failed product not kill the rest (mirrors the Sentinel-2 loop).
+                if not [im for im in glob.glob(os.path.join(prod_dir, '*.tif')) if 'merged' not in os.path.basename(im)]:
+                    print(f'\n* Skipping {os.path.basename(os.path.normpath(prod_dir))} -- no output generated (see errors above).')
                     continue
                 # merge products of the same date
                 is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'evi', 'nbr'}

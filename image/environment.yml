@@ -6,9 +6,10 @@ dependencies:
   # Dependencies for sentintel-2 scripts
   - p7zip==16.02
   # JPEG2000 (.jp2) driver for Sentinel-2. UNPINNED on purpose: it is ABI-locked
-  # to the base image's libgdal-core, so let conda match whatever GDAL the pangeo
-  # base ships. An exact pin (==3.10.3) is what broke the 2025.08.14 -> 2026.06.04
-  # base bump (base shipped GDAL 3.12.3). Do not re-pin to a specific version.
+  # to the base image's libgdal-core, so let conda match whatever GDAL the base
+  # ships. An exact pin (==3.10.3) is what broke the 2025.08.14 -> 2026.06.04
+  # base bump (base shipped GDAL 3.12.3); staying unpinned matters even more now
+  # that the base is the MAAP image (different GDAL lineage). Do not re-pin.
   - libgdal-jp2openjpeg
   # Dependencies for VS Code IDE
   - code-server>=3.2
@@ -34,31 +35,27 @@ dependencies:
   # root + auto-synced into a managed block in this file via the
   # `sync-conda-deps.yml` workflow. Both are gone after the image-repo
   # consolidation — this file is now the single source of truth for
-  # hub-image conda deps. The Pangeo base image (pangeo/pangeo-notebook:<tag>)
-  # provides GDAL, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy,
-  # boto3, etc., so most things don't need a line here.
+  # hub-image conda deps. The MAAP base image
+  # (mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:<tag>, a NASA-VEDA /
+  # pangeo derivative) provides GDAL, rasterio, rio-cogeo, geopandas, pyproj,
+  # numpy, scipy, boto3, etc. — plus maap-py and the MAAP JupyterLab extensions
+  # — so most things don't need a line here.
   - pip
   - pip:
     - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
     - jupyter-sshd-proxy
     - jupyterlab-bxplorer
-    # maap-py: MAAP DPS client so `from maap.maap import MAAP` works on every hub
-    # pod without a manual `pip install maap-py` (used to register/submit DPS
-    # jobs from the hub). Pinned to the version verified against MAAP ops.
-    # Deliberately NOT in pyproject [project.dependencies] -- that would leak it
-    # into the algorithms package + DPS workers, which never import it. Bump this
-    # pin if MAAP ops requires a newer client.
-    - maap-py==4.2.0
-    # MAAP DPS JupyterLab 4 extensions (prebuilt wheels, no node build). These
-    # add the "MAAP Plugins" Launcher tiles: Algorithm Catalog / Register
-    # Algorithms / My Builds & Deployments (algorithms ext) and Submit Jobs /
-    # View My Jobs (dps ext). The server extension auto-enables via its
-    # jupyter_server_config.d dropin and bridges env vars (MAAP_API_HOST,
-    # MAAP_PGT) into the frontend; tiles render without those but only call the
-    # MAAP API once they're set. Versions verified live on the JL4 Pangeo base.
-    - maap-algorithms-jupyter-extension==1.0.1
-    - maap-dps-jupyter-extension==2.0.1
-    - maap-jupyter-server-extension==3.0.1
+    # maap-py + the MAAP DPS JupyterLab extensions are NO LONGER pinned here.
+    # The MAAP base image (mas.maap-project.org/root/maap-workspaces/2i2c/pangeo)
+    # already ships maap-py (`from maap.maap import MAAP` works out of the box)
+    # AND the "MAAP Plugins" Launcher tiles (Algorithm Catalog / Register
+    # Algorithms / My Builds & Deployments / Submit Jobs / View My Jobs). We
+    # inherit MAAP's maintained versions instead of hand-pinning a stale one --
+    # re-adding `maap-py==<old>` here would DOWNGRADE the base's client, which is
+    # exactly the staleness the base swap removed. maap-py stays out of pyproject
+    # [project.dependencies] too (the algorithms package + DPS workers never
+    # import it). If MAAP ops ever requires a newer client than the base ships,
+    # bump the base image tag in image/Dockerfile rather than re-pinning here.
     # disasters-product-algorithms is intentionally NOT installed here. It's
     # installed in a separate Dockerfile RUN layer via
     # `pip install --no-deps /srv/repo/algorithms`, which uses the local

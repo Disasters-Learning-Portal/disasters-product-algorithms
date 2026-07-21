@@ -1,7 +1,8 @@
 # Disasters Hub — candidate JupyterLab extensions
 
 A reference catalog of JupyterLab extensions that **complement the MAAP DPS workflow** on the
-Disasters Hub (`image/environment.yml`, built on `pangeo/pangeo-notebook:2026.06.04` —
+Disasters Hub (`image/environment.yml`, built on the MAAP `2i2c/pangeo` base image
+`mas.maap-project.org/root/maap-workspaces/2i2c/pangeo` — a NASA-VEDA / pangeo derivative,
 JupyterLab 4 / Python 3.13). The operator loop these should smooth is:
 
 > **discover scenes → register / submit a DPS job → monitor → COG lands in `output/` + S3/STAC → inspect it**
@@ -15,7 +16,7 @@ made quickly and without re-doing the survey.
 > verified against a live hub pod.** Exact pins + JupyterLab-4 wheel availability must be confirmed
 > at build time. Follow the existing `environment.yml` convention — prefer **floors, not exact
 > pins**, for the pure-Python geospatial libs, and let the conda solver match whatever GDAL/JL the
-> Pangeo base ships (an over-tight pin is what broke the `2025.08.14 → 2026.06.04` base bump).
+> base image ships (an over-tight pin is what broke the `2025.08.14 → 2026.06.04` base bump).
 
 ---
 
@@ -25,19 +26,23 @@ The current hub stack these recommendations build on top of:
 
 | Package | Role |
 |---|---|
-| `maap-dps-jupyter-extension` | Submit Jobs / View My Jobs tiles |
-| `maap-algorithms-jupyter-extension` | Algorithm Catalog / Register / My Builds tiles |
-| `maap-jupyter-server-extension` | server bridge (`MAAP_API_HOST` / `MAAP_PGT`) |
-| `stac_ipyleaflet` | STAC layer browser on an ipyleaflet map |
-| `jupyterlab-bxplorer` | S3 data browser |
-| `maap-py` | MAAP DPS Python client |
+| `maap-dps-jupyter-extension` | Submit Jobs / View My Jobs tiles — *from the MAAP base* |
+| `maap-algorithms-jupyter-extension` | Algorithm Catalog / Register / My Builds tiles — *from the MAAP base* |
+| `maap-jupyter-server-extension` | server bridge (`MAAP_API_HOST` / `MAAP_PGT`) — *from the MAAP base* |
+| `stac_ipyleaflet` | STAC layer browser on an ipyleaflet map — pip-pinned in `environment.yml` |
+| `jupyterlab-bxplorer` | S3 data browser — pip-pinned in `environment.yml` |
+| `maap-py` | MAAP DPS Python client — *from the MAAP base* |
+
+> The MAAP-Plugins tiles + `maap-py` are **inherited from the MAAP `2i2c/pangeo` base image**, not
+> pinned in `environment.yml` (they used to be pip-pinned; the base swap dropped those pins so we
+> track MAAP's maintained versions). See [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md).
 
 ---
 
-## 2. Already in the Pangeo base — do **NOT** re-add
+## 2. Already in the base image — do **NOT** re-add
 
-These ship in `pangeo/pangeo-notebook:2026.06.04`. Adding them to `environment.yml` is redundant
-(and risks a solver conflict):
+These ship in the MAAP `2i2c/pangeo` base (a pangeo derivative). Adding them to `environment.yml`
+is redundant (and risks a solver conflict):
 
 - `jupyterlab-git` — Git integration
 - `jupyterlab-lsp` + `python-lsp-server` — autocomplete / linting for editing `run.sh` / Python

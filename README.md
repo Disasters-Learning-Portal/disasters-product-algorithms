@@ -219,7 +219,7 @@ full decision tree.
 |---|---|
 | `pyproject.toml [project.dependencies]` | Pip-installable transitive deps (Pillow, lxml, psutil, fsspec, s3fs). Resolved by `pip install .`. |
 | `dev-conda-deps.txt` | Conda deps for local development + CI smoke tests (geospatial stack: GDAL, rasterio, rio-cogeo, geopandas, pyproj, numpy, scipy, etc.). |
-| `image/environment.yml` | Conda env shipped to the JupyterHub Docker image, layered on top of the Pangeo base. Build context is THIS repo (post-consolidation), so the env file lives here. |
+| `image/environment.yml` | Conda env shipped to the JupyterHub Docker image, layered on top of the MAAP `2i2c/pangeo` base. Build context is THIS repo (post-consolidation), so the env file lives here. |
 
 Adding a new dep — pick the right file:
 - Has a `manylinux` wheel? → `pyproject.toml [project.dependencies]`.
@@ -240,8 +240,8 @@ disasters-product-algorithms/
 ├── notebooks/            # Operator-facing Jupyter templates (CLI-subprocess style)
 │   └── testing-notebooks/  # Import-based variants for local dev
 ├── image/                # Docker image build context (Dockerfile + env)
-│   ├── Dockerfile        # FROM pangeo/pangeo-notebook:<tag> → conda env → algorithms
-│   ├── environment.yml   # Conda env layered on the Pangeo base
+│   ├── Dockerfile        # FROM MAAP 2i2c/pangeo:<tag> → conda env → algorithms
+│   ├── environment.yml   # Conda env layered on the MAAP 2i2c/pangeo base
 │   └── scripts/          # Image-test harness (inherited from upstream)
 ├── tools/                # Repo-management scripts (consistency lint, etc.)
 └── docs/                 # Deployment guides, automation reference, tutorials
@@ -402,7 +402,7 @@ from shared_utils import convert_to_cog, rename_with_event
 
 ### Docker Image Details
 
-- **Base Image:** `pangeo/pangeo-notebook:<tag>` (pinned in `image/Dockerfile` line 1). Bumping is a one-line PR.
+- **Base Image:** `mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:<tag>` (pinned in `image/Dockerfile` line 1) — the MAAP base, a NASA-VEDA / pangeo derivative that also ships `maap-py` + the MAAP JupyterLab extensions. Bumping is a one-line PR.
 - **Registry:** Docker Hub (`klesinger/disasters-jupyterhub-docker-image{,-dev}`).
 - **Build context:** repo root. `image/Dockerfile` is referenced via `docker build -f image/Dockerfile .`. `.dockerignore` at the repo root strips `notebooks/`, `docs/`, `tests/`, `.github/`, etc.
 - **Algorithms install:** `pip install --no-deps /srv/repo/algorithms` where `/srv/repo/algorithms` is the COPYed local checkout (NOT cloned from GitHub — no `GH_PAT` needed).
@@ -427,7 +427,7 @@ git subtree pull --prefix=image \
   --squash
 ```
 
-The archived `Disasters-Learning-Portal/pangeo-notebook-veda-image` fork's remote URL stays valid for this purpose. To upgrade the Pangeo base image, edit the `FROM pangeo/pangeo-notebook:<tag>` line in `image/Dockerfile` directly.
+The archived `Disasters-Learning-Portal/pangeo-notebook-veda-image` fork's remote URL stays valid for this purpose. To upgrade the base image, edit the `FROM mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:<tag>` line in `image/Dockerfile` directly.
 
 ### Debugging Missing CLIs on the Hub
 

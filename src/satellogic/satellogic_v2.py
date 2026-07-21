@@ -317,7 +317,7 @@ def build_output_name(in_file, out_dir, product):
 
 # Functions for specific products
 
-def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
+def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -325,9 +325,6 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
     blue = load_reflectance_band(ds, 1, scale_factor)
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
-
-    if use_mask and cloud is not None:
-        red, green, blue = apply_mask([red, green, blue], cloud)
 
     if visualize:
         r = normalize_band(red)
@@ -347,7 +344,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True,
     return outfile
 
 
-def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, gamma=0.7):
+def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -355,9 +352,6 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
     green = load_reflectance_band(ds, 2, scale_factor)
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
-
-    if use_mask and cloud is not None:
-        nir, red, green = apply_mask([nir, red, green], cloud)
 
     if visualize:
         r = normalize_band(nir)
@@ -377,7 +371,7 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", use_mask=True, visualize=True, g
     return outfile
 
 
-def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
+def genNDVI(paths, meta, out="/tmp/s3_temp"):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -385,7 +379,7 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
     nir, red = maybe_correct([nir, red], level, sunzen)
 
-    if use_mask and cloud is not None:
+    if cloud is not None:
         nir, red = apply_mask([nir, red], cloud)
 
     ndvi = (nir - red) / (nir + red + 1e-10)
@@ -399,7 +393,7 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
     return outfile
 
 
-def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
+def genNDWI(paths, meta, out="/tmp/s3_temp"):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
@@ -407,7 +401,7 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
     nir, green = maybe_correct([nir, green], level, sunzen)
 
-    if use_mask and cloud is not None:
+    if cloud is not None:
         nir, green = apply_mask([nir, green], cloud)
 
     ndwi = (green - nir) / (green + nir + 1e-10)
@@ -421,7 +415,7 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", use_mask=True):
     return outfile
 
 
-def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
+def genEVI(paths, meta, out="/tmp/s3_temp"):
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
 
     blue = load_reflectance_band(ds, 1, scale_factor)
@@ -430,7 +424,7 @@ def genEVI(paths, meta, out="/tmp/s3_temp", use_mask=True):
 
     blue, red, nir = maybe_correct([blue, red, nir], level, sunzen)
 
-    if use_mask and cloud is not None:
+    if cloud is not None:
         blue, red, nir = apply_mask([blue, red, nir], cloud)
 
     denom = nir + 6 * red - 7.5 * blue + 1

@@ -49,7 +49,7 @@ MASK="false"
 WE_NSTD=""
 COMPRESSION_LEVEL="1"
 NODATA="0"
-ENABLE_S3_UPLOAD="false"
+ENABLE_S3_UPLOAD="true"
 # S3 destination is LOCKED for this version: not exposed as a job input and not
 # parsed from flags, so operators cannot change it. To target a different
 # bucket/prefix, publish a new algorithm_version with these two values changed.

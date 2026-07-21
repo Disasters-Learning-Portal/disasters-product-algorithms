@@ -376,11 +376,23 @@ validates the CWL (injecting that image), and — if checked — registers it to
 prod OGC processes API. `run-name` shows which algorithm/version is registering.
 
 **The `dps/ogc/<name>.yml` configs** mirror `dps/<sensor>/algorithm_config.yaml`
-but mark **every input `type: X?`** (OGC-optional → `minOccurs:0`), carry **no
+but mark inputs **`type: X?`** (OGC-optional → `minOccurs:0`), carry **no
 container field** (the Action supplies the built image), and use an **absolute
 in-image `run_command`** (`/app/disasters-product-algorithms/dps/<sensor>/run.sh`).
 Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registered
-`capella`/`umbra`/etc.
+`capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
+list_dates, landsat, sentinel2**.
+
+**File-input sensors (landsat, sentinel2) are the exception to "every input
+optional":** their granule `file_path_of_raw_data` is a **required** `File` (no
+`?`, `minOccurs:1`) — nothing can run without a granule, so the Submit form should
+require one. Every *other* input stays optional, so no falsy default trips *"Valid
+value required"*. (The SAR/discovery configs have no File input, so they mark
+literally every input optional.) `type: File` in the OGC path is first exercised
+by these two — dry-run the Action (`register_to_maap` unchecked) to confirm the
+generated CWL validates before a live register; if the generator rejects the
+required File, fall back to `type: File?` (run.sh's `validate_granule` still
+rejects a missing granule).
 
 **Non-obvious operational rules — each costs a failed or confusing run if missed:**
 
@@ -397,7 +409,7 @@ Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registere
   `deploymentJobID` + a `deploy-ogc-hysds` pipeline link; the process appears in the
   **Submit Jobs** dropdown only after that pipeline finishes (a few min). The
   `maap-dps-jupyter-extension` DOES list OGC-registered processes (confirmed —
-  `cardamom-ogc-process` and our four show up there).
+  `cardamom-ogc-process` and our six show up there).
 - **ONE-BEHIND DEPLOY — FIXED via our pinned fork of the generator.** Upstream's
   deploy step registered the CWL at the **checkout** commit (`github.sha`) = the
   *previous* run's CWL (the filename is branch-based, `process_<repo>_<branch>.cwl`,

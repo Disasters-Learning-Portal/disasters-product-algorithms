@@ -56,7 +56,7 @@ Layer 1.
   of the COPYed file tree (post-`.dockerignore` filtering). Cold runtime
   ~30s. Re-runs on any algorithms code change.
 
-Why `--no-deps`: the Pangeo base image + Layer 1's conda env already
+Why `--no-deps`: the MAAP base image + Layer 1's conda env already
 provide everything `[project.dependencies]` resolves to. Letting pip
 walk the dep graph would either be a no-op (if conda already satisfies
 the requirement) or, worse, install a pip variant that shadows the
@@ -71,7 +71,7 @@ SHA is implicit in the build context.
 
 ### Dockerfile gotcha: `ADD --chown=` for files NB_USER will later delete
 
-The Pangeo base image declares `USER ${NB_USER}` before our `RUN` steps,
+The base image declares `USER ${NB_USER}` (`jovyan`) before our `RUN` steps,
 so everything in `image/Dockerfile` runs as the non-root notebook user.
 `ADD` and `COPY` default to creating files owned by `root` — fine for
 files that just need to be read by NB_USER, but **fatal if NB_USER later
@@ -149,11 +149,15 @@ remains valid for read-only fetches. NASA-IMPACT's `pangeo-notebook-veda-image`
 upstream-of-upstream is still active; pulls from there go through the
 archived fork unless you rewire the remote.
 
-Bumping the Pangeo base image: edit
-`image/Dockerfile`'s top line — `FROM pangeo/pangeo-notebook:<tag>` —
-to the new tag (see https://github.com/pangeo-data/pangeo-docker-images
-for release cadence). Push the change; Layer 1 invalidates cleanly,
-Layer 2 cache is preserved (different cache key).
+Bumping the base image: edit `image/Dockerfile`'s top line —
+`FROM mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:<tag>` —
+to the new tag (browse tags at the MAAP container registry:
+https://repo.maap-project.org/root/maap-workspaces/container_registry/).
+Push the change; Layer 1 invalidates cleanly, Layer 2 cache is preserved
+(different cache key). The MAAP base is a NASA-VEDA / pangeo derivative, so
+`NB_USER=jovyan` and the `/srv/conda/envs/notebook` prefix are unchanged — the
+`--chown` gotcha below still applies. It also ships `maap-py` + the MAAP
+JupyterLab extensions, so those are inherited (not pinned in `environment.yml`).
 
 ## Debugging: `process_*` CLI missing in a fresh hub pod
 

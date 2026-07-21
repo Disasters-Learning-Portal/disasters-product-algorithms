@@ -51,6 +51,8 @@ on:
           - umbra
           - satellogic
           - list_dates
+          - landsat
+          - sentinel2
         default: capella
       register_to_maap:
         # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless

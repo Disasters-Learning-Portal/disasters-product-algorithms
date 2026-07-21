@@ -1,37 +1,70 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: landsat-8-9-ogc-test
-  doc: 'Process Landsat 8/9 Collection 2 Level-2 granule archives (.tar/.zip) into
-    Cloud Optimized GeoTIFF disaster-response products (true color, NDVI, water extent,
-    etc.) with reprojection and activation-event GeoTIFF metadata tags. OGC test build:
-    the granule File is required, every other input is optional in the schema so the
-    Submit form never blocks on a falsy default; run.sh enforces the real requirements
-    (granule, source, non-placeholder activation_event).'
-  id: landsat-8-9-ogc-test
+  label: sentinel-2-ogc-test
+  doc: 'Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+    MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
+    products (true color, SWIR, NDVI, water extent, etc.). OGC test build: every input
+    is optional in the schema so the Submit form never blocks; run.sh enforces the
+    real requirements (tile, non-placeholder activation_event, readable Copernicus
+    secrets). Credentials come from MAAP secrets, never the job inputs.'
+  id: sentinel-2-ogc-test
   inputs:
-    file_path_of_raw_data:
-      doc: A Landsat Collection 2 Level-2 granule archive (.tar or .zip). REQUIRED.
-      label: Raw data file
-      type: File
+    tile:
+      doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for
+        several: "T17RLN T17RLM"). REQUIRED for a real run (run.sh rejects an empty
+        tile).'
+      label: MGRS tile(s)
+      type: string?
+      default: ''
     activation_event:
       doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
         is REJECTED at run time -- set a real value for a real run.
       label: Activation event
       type: string?
       default: YYYYMM_Hazard_Location
-    products:
-      doc: Space-separated list (true pan nat colorIR ndvi ndwi mndwi evi nbr we)
-        or 'all'.
-      label: Products
-      type: string?
-      default: 'true'
-    source_label:
-      doc: Data origin, e.g. USGS, NASA, NOAA. REQUIRED for a real run (run.sh rejects
-        an empty source).
-      label: Source
+    download_date:
+      doc: 'Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated).
+        Blank = the CLI''s recent-scenes default (~past 10 days).'
+      label: Download date (optional)
       type: string?
       default: ''
+    level:
+      doc: 'Sentinel-2 processing level to download: 2 = L2A (surface reflectance,
+        default), 1 = L1C (top-of-atmosphere).'
+      label: Processing level
+      type: string?
+      default: '2'
+    limit:
+      doc: Maximum number of Copernicus search results to download for the tile/date.
+      label: Search result limit
+      type: int?
+      default: 50
+    cop_user_secret_name:
+      doc: 'Name of the MAAP secret holding your Copernicus username/email (store
+        it once with maap.secrets.add_secret). The VALUE is fetched at run time and
+        never appears in the job log. Default: COP_USER.'
+      label: Copernicus username secret name
+      type: string?
+      default: COP_USER
+    cop_pass_secret_name:
+      doc: 'Name of the MAAP secret holding your Copernicus password (store it once
+        with maap.secrets.add_secret). The VALUE is fetched at run time and never
+        appears in the job log. Default: COP_PASS.'
+      label: Copernicus password secret name
+      type: string?
+      default: COP_PASS
+    products:
+      doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or
+        'all'.
+      label: Products
+      type: string?
+      default: true swir
+    source_label:
+      doc: Data origin, e.g. Copernicus, ESA.
+      label: Source
+      type: string?
+      default: Copernicus
     dst_crs:
       doc: 'Target CRS: native (default, no warp, preserves source projection) | EPSG:3857
         | EPSG:4326.'
@@ -39,31 +72,20 @@ $graph:
       type: string?
       default: native
     merge:
-      doc: Mosaic tiles by date and product (-merge).
+      doc: Mosaic scenes by date and product (-merge).
       label: Merge by date/product
       type: boolean?
       default: true
     mask:
-      doc: Generate and apply a cloud mask (-mask).
+      doc: Generate and apply a cloud mask (-mask, L2A only).
       label: Cloud mask
       type: boolean?
-      default: true
-    process_date:
-      doc: Only process this date, YYYYMMDD; leave blank for all dates.
-      label: Process date (optional)
-      type: string?
-      default: ''
-    process_tile:
-      doc: Only process this path/row, e.g. 171035; leave blank for all tiles.
-      label: Process tile (optional)
-      type: string?
-      default: ''
+      default: false
     we_nstd:
-      doc: Space-separated std-dev thresholds for water extent (only used when products
-        includes "we").
-      label: Water-extent std devs
+      doc: Space-separated std-dev thresholds for water extent, e.g. "1 1.5".
+      label: Water-extent std devs (optional)
       type: string?
-      default: 1 1.5
+      default: ''
     compression_level:
       doc: ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max
         (default).
@@ -71,10 +93,10 @@ $graph:
       type: int?
       default: 22
     nodata:
-      doc: Override the auto-detected no-data value; leave blank to auto-detect.
-      label: No-data value (optional)
+      doc: No-data value for the output COGs (Sentinel-2 default 0).
+      label: No-data value
       type: string?
-      default: ''
+      default: '0'
     enable_s3_upload:
       doc: Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/
         (locked destination; DPS also uploads output/ regardless).
@@ -112,15 +134,18 @@ $graph:
     process:
       run: '#main'
       in:
-        file_path_of_raw_data: file_path_of_raw_data
+        tile: tile
         activation_event: activation_event
+        download_date: download_date
+        level: level
+        limit: limit
+        cop_user_secret_name: cop_user_secret_name
+        cop_pass_secret_name: cop_pass_secret_name
         products: products
         source_label: source_label
         dst_crs: dst_crs
         merge: merge
         mask: mask
-        process_date: process_date
-        process_tile: process_tile
         we_nstd: we_nstd
         compression_level: compression_level
         nodata: nodata
@@ -142,107 +167,126 @@ $graph:
       ramMin: 64
       coresMin: 8
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/landsat/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/sentinel2/run.sh
   inputs:
-    file_path_of_raw_data:
-      type: File
+    tile:
+      type: string?
       inputBinding:
         position: 1
-        prefix: --file_path_of_raw_data
+        prefix: --tile
+      default: ''
     activation_event:
       type: string?
       inputBinding:
         position: 2
         prefix: --activation_event
       default: YYYYMM_Hazard_Location
-    products:
+    download_date:
       type: string?
       inputBinding:
         position: 3
-        prefix: --products
-      default: 'true'
-    source_label:
+        prefix: --download_date
+      default: ''
+    level:
       type: string?
       inputBinding:
         position: 4
+        prefix: --level
+      default: '2'
+    limit:
+      type: int?
+      inputBinding:
+        position: 5
+        prefix: --limit
+      default: 50
+    cop_user_secret_name:
+      type: string?
+      inputBinding:
+        position: 6
+        prefix: --cop_user_secret_name
+      default: COP_USER
+    cop_pass_secret_name:
+      type: string?
+      inputBinding:
+        position: 7
+        prefix: --cop_pass_secret_name
+      default: COP_PASS
+    products:
+      type: string?
+      inputBinding:
+        position: 8
+        prefix: --products
+      default: true swir
+    source_label:
+      type: string?
+      inputBinding:
+        position: 9
         prefix: --source_label
-      default: ''
+      default: Copernicus
     dst_crs:
       type: string?
       inputBinding:
-        position: 5
+        position: 10
         prefix: --dst_crs
       default: native
     merge:
       type: boolean?
       inputBinding:
-        position: 6
+        position: 11
         prefix: --merge
       default: true
     mask:
       type: boolean?
       inputBinding:
-        position: 7
+        position: 12
         prefix: --mask
-      default: true
-    process_date:
-      type: string?
-      inputBinding:
-        position: 8
-        prefix: --process_date
-      default: ''
-    process_tile:
-      type: string?
-      inputBinding:
-        position: 9
-        prefix: --process_tile
-      default: ''
+      default: false
     we_nstd:
       type: string?
       inputBinding:
-        position: 10
+        position: 13
         prefix: --we_nstd
-      default: 1 1.5
+      default: ''
     compression_level:
       type: int?
       inputBinding:
-        position: 11
+        position: 14
         prefix: --compression_level
       default: 22
     nodata:
       type: string?
       inputBinding:
-        position: 12
+        position: 15
         prefix: --nodata
-      default: ''
+      default: '0'
     enable_s3_upload:
       type: boolean?
       inputBinding:
-        position: 13
+        position: 16
         prefix: --enable_s3_upload
       default: false
     save_png:
       type: boolean?
       inputBinding:
-        position: 14
+        position: 17
         prefix: --save_png
       default: true
     png_min:
       type: string?
       inputBinding:
-        position: 15
+        position: 18
         prefix: --png_min
       default: ''
     png_max:
       type: string?
       inputBinding:
-        position: 16
+        position: 19
         prefix: --png_max
       default: ''
     delete_cog:
       type: boolean?
       inputBinding:
-        position: 17
+        position: 20
         prefix: --delete_cog
       default: true
   outputs:
@@ -258,14 +302,15 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 17ff033265cec105b0598e864269ce701816be8f
+s:commitHash: afe5157b34b74c6e3afd5f6bf50b73a06f7e4fff
 s:dateCreated: 2026-07-21
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 file input required, all other inputs\
-  \ optional (no \"Valid value required\") + image built in-workflow from dps/Dockerfile."
-s:keywords: landsat, cog, disasters, flood, fire, ndvi, water-extent
+s:releaseNotes: "OGC registration test \u2014 download-from-Copernicus (creds via\
+  \ MAAP secrets, not job inputs); all inputs optional; image built in-workflow from\
+  \ dps/Dockerfile."
+s:keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent, copernicus
 $namespaces:
   s: https://schema.org/
 $schemas:

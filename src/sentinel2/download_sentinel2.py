@@ -54,15 +54,19 @@ args=parser.parse_args()
 
 ###########INPUTS###########
 
-# Logic to handle credentials via arguments (subprocess) or manual input
-if args.user and args.password:
-    cop_user = args.user[0]
-    cop_pass = args.password[0]
-    print("Credentials received via arguments.")
+# Logic to handle credentials via arguments (subprocess), environment (DPS), or
+# manual input. Precedence: CLI args -> env vars (COP_USER/COP_PASS) -> prompt.
+# The env path lets a headless caller (e.g. the DPS run.sh, which pulls the values
+# from MAAP secrets) pass credentials WITHOUT putting the password on the command
+# line, so it never lands in argv / `ps` / a process log.
+cop_user = args.user[0] if args.user else os.environ.get('COP_USER')
+cop_pass = args.password[0] if args.password else os.environ.get('COP_PASS')
+if cop_user and cop_pass:
+    print("Credentials received.")
 else:
     # Manual fallback for interactive use
-    cop_user = input('Copernicus Username (email): ')
-    cop_pass = input('Copernicus Password: ')
+    cop_user = cop_user or input('Copernicus Username (email): ')
+    cop_pass = cop_pass or input('Copernicus Password: ')
 
 # parse user arguments
 out_dir = args.output[0]

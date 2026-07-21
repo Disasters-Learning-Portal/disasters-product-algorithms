@@ -421,9 +421,10 @@ time. The whole mechanism:
   the password never lands in argv/`ps`/the job log. Auth is ambient: the DPS wrapper
   injects a proxy ticket (`MAAP_PGT`) that maap-py sends automatically, so no token
   handling is needed. `maap-py` is in `dps/environment.yml` for this.
-- **Custom secret names:** the `cop_user_secret_name` / `cop_pass_secret_name` inputs
-  (default `COP_USER` / `COP_PASS`) let different operators point at their own secret
-  names. These are NAMES (safe to log), not the credential values.
+- **Fixed secret names:** run.sh reads the secrets by the hardcoded names `COP_USER`
+  / `COP_PASS` (not job inputs — nothing credential-related appears on the Submit
+  form). Store them under exactly those names. To use different names, edit
+  `COP_USER_SECRET` / `COP_PASS_SECRET` at the top of `dps/sentinel2/run.sh`.
 - If a secret is missing/unreadable, run.sh **fails fast** with a message telling you
   to store it with `add_secret`.
 

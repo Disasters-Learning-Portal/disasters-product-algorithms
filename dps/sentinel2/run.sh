@@ -29,22 +29,25 @@ source "${basedir}/../_validate.sh"
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
 # flag; --flag or --flag true|false overrides) ---
-ACTIVATION_EVENT="YYYYMM_Hazard_Location"
+# Submit-and-go defaults: a bare Submit runs a known-good test config (tile/date/
+# event below). For a real activation, change tile / download_date / activation_event.
+ACTIVATION_EVENT="202601_KyleWx_US"
 PRODUCTS="true swir"
 SOURCE_LABEL="Copernicus"
-TILE=""
-DOWNLOAD_DATE=""
-LEVEL="2"
+TILE="T17RLN T17RLM"
+DOWNLOAD_DATE="20251231"
+LEVEL="1"
 LIMIT="50"
 # NAMES of the MAAP secrets holding the Copernicus credentials (not the values).
-# Overridable so different operators can name their secrets differently.
+# BAKED IN (not job inputs): the operator stores COP_USER / COP_PASS once with
+# maap.secrets.add_secret; run.sh fetches them by these fixed names at run time.
 COP_USER_SECRET="COP_USER"
 COP_PASS_SECRET="COP_PASS"
 DST_CRS="native"
 MERGE="true"
 MASK="false"
 WE_NSTD=""
-COMPRESSION_LEVEL="22"
+COMPRESSION_LEVEL="1"
 NODATA="0"
 ENABLE_S3_UPLOAD="false"
 # S3 destination is LOCKED for this version: not exposed as a job input and not
@@ -67,8 +70,6 @@ while [[ $# -gt 0 ]]; do
     --download_date)         DOWNLOAD_DATE="$2"; shift 2;;
     --level)                 LEVEL="$2"; shift 2;;
     --limit)                 LIMIT="$2"; shift 2;;
-    --cop_user_secret_name)  COP_USER_SECRET="$2"; shift 2;;
-    --cop_pass_secret_name)  COP_PASS_SECRET="$2"; shift 2;;
     --dst_crs)               DST_CRS="$2"; shift 2;;
     --we_nstd)               WE_NSTD="$2"; shift 2;;
     --compression_level)     COMPRESSION_LEVEL="$2"; shift 2;;
@@ -106,8 +107,6 @@ for t in ${TILE}; do validate_regex tile "$t" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e
 [[ -n "${DOWNLOAD_DATE}" ]] && for d in ${DOWNLOAD_DATE}; do validate_regex download_date "$d" '^[0-9]{8}$' 'YYYYMMDD'; done
 validate_in_set level "${LEVEL}" "1 2"
 validate_int_range limit "${LIMIT}" 1 1000
-require_nonempty cop_user_secret_name "${COP_USER_SECRET}" "name of the MAAP secret holding the Copernicus username"
-require_nonempty cop_pass_secret_name "${COP_PASS_SECRET}" "name of the MAAP secret holding the Copernicus password"
 validate_dst_crs "${DST_CRS}"
 validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # optical products validated here (the CLI's own check ends in quit() -> exit 0);

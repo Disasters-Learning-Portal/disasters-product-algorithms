@@ -61,39 +61,29 @@ outdir_max: 20
 inputs:
   - name: tile
     label: MGRS tile(s)
-    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several, no quotes: T17RLN T17RLM). REQUIRED for a real run (run.sh rejects an empty tile).'
+    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several, no quotes: T17RLN T17RLM). Pre-filled with a known-good test tile; change it for a real activation.'
     type: string?
-    default: ""
+    default: "T17RLN T17RLM"
   - name: activation_event
     label: Activation event
-    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is REJECTED at run time -- set a real value for a real run."
+    doc: "Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so a bare Submit runs; set a REAL event for a real activation (the placeholder YYYYMM_Hazard_Location is rejected at run time)."
     type: string?
-    default: "YYYYMM_Hazard_Location"
+    default: "202601_KyleWx_US"
   - name: download_date
     label: Download date (optional)
-    doc: "Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated). Blank = the CLI's recent-scenes default (~past 10 days)."
+    doc: "Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated). Blank = the CLI's recent-scenes default (~past 10 days). Pre-filled with a known-good test date."
     type: string?
-    default: ""
+    default: "20251231"
   - name: level
     label: Processing level
-    doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance, default), 1 = L1C (top-of-atmosphere)."
+    doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance), 1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected production."
     type: string?
-    default: "2"
+    default: "1"
   - name: limit
     label: Search result limit
     doc: "Maximum number of Copernicus search results to download for the tile/date."
     type: int?
     default: 50
-  - name: cop_user_secret_name
-    label: Copernicus username secret name
-    doc: "Name of the MAAP secret holding your Copernicus username/email (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_USER."
-    type: string?
-    default: "COP_USER"
-  - name: cop_pass_secret_name
-    label: Copernicus password secret name
-    doc: "Name of the MAAP secret holding your Copernicus password (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_PASS."
-    type: string?
-    default: "COP_PASS"
   - name: products
     label: Products
     doc: "Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'."
@@ -126,9 +116,9 @@ inputs:
     default: ""
   - name: compression_level
     label: COG compression level
-    doc: "ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max (default)."
+    doc: "ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. Default 1 for a fast test; raise (e.g. 22 = max) for smaller production COGs."
     type: int?
-    default: 22
+    default: 1
   - name: nodata
     label: No-data value
     doc: "No-data value for the output COGs (Sentinel-2 default 0)."

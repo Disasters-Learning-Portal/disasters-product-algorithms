@@ -140,3 +140,31 @@ def test_s2_merge_no_mask_returns_merged(tmp_path):
 
     assert os.path.basename(out) == "S2B_MSIL2A_NDWI_merged_2026-06-06.tif"
     assert os.path.exists(out)
+
+
+# --------------------------------------------------------------------------- #
+# Empty-dir guard — mirror ls_merge (raise FileNotFoundError, not IndexError).
+# This is what lets the process_sentinel2 merge loop safely SKIP a product that
+# failed to generate (e.g. SWIR band missing) instead of crashing the whole job.
+# --------------------------------------------------------------------------- #
+
+def test_s2_merge_empty_dir_raises(tmp_path):
+    from sentinel2.sentinel2_functions import s2_merge
+
+    d = tmp_path / "shortwaveInfrared"  # a product dir whose generation produced nothing
+    d.mkdir()
+    with pytest.raises(FileNotFoundError):
+        s2_merge(str(d))
+
+
+def test_s2_merge_only_prior_merged_raises(tmp_path):
+    # A dir holding ONLY a previous merged output (no fresh scenes) must not fold
+    # that mosaic back in -- it is excluded from the inputs, so the dir is
+    # effectively empty and s2_merge raises (mirrors ls_merge's *merged* exclusion).
+    from sentinel2.sentinel2_functions import s2_merge
+
+    d = tmp_path / "trueColor"
+    d.mkdir()
+    _make_3band(str(d / "S2B_MSIL2A_trueColor_merged_2026-06-06.tif"), 500000, 4000000)
+    with pytest.raises(FileNotFoundError):
+        s2_merge(str(d))

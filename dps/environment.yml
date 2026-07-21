@@ -41,6 +41,13 @@ dependencies:
   - psutil
   - fsspec
   - s3fs
+  # --- Archive tools ---
+  # p7zip provides the `7z` binary that process_sentinel2 shells out to
+  # (`7z x <scene>.SAFE.zip`, process_sentinel2.py) to extract Sentinel-2 .SAFE
+  # archives. Without it the DPS job downloads scenes fine but fails to unzip
+  # ("sh: 7z: not found") -> "NO SCENES MATCHED". Same pin as the hub image
+  # (image/environment.yml).
+  - p7zip==16.02
   # --- pip (build-env.sh uses it to install the repo) ---
   - pip
   - pip:

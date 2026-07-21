@@ -61,7 +61,7 @@ outdir_max: 20
 inputs:
   - name: tile
     label: MGRS tile(s)
-    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several: "T17RLN T17RLM"). REQUIRED for a real run (run.sh rejects an empty tile).'
+    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several, no quotes: T17RLN T17RLM). REQUIRED for a real run (run.sh rejects an empty tile).'
     type: string?
     default: ""
   - name: activation_event
@@ -121,7 +121,7 @@ inputs:
     default: false
   - name: we_nstd
     label: Water-extent std devs (optional)
-    doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'
+    doc: 'Space-separated std-dev thresholds for water extent (no quotes), e.g. 1 1.5.'
     type: string?
     default: ""
   - name: compression_level

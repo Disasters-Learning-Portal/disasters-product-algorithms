@@ -84,10 +84,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- normalize space-separated free-text list inputs ---
+# MAAP form values sometimes arrive with LITERAL quote characters (operators copy
+# an example like `T17RLN T17RLM` verbatim including surrounding quotes, giving
+# `"T17RLN` after word-splitting). Quotes are never valid in a tile ID / std-dev /
+# product token, so strip every ' and " here so a quoted entry validates the same
+# as a bare one. Word-splitting on the remaining spaces still yields the tokens.
+TILE="${TILE//[\"\']/}"
+WE_NSTD="${WE_NSTD//[\"\']/}"
+PRODUCTS="${PRODUCTS//[\"\']/}"
+
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 validate_activation_event "${ACTIVATION_EVENT}"
 require_nonempty source_label "${SOURCE_LABEL}" "e.g. Copernicus"
-require_nonempty tile "${TILE}" 'one or more MGRS tiles, e.g. T17RLN or "T17RLN T17RLM"'
+require_nonempty tile "${TILE}" 'one or more MGRS tiles, space-separated, e.g. T17RLN or: T17RLN T17RLM'
 # shellcheck disable=SC2086  # intentional word-split of the space-separated list
 for t in ${TILE}; do validate_regex tile "$t" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e.g. T17RLN'; done
 # download_date is optional: blank -> CLI default (recent scenes). One YYYYMMDD or
@@ -161,6 +171,16 @@ args=( "${DL_DIR}"
 
 conda run --live-stream --name disasters_dps process_sentinel2 "${args[@]}"
 
-# --- move the produced COGs into OUT_HOME, then run shared output handling ---
+# --- move the produced COGs into OUT_HOME ---
+# process_sentinel2 above ran under `set -e`, so reaching here means processing
+# fully completed; the products are now safely under OUT_HOME.
 cp -r "${DL_DIR}/output/." "${OUT_HOME}/" 2>/dev/null || true
+
+# --- delete the raw Copernicus download now that processing is complete ---
+# Frees the large Sentinel-2 .SAFE.zip archives (~700 MB-1 GB each) AND the
+# extracted .SAFE scenes from the worker's scratch; the products already live in
+# OUT_HOME (and flow to output/ + S3 via _finalize.sh), so DL_DIR is disposable.
+rm -rf "${DL_DIR}"
+
+# --- shared output handling (png -> output/ -> S3 -> delete COG) ---
 source "${basedir}/../_finalize.sh"

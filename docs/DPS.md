@@ -525,12 +525,17 @@ require any code change here — our stack is already OGC-native:
 - **Our `algorithm_config.yaml` files are already the OGC/CWL schema** (see the
   section above). No schema migration. Reregistering is a **runtime GUI action**
   (re-run Register Algorithm so it shows in the v6 OGC catalog), not a repo edit.
-- **Do NOT blind-bump `maap-py==4.2.0`** (pinned in `image/environment.yml`).
-  v5.0.0+ is snakecase + OGC-only — a breaking change that would break the two
-  *legacy, non-primary* client usages: `register_algorithms.py`
-  (`register_algorithm_from_yaml_file`) and the `submitJob`/`getJobStatus`
-  snippet in `dps/README.md`. The real registration path is the GUI extensions
-  (already on OGC endpoints), so 4.2.0 stays until MAAP ops forces a client bump.
+- **maap-py client versions (updated 2026-07-21).** The **hub image** no longer pins
+  maap-py — it inherits the OGC-compliant client from the `2i2c/pangeo:v6.0.0` base
+  (re-pinning `4.2.0` here would DOWNGRADE it; see `image/CHANGELOG.md`). The **DPS
+  worker** (`dps/environment.yml`) is plain miniforge, so it does NOT inherit maap-py
+  and must pin it — now **`maap-py==5.1.0`**, the OGC-compliant client (MAAP team
+  guidance: "use 5.1.0 for OGC"). This is safe: the v5 "breaking" changes are in the
+  *legacy* client usages (`register_algorithms.py` `register_algorithm_from_yaml_file`,
+  the `submitJob`/`getJobStatus` README snippet), NOT the secrets API — `from maap.maap
+  import MAAP` + `MAAP().secrets.get_secret()` are unchanged in 5.1.0, so
+  `dps/_get_secret.py` needs no edit. The GUI registration extensions were already on
+  OGC endpoints.
 - **`base_container_url: maap_base:v4.2.0`** is NOT deprecated by the announcement
   and only supplies Miniconda (build-env.sh installs on top). Only action: confirm
   the tag still resolves in the UI's Container URL dropdown; bump if MAAP retires it.

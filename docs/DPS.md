@@ -98,16 +98,23 @@ Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
 -compression_level` single-dash) and then `source dps/_finalize.sh`.
 
-## Two input models
+## Three input models
 
-- **Optical (landsat, sentinel2):** take a **`file_path_of_raw_data`** File input
-  (a `.tar`/`.zip` granule). run.sh stages it into a dir, runs the CLI (which
-  writes products to `<input>/output/`), copies those to `OUT_HOME`.
+- **File-input (landsat):** takes a **`file_path_of_raw_data`** File input (a
+  `.tar`/`.zip` Collection-2 granule the operator downloaded from USGS). run.sh
+  stages it into a dir, runs the CLI (which writes products to `<input>/output/`),
+  copies those to `OUT_HOME`.
 - **SAR/vendor (capella, umbra, satellogic):** **no file input** — the CLI
   fetches source rasters from a CSDA vendor bucket keyed by `--date`/`--bucket`/
   `--prefix` (capella `csdap-capellaspace-delivery`, umbra `csda-data-vendor-umbra`,
   satellogic `csda-data-vendor-satellogic`). Satellogic's bucket/prefix are
   hardcoded in the CLI (the inputs are informational only).
+- **Download-from-Copernicus (sentinel2):** **no file input** — run.sh downloads
+  L2A/L1C scenes from the Copernicus Data Space (CDSE) by MGRS `tile`(s) +
+  `download_date` via the `download_sentinel2` CLI, then runs `process_sentinel2`
+  on the downloaded dir. Copernicus credentials are read from **MAAP secrets** at
+  run time (see "Sentinel-2 credentials via MAAP secrets" below) — never job inputs,
+  so they never appear in the job parameters or log.
 
 ### Vendor read access — the `AccessDenied` fix (2026-07-20)
 
@@ -383,16 +390,42 @@ Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registere
 `capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
 list_dates, landsat, sentinel2**.
 
-**File-input sensors (landsat, sentinel2) are the exception to "every input
-optional":** their granule `file_path_of_raw_data` is a **required** `File` (no
-`?`, `minOccurs:1`) — nothing can run without a granule, so the Submit form should
-require one. Every *other* input stays optional, so no falsy default trips *"Valid
-value required"*. (The SAR/discovery configs have no File input, so they mark
-literally every input optional.) `type: File` in the OGC path is first exercised
-by these two — dry-run the Action (`register_to_maap` unchecked) to confirm the
-generated CWL validates before a live register; if the generator rejects the
-required File, fall back to `type: File?` (run.sh's `validate_granule` still
-rejects a missing granule).
+**`landsat` is the one file-input OGC config** — its granule `file_path_of_raw_data`
+is a **required** `File` (no `?`, `minOccurs:1`); nothing can run without a granule,
+so the Submit form should require one, while every *other* input stays optional so
+no falsy default trips *"Valid value required"*. (`type: File` validated cleanly in
+the OGC path — the landsat dry-run passed.) The SAR/discovery configs **and
+`sentinel2`** have no File input, so they mark literally every input optional.
+`sentinel2` downloads its scenes from Copernicus (see the download-from-Copernicus
+model above) rather than taking a granule.
+
+### Sentinel-2 credentials via MAAP secrets
+
+Sentinel-2 downloads from CDSE, which needs a Copernicus username + password. These
+are **never job inputs** (that would store the password in MAAP's job parameters and
+log). Instead they live in **MAAP's encrypted secret store** and are fetched at run
+time. The whole mechanism:
+
+- **Store once** (from any MAAP notebook — the ADE or the Disasters hub):
+  ```python
+  from maap.maap import MAAP
+  maap = MAAP()
+  maap.secrets.add_secret("COP_USER", "you@example.com")
+  maap.secrets.add_secret("COP_PASS", "your-copernicus-password")
+  ```
+  Use a **dedicated CDSE account** for the team, not a personal login. Register at
+  <https://dataspace.copernicus.eu/>.
+- **run.sh reads them at run time** via `dps/_get_secret.py`
+  (`maap.secrets.get_secret("COP_USER"/"COP_PASS")`), exports them as env vars, and
+  passes them to `download_sentinel2` **through the environment, not `-u/-p`** — so
+  the password never lands in argv/`ps`/the job log. Auth is ambient: the DPS wrapper
+  injects a proxy ticket (`MAAP_PGT`) that maap-py sends automatically, so no token
+  handling is needed. `maap-py` is in `dps/environment.yml` for this.
+- **Custom secret names:** the `cop_user_secret_name` / `cop_pass_secret_name` inputs
+  (default `COP_USER` / `COP_PASS`) let different operators point at their own secret
+  names. These are NAMES (safe to log), not the credential values.
+- If a secret is missing/unreadable, run.sh **fails fast** with a message telling you
+  to store it with `add_secret`.
 
 **Non-obvious operational rules — each costs a failed or confusing run if missed:**
 

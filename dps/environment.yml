@@ -43,3 +43,10 @@ dependencies:
   - s3fs
   # --- pip (build-env.sh uses it to install the repo) ---
   - pip
+  - pip:
+    # maap-py: lets a run.sh pull data-provider credentials from MAAP's encrypted
+    # secret store at runtime (maap.secrets.get_secret via dps/_get_secret.py) so
+    # they never pass through the DPS job's parameters or log. Used by the
+    # Sentinel-2 job for Copernicus COP_USER/COP_PASS. Pinned to the same version
+    # as the hub image (image/environment.yml). pip-only (not on conda-forge).
+    - maap-py==4.2.0

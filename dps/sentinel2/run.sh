@@ -2,9 +2,20 @@
 set -euo pipefail
 # MAAP DPS run script (Sentinel-2) -- OGC/CWL schema.
 #
+# Sentinel-2 is DOWNLOAD-then-process (unlike Landsat, which takes a granule File
+# input): it fetches L2A/L1C scenes from the Copernicus Data Space (CDSE) by MGRS
+# tile(s) + date, then runs process_sentinel2 on them.
+#
+# Copernicus credentials are NEVER job inputs -- they are pulled from MAAP's
+# encrypted secret store at run time (maap.secrets.get_secret, via
+# dps/_get_secret.py) so they never appear in the job's parameters or log. Store
+# them once from a MAAP notebook (default names COP_USER / COP_PASS):
+#   maap.secrets.add_secret("COP_USER", "you@example.com")
+#   maap.secrets.add_secret("COP_PASS", "your-copernicus-password")
+# See docs/DPS.md "Sentinel-2 credentials via MAAP secrets".
+#
 # Inputs arrive as NAMED flags via "$@". Boolean inputs may arrive as a bare
 # "--flag" (presence) or "--flag true|false" (value), so the parser accepts both.
-# The File input is localized by DPS to a path.
 #
 # Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
 # -> delete COG.
@@ -12,21 +23,26 @@ set -euo pipefail
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
-# shared input validators (fail fast, before conda/staging)
+# shared input validators (fail fast, before conda/download)
 source "${basedir}/../_validate.sh"
 
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
 # flag; --flag or --flag true|false overrides) ---
-FILE_PATH=""
 ACTIVATION_EVENT="YYYYMM_Hazard_Location"
 PRODUCTS="true swir"
-SOURCE_LABEL=""
+SOURCE_LABEL="Copernicus"
+TILE=""
+DOWNLOAD_DATE=""
+LEVEL="2"
+LIMIT="50"
+# NAMES of the MAAP secrets holding the Copernicus credentials (not the values).
+# Overridable so different operators can name their secrets differently.
+COP_USER_SECRET="COP_USER"
+COP_PASS_SECRET="COP_PASS"
 DST_CRS="native"
 MERGE="true"
 MASK="false"
-PROCESS_DATE=""
-PROCESS_TILE=""
 WE_NSTD=""
 COMPRESSION_LEVEL="22"
 NODATA="0"
@@ -44,13 +60,16 @@ DELETE_COG="true"
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --file_path_of_raw_data) FILE_PATH="$2"; shift 2;;
     --activation_event)      ACTIVATION_EVENT="$2"; shift 2;;
     --products)              PRODUCTS="$2"; shift 2;;
     --source_label)          SOURCE_LABEL="$2"; shift 2;;
+    --tile)                  TILE="$2"; shift 2;;
+    --download_date)         DOWNLOAD_DATE="$2"; shift 2;;
+    --level)                 LEVEL="$2"; shift 2;;
+    --limit)                 LIMIT="$2"; shift 2;;
+    --cop_user_secret_name)  COP_USER_SECRET="$2"; shift 2;;
+    --cop_pass_secret_name)  COP_PASS_SECRET="$2"; shift 2;;
     --dst_crs)               DST_CRS="$2"; shift 2;;
-    --process_date)          PROCESS_DATE="$2"; shift 2;;
-    --process_tile)          PROCESS_TILE="$2"; shift 2;;
     --we_nstd)               WE_NSTD="$2"; shift 2;;
     --compression_level)     COMPRESSION_LEVEL="$2"; shift 2;;
     --nodata)                NODATA="$2"; shift 2;;
@@ -66,18 +85,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
-validate_granule file_path_of_raw_data "${FILE_PATH}" "zip"
 validate_activation_event "${ACTIVATION_EVENT}"
-require_nonempty source_label "${SOURCE_LABEL}" "e.g. USGS, NASA, NOAA, Copernicus"
+require_nonempty source_label "${SOURCE_LABEL}" "e.g. Copernicus"
+require_nonempty tile "${TILE}" 'one or more MGRS tiles, e.g. T17RLN or "T17RLN T17RLM"'
+# shellcheck disable=SC2086  # intentional word-split of the space-separated list
+for t in ${TILE}; do validate_regex tile "$t" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e.g. T17RLN'; done
+# download_date is optional: blank -> CLI default (recent scenes). One YYYYMMDD or
+# a start/end pair; the CLI rejects >2, but we bound each token's shape here.
+# shellcheck disable=SC2086
+[[ -n "${DOWNLOAD_DATE}" ]] && for d in ${DOWNLOAD_DATE}; do validate_regex download_date "$d" '^[0-9]{8}$' 'YYYYMMDD'; done
+validate_in_set level "${LEVEL}" "1 2"
+validate_int_range limit "${LIMIT}" 1 1000
+require_nonempty cop_user_secret_name "${COP_USER_SECRET}" "name of the MAAP secret holding the Copernicus username"
+require_nonempty cop_pass_secret_name "${COP_PASS_SECRET}" "name of the MAAP secret holding the Copernicus password"
 validate_dst_crs "${DST_CRS}"
 validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # optical products validated here (the CLI's own check ends in quit() -> exit 0);
 # token set mirrors the accepted list in src/sentinel2/process_sentinel2.py.
-# shellcheck disable=SC2086  # intentional word-split of the space-separated list
+# shellcheck disable=SC2086
 for t in ${PRODUCTS}; do validate_in_set products "$t" \
   "all true tc truecolor nat natural naturalcolor colorir cir colorinfrared swir shortwaveir shortwaveinfrared ndwi mndwi ndvi nbr we waterextent"; done
-[[ -n "${PROCESS_DATE}" ]] && validate_regex process_date "${PROCESS_DATE}" '^[0-9]{8}$' 'YYYYMMDD'
-[[ -n "${PROCESS_TILE}" ]] && validate_regex process_tile "${PROCESS_TILE}" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e.g. T17RLN'
 # shellcheck disable=SC2086
 [[ -n "${WE_NSTD}" ]] && for n in ${WE_NSTD}; do validate_number we_nstd "$n"; done
 [[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
@@ -87,19 +114,41 @@ for t in ${PRODUCTS}; do validate_in_set products "$t" \
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"
 
-# --- stage the granule into an input dir (process_sentinel2 takes a directory) ---
-INPUT_DIR="$(mktemp -d)/input"
-mkdir -p "${INPUT_DIR}"
-cp -rL "${FILE_PATH}" "${INPUT_DIR}/"
+# --- fetch Copernicus credentials from MAAP secrets (NEVER a job input; never
+# logged). _get_secret.py prints ONLY the secret value; we capture it into env
+# vars and never echo them. Auth is ambient in DPS (the wrapper injects MAAP_PGT).
+# download_sentinel2 reads COP_USER/COP_PASS from the environment (no -u/-p on the
+# command line), so the password never lands in argv / `ps` / the job log. ---
+COP_USER="$(conda run --name disasters_dps python "${basedir}/../_get_secret.py" "${COP_USER_SECRET}")" \
+  || die "could not read Copernicus username from MAAP secret '${COP_USER_SECRET}' (store it with maap.secrets.add_secret; see docs/DPS.md)."
+COP_PASS="$(conda run --name disasters_dps python "${basedir}/../_get_secret.py" "${COP_PASS_SECRET}")" \
+  || die "could not read Copernicus password from MAAP secret '${COP_PASS_SECRET}' (store it with maap.secrets.add_secret; see docs/DPS.md)."
+export COP_USER COP_PASS
+
+# --- download the requested scenes from Copernicus into a temp dir
+# (process_sentinel2 takes a directory of .zip granules) ---
+DL_DIR="$(mktemp -d)/s2_download"
+mkdir -p "${DL_DIR}"
+# shellcheck disable=SC2206  # intentional word-split of the space-separated tile list
+dl_args=( "${DL_DIR}" -tile ${TILE} -level "${LEVEL}" -limit "${LIMIT}" -y )
+# shellcheck disable=SC2206
+[[ -n "${DOWNLOAD_DATE}" ]] && dl_args+=( -date ${DOWNLOAD_DATE} )
+conda run --live-stream --name disasters_dps download_sentinel2 "${dl_args[@]}"
+
+# Fail fast if the tile/date matched no scenes on CDSE, rather than silently
+# producing an empty output.
+shopt -s nullglob
+zips=( "${DL_DIR}"/*.zip )
+(( ${#zips[@]} )) || die "no Sentinel-2 scenes downloaded for tile(s)='${TILE}' date='${DOWNLOAD_DATE:-recent}'. Check the tile ID / date window (discover scenes at https://dataspace.copernicus.eu/)."
 
 # --- activation metadata embedded as GeoTIFF tags at COG creation ---
-META_JSON="${INPUT_DIR}/activation_metadata.json"
+META_JSON="${DL_DIR}/activation_metadata.json"
 printf '{"ACTIVATION_EVENT": "%s", "SOURCE": "%s"}\n' \
   "${ACTIVATION_EVENT}" "${SOURCE_LABEL}" > "${META_JSON}"
 
-# --- build the CLI argument list (CLI writes products to <input_dir>/output/) ---
+# --- process the downloaded granules (CLI writes products to <input_dir>/output/) ---
 # shellcheck disable=SC2206  # intentional word-split of space-separated lists
-args=( "${INPUT_DIR}"
+args=( "${DL_DIR}"
        -p ${PRODUCTS}
        -dst_crs "${DST_CRS}"
        -event "${ACTIVATION_EVENT}"
@@ -107,13 +156,11 @@ args=( "${INPUT_DIR}"
        --metadata-json "${META_JSON}" )
 [[ "${MERGE}" == "true" ]] && args+=( -merge )
 [[ "${MASK}"  == "true" ]] && args+=( -mask )
-[[ -n "${PROCESS_DATE}" ]] && args+=( -date ${PROCESS_DATE} )
-[[ -n "${PROCESS_TILE}" ]] && args+=( -tile ${PROCESS_TILE} )
 [[ -n "${WE_NSTD}" ]]      && args+=( -we_nstd ${WE_NSTD} )
 [[ -n "${NODATA}" ]]       && args+=( -nodata "${NODATA}" )
 
 conda run --live-stream --name disasters_dps process_sentinel2 "${args[@]}"
 
 # --- move the produced COGs into OUT_HOME, then run shared output handling ---
-cp -r "${INPUT_DIR}/output/." "${OUT_HOME}/" 2>/dev/null || true
+cp -r "${DL_DIR}/output/." "${OUT_HOME}/" 2>/dev/null || true
 source "${basedir}/../_finalize.sh"

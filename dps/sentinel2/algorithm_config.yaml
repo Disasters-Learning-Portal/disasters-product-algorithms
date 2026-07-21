@@ -3,9 +3,12 @@ algorithm_name: sentinel-2
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev
 algorithm_description: >-
-  Process Sentinel-2 L2A granule archives (.zip) into Cloud Optimized GeoTIFF
-  disaster-response products (true color, SWIR, NDVI, water extent, etc.) with
-  reprojection and activation-event GeoTIFF metadata tags.
+  Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+  MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
+  products (true color, SWIR, NDVI, water extent, etc.) with reprojection and
+  activation-event GeoTIFF metadata tags. Copernicus credentials are read from
+  MAAP secrets (COP_USER / COP_PASS) at run time -- they are NOT job inputs, so
+  they never appear in the job parameters or log.
 code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 # MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
 # command paths MUST be prefixed with the repo directory name.
@@ -25,19 +28,46 @@ license: Apache-2.0
 release_notes: DPS integration for Sentinel-2 COG disaster-product generation.
 citation: NASA Disasters Program
 keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent
-# Inputs: flat list, each {name, label, doc, type, default}. File inputs are
-# localized by DPS and passed to run.sh as --name <path>; booleans as a true/false
-# control; primitives as --name <value>. run.sh maps these onto process_sentinel2.
+# Inputs: flat list, each {name, label, doc, type, default}. Booleans arrive as a
+# true/false control; primitives as --name <value>. run.sh downloads the requested
+# scenes from Copernicus, then maps these onto process_sentinel2. Copernicus
+# credentials are NOT inputs here -- run.sh pulls them from MAAP secrets at run
+# time (see cop_user_secret_name / cop_pass_secret_name below).
 inputs:
-  - name: file_path_of_raw_data
-    label: Raw data file
-    doc: A Sentinel-2 L2A granule archive (.zip).
-    type: File
+  - name: tile
+    label: MGRS tile(s)
+    doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for several: "T17RLN T17RLM"). Required.'
+    type: string
   - name: activation_event
     label: Activation event
     doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
     type: string
     default: "YYYYMM_Hazard_Location"
+  - name: download_date
+    label: Download date (optional)
+    doc: "Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated). Blank = the CLI's recent-scenes default (~past 10 days)."
+    type: string
+    default: ""
+  - name: level
+    label: Processing level
+    doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance, default), 1 = L1C (top-of-atmosphere)."
+    type: string
+    default: "2"
+  - name: limit
+    label: Search result limit
+    doc: "Maximum number of Copernicus search results to download for the tile/date."
+    type: int
+    default: 50
+  - name: cop_user_secret_name
+    label: Copernicus username secret name
+    doc: "Name of the MAAP secret holding your Copernicus username/email (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_USER."
+    type: string
+    default: "COP_USER"
+  - name: cop_pass_secret_name
+    label: Copernicus password secret name
+    doc: "Name of the MAAP secret holding your Copernicus password (store it once with maap.secrets.add_secret). The VALUE is fetched at run time and never appears in the job log. Default: COP_PASS."
+    type: string
+    default: "COP_PASS"
   - name: products
     label: Products
     doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
@@ -45,8 +75,9 @@ inputs:
     default: "true swir"
   - name: source_label
     label: Source
-    doc: "Data origin (required), e.g. USGS, NASA, NOAA, Copernicus."
+    doc: "Data origin (required), e.g. Copernicus, ESA."
     type: string
+    default: "Copernicus"
   - name: dst_crs
     label: Target CRS
     doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
@@ -62,16 +93,6 @@ inputs:
     doc: Generate and apply a cloud mask (-mask, L2A only).
     type: boolean
     default: false
-  - name: process_date
-    label: Process date (optional)
-    doc: "Only process this date, YYYYMMDD; leave blank for all dates."
-    type: string
-    default: ""
-  - name: process_tile
-    label: Process tile (optional)
-    doc: "Only process this tile, e.g. T17RLN; leave blank for all tiles."
-    type: string
-    default: ""
   - name: we_nstd
     label: Water-extent std devs (optional)
     doc: 'Space-separated std-dev thresholds for water extent, e.g. "1 1.5".'

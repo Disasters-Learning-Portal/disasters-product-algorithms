@@ -67,7 +67,7 @@ parser.add_argument('-tif_only', default=False, action="store_true", help='Skip 
 parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
 parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
 parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
-parser.add_argument('-dst_crs', type=str, default='EPSG:4326', help='Target CRS for COG output (default: EPSG:4326, use "native" to preserve original CRS).')
+parser.add_argument('-dst_crs', type=str, default='native', help='Target CRS for COG output. "native" (default) preserves the source projection (no warp); pass "EPSG:3857" (Web Mercator) for optimal VEDA titiler-pgstac tiling (also required by veda-data-airflow build_stac).')
 parser.add_argument('-event', type=str, default=None, help='Event name for filename prefix (e.g., 202512_Flood_WA). Adds formatted date suffix.')
 parser.add_argument('--metadata-json', type=str, default=None, help='Path to a JSON file of activation-event metadata (ACTIVATION_EVENT, SOURCE, PROCESSOR, ...) to embed as GeoTIFF tags on every output COG.')
 args=parser.parse_args()

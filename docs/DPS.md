@@ -87,7 +87,8 @@ positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
 run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
 `algorithm_config.yaml` default** (e.g. landsat `merge`/`mask`/`save_png`/
-`delete_cog` default `true`; satellogic `use_mask`/`visualize` default `false`).
+`delete_cog` default `true`; satellogic `visualize` default `false` — its `use_mask`
+boolean was removed in PR #45, masking is now hardcoded).
 This way an input left at its form default round-trips correctly **whether or not**
 MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
 config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the
@@ -108,7 +109,8 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   fetches source rasters from a CSDA vendor bucket keyed by `--date`/`--bucket`/
   `--prefix` (capella `csdap-capellaspace-delivery`, umbra `csda-data-vendor-umbra`,
   satellogic `csda-data-vendor-satellogic`). Satellogic's bucket/prefix are
-  hardcoded in the CLI (the inputs are informational only).
+  hardcoded in the CLI and have **no job inputs at all** (removed in PR #45, along
+  with `use_mask`/`dst_crs`/`compression_level`/`nodata`/`source_label`/`png_min`/`png_max`).
 - **Download-from-Copernicus (sentinel2):** **no file input** — run.sh downloads
   L2A/L1C scenes from the Copernicus Data Space (CDSE) by MGRS `tile`(s) +
   `download_date` via the `download_sentinel2` CLI, then runs `process_sentinel2`
@@ -309,9 +311,9 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | Check | Rule | Applies to |
 |---|---|---|
 | `validate_activation_event` | reject placeholder; require `YYYYMM_Hazard_Location` (`^[0-9]{4}(0[1-9]\|1[0-2])_[^_]+_.+$`) | all |
-| `require_nonempty source_label` | non-empty | all |
-| `validate_dst_crs` | `native` or `EPSG:<code>` | all |
-| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all |
+| `require_nonempty source_label` | non-empty | all except Satellogic¹ |
+| `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹ |
+| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹ |
 | `validate_number` (nodata / png_min / png_max / gamma / we_nstd) | numeric when set | all |
 | `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
 | `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
@@ -319,6 +321,7 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | `validate_regex date` | `YYYYMMDDHHMMSS` (Capella) / `YYYY-MM-DD HH:MM:SS` (Umbra, Satellogic) | SAR |
 | `validate_in_set level "L1D L1B"` | valid processing level | Satellogic |
 | `validate_int_range filter_size … 1 101` | integer window when `apply_filter` | Capella, Umbra |
+| `validate_in_set filter_size "3 5 7"` | odd window 3/5/7 (index Lee filter) | Satellogic¹ |
 | `normalize_token` + `validate_in_set sensor "capella umbra satellogic"` | case/space-tolerant selector; unknown value aborts before any S3 listing | list-dates |
 
 `--product` on the SAR sensors is already enforced by argparse `choices=` in the
@@ -327,18 +330,26 @@ CLI, so bash does not re-check it. Assertions live in
 
 - `activation_event` default is the placeholder **`YYYYMM_Hazard_Location`**, which
   run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
-- `source_label` is **required** (no default; the form marks it `*`).
+- `source_label` is **required** (no default; the form marks it `*`) — **except
+  Satellogic**, which hardcodes `csda` and dropped the input (PR #45).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
   (EPSG:3857 is NOT required for VEDA `build_stac`.)
+- **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/22
+  compression, and per-product nodata (composites `0`, indices `-9999`)** — those
+  inputs were removed, so their validators don't run for it. It adds `filter_size`
+  (Lee filter on indices, `{3,5,7}`, default 5) and accepts a comma-separated
+  `--date` (multi-date).
 
 ### Not yet hardened (documented follow-ups)
 
 - **Landsat & Satellogic exit 0 when a valid `date` matches no scene** (Sentinel-2
   correctly `sys.exit(1)`). Fixing needs a one-line Python change in each processor
   (raise / `sys.exit(1)` on an empty match) — out of scope for the bash guard layer.
-- **Minimal-inputs trims (deferred):** Satellogic `bucket`/`prefix` are informational
-  (CLI hardcodes them — no effect); Capella `product` is single-valued (`sigma`);
-  Capella/Umbra `bucket`/`prefix` could be locked run.sh constants like `S3_BUCKET`.
+- **Minimal-inputs trims:** Satellogic (PR #45) is **done** — dropped `bucket`/`prefix`
+  plus `use_mask`/`dst_crs`/`compression_level`/`nodata`/`png_min`/`png_max`/`source_label`
+  (all hardcoded) and added `filter_size` {3,5,7}. **Still deferred:** Capella `product`
+  is single-valued (`sigma`); Capella/Umbra `bucket`/`prefix` could be locked run.sh
+  constants like `S3_BUCKET`.
 
 ## Registering (from the MAAP hub)
 

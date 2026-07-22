@@ -320,8 +320,8 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
 | `validate_regex date` | `YYYYMMDDHHMMSS` (Capella) / `YYYY-MM-DD HH:MM:SS` (Umbra, Satellogic) | SAR |
 | `validate_in_set level "L1D L1B"` | valid processing level | Satellogic |
-| `validate_int_range filter_size … 1 101` | integer window when `apply_filter` | Capella, Umbra |
-| `validate_in_set filter_size "3 5 7"` | odd window 3/5/7 (index Lee filter) | Satellogic¹ |
+| `validate_int_range filter_size … 1 101` | integer window when `apply_filter` | Capella |
+| `validate_in_set filter_size "3 5 7"` | odd window 3/5/7 (always-on Lee filter) | Satellogic¹, Umbra² |
 | `normalize_token` + `validate_in_set sensor "capella umbra satellogic"` | case/space-tolerant selector; unknown value aborts before any S3 listing | list-dates |
 
 `--product` on the SAR sensors is already enforced by argparse `choices=` in the
@@ -339,6 +339,12 @@ CLI, so bash does not re-check it. Assertions live in
   inputs were removed, so their validators don't run for it. It adds `filter_size`
   (Lee filter on indices, `{3,5,7}`, default 5) and accepts a comma-separated
   `--date` (multi-date).
+- **² Umbra (PR #44)** made speckle filtering **always-on** — folded into the
+  `sigma`/`beta`/`gamma` calib functions, with the standalone `apply_filter` and the
+  DPS `apply_filter` boolean input both removed — and restricted `filter_size` to
+  `{3,5,7}` (default 5). It also **dropped the RCS product** (`sigma`/`beta`/`gamma`
+  only). The COG now carries raw dB (the old per-product percentile stretch is gone);
+  use `png_min`/`png_max` for display stretch.
 
 ### Not yet hardened (documented follow-ups)
 

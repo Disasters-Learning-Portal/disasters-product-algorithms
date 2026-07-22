@@ -18,8 +18,6 @@ from umbra.umbra_v2 import (
     sigmaCalib,
     betaCalib,
     gammaCalib,
-    rcsCalib,
-    apply_filter
 )
 
 from shared_utils.cog_utils import convert_to_cog
@@ -44,21 +42,19 @@ def main():
 
     parser.add_argument(
         "--product",
-        choices=["sigma", "beta", "gamma", "rcs"],
+        choices=["sigma", "beta", "gamma"],
         help="Calibration product to generate"
-    )
-    
-    parser.add_argument(
-        "--apply_filter",
-        action="store_true",
-        help="Apply filtering to the selected product"
     )
 
     parser.add_argument(
         "--filter_size",
         type=int,
+        choices=[3, 5, 7],
         default=5,
-        help="Lee filter window size (e.g. 3, 5, 7)"
+        help=(
+            "Lee speckle-filter window size. Filtering is always applied to "
+            "the backscatter (there is no opt-out); only the kernel is tunable."
+        ),
     )
 
     parser.add_argument(
@@ -213,46 +209,14 @@ def main():
 
         outfile = None
 
+        # Lee filtering is baked into each calibration (always on); the kernel
+        # comes straight from --filter_size.
         if args.product == "sigma":
-            outfile = sigmaCalib(scene_tifs, scene_out)
-
-            if args.apply_filter:
-                raw_outfile = outfile
-                outfile = apply_filter(outfile, size=args.filter_size)
-
-                # remove raw tif
-                if os.path.exists(raw_outfile):
-                    os.remove(raw_outfile)
-
+            outfile = sigmaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
         elif args.product == "beta":
-            outfile = betaCalib(scene_tifs, scene_out)
-
-            if args.apply_filter:
-                raw_outfile = outfile
-                outfile = apply_filter(outfile, size=args.filter_size)
-
-                if os.path.exists(raw_outfile):
-                    os.remove(raw_outfile)
-
+            outfile = betaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
         elif args.product == "gamma":
-            outfile = gammaCalib(scene_tifs, scene_out)
-
-            if args.apply_filter:
-                raw_outfile = outfile
-                outfile = apply_filter(outfile, size=args.filter_size)
-
-                if os.path.exists(raw_outfile):
-                    os.remove(raw_outfile)
-
-        elif args.product == "rcs":
-            outfile = rcsCalib(scene_tifs, scene_out)
-
-            if args.apply_filter:
-                raw_outfile = outfile
-                outfile = apply_filter(outfile, size=args.filter_size)
-
-                if os.path.exists(raw_outfile):
-                    os.remove(raw_outfile)
+            outfile = gammaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
 
         # COG Conversion Step
         if outfile:

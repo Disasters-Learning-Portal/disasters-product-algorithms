@@ -6,8 +6,8 @@ algorithm_description: >-
   Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response
   products. Fetches the source GEC raster for the requested date from the CSDA
   vendor S3 bucket (csda-data-vendor-umbra), applies the selected radiometric
-  calibration (sigma/beta/gamma/rcs), optionally Lee-filters it, reprojects, and
-  embeds activation-event GeoTIFF metadata tags.
+  calibration (sigma/beta/gamma) with an always-on Lee speckle filter, reprojects,
+  and embeds activation-event GeoTIFF metadata tags.
 code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 # MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
 # command paths MUST be prefixed with the repo directory name.
@@ -37,7 +37,7 @@ inputs:
     type: string
   - name: product
     label: Calibration product
-    doc: "Calibration product to generate: sigma, beta, gamma, or rcs."
+    doc: "Calibration product to generate: sigma, beta, or gamma."
     type: string
     default: "sigma"
   - name: bucket
@@ -50,14 +50,9 @@ inputs:
     doc: Key prefix within the vendor bucket to search for scenes.
     type: string
     default: "disasters"
-  - name: apply_filter
-    label: Apply Lee filter
-    doc: Apply a Lee speckle filter to the product.
-    type: boolean
-    default: false
   - name: filter_size
     label: Lee filter window size
-    doc: Lee filter window size (e.g. 3, 5, 7); only used when apply_filter is true.
+    doc: "Lee speckle-filter kernel. Filtering is always applied to the backscatter (no opt-out); only the kernel is tunable. Must be 3, 5, or 7."
     type: int
     default: 5
   - name: dst_crs

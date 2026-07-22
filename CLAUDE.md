@@ -37,6 +37,7 @@ the import path — so packages are still imported by their bare name (`import s
 - **One CLI flag for metadata**: every sensor CLI (capella/landsat/sentinel2/satellogic/umbra) accepts `--metadata-json <path>`. The parsing helper is `shared_utils.cog_metadata.load_metadata_json(path)` — one line of CLI integration: `metadata = load_metadata_json(args.metadata_json)`. Same parser, same validation, same error messages. The scaffolder template at [`tools/_templates/sensor/process_name.py.tmpl`](tools/_templates/sensor/process_name.py.tmpl) already wires it for future sensors.
 - **Sentinel-2 multi-tile convention**: in `notebooks/sentinel2_workflow.ipynb`, `TILE_ID` is a **list** (`["T17RLN", "T17RLM"]`, list even for one tile) and the download/process cells unpack it as `"-tile", *TILE_ID` into the `-tile nargs='*'` CLI arg — `TILE_ID` and `*TILE_ID` are a lockstep pair. The CONFIG cell also owns the credential load (`load_env_local` + `COP_USER`/`COP_PASS`) and `OUTPUT_DIR`/`os.makedirs`; downstream cells reference all three, so a config-cell refactor that drops any of them `NameError`s at runtime. Notebooks aren't linted/smoke-tested in CI — read the whole notebook after editing the config cell. Full rationale: `.clinerules.md` rule 23. The **DPS** Sentinel-2 job (`dps/sentinel2/`) is **download-from-Copernicus**, not file-input like Landsat: `run.sh` runs `download_sentinel2` (by `tile`+`download_date`) then `process_sentinel2`. Copernicus creds are pulled from **MAAP secrets** (`maap.secrets.get_secret` via `dps/_get_secret.py`, default names `COP_USER`/`COP_PASS`) at run time — **never job inputs** (so they never hit the job log). Don't reintroduce a `file_path_of_raw_data` File input or credential value inputs on the Sentinel-2 DPS configs.
 - **Satellogic vendor S3 layout**: the `csda-data-vendor-satellogic/disasters/` bucket ships **two coexisting raster layouts** and the pipeline handles both — (1) **vendor scenes** `<folder>/rasters/<stem>_{TOA,CLOUD,VISUAL}_0.tif` (uppercase, single tile; L1D folders carry a 3-digit capture-id, L1B don't), and (2) **analytic-tiled** `<stem>_<zone>_<col>_<row>_{analytic,cloud,visual}.tif` (lowercase, many tiles, no `rasters/` subdir). `group_satellogic_tifs` attaches cloud/visual companions by lowercased suffix but keeps the real-case S3 key; **masking is hardcoded per product (PR #45): composites never mask, indices (NDVI/NDWI/EVI) always mask + get a fresh NaN-aware `apply_lee_filter` (`--filter_size {3,5,7}`, default 5); the DPS job hardcodes `source_label=csda`/`dst_crs=native`/ZSTD-22/per-product nodata, and `--date` accepts a comma list (multi-date).** `build_output_name` is **regex-derived, not positional** → `Satellogic_<SAT>_<product>_[<captureid>_]<col>_<row>_<ISO-Zulu>.tif` (zone/level dropped, product from `--product`). Full rationale: `.clinerules.md` rule 24.
+- **Umbra SAR always-on speckle filter (PR #44)**: the Umbra pipeline mirrors the Satellogic hardcoding. `umbra_v2` calibrates `sigma`/`beta`/`gamma` only — **the RCS product was removed** (`rcsCalib` deleted, `"rcs"` dropped from `--product` choices). A dedicated NaN-aware `umbra_v2.lee_filter(img, size)` (same algorithm as `satellogic_v2.apply_lee_filter`) is applied to the **linear** backscatter **inside** each calib function *before* the `20*log10` dB conversion (then `np.clip(..., 1e-10, None)` keeps the log finite); the output name gains a `_filtered{size}` token (Capella convention). **Filtering is always on — there is no `--apply_filter` toggle anymore**; `--filter_size` is restricted to `choices=[3,5,7]` (default 5). The old separate `apply_filter()` (a post-step percentile dB stretch) was deleted — the COG now carries raw dB and any display stretch belongs at the PNG layer (`png_min`/`png_max`). The DPS job (`dps/umbra/`) drops the `apply_filter` input, validates `filter_size ∈ {3,5,7}` via `validate_in_set`, and always passes `--filter_size`. Full rationale: `.clinerules.md` rule 31.
 - Notebooks should be short — import from `shared_utils`, don't inline complex logic
 - All temp files go to `/tmp`, cleaned up in `finally` blocks
 - All raster hot paths set `NUM_THREADS=ALL_CPUS` (gdalwarp + rio cogeo) or `num_threads=os.cpu_count()` (rasterio.warp.reproject)
@@ -48,7 +49,7 @@ the import path — so packages are still imported by their bare name (`import s
 - `process_sentinel2` — Sentinel-2 product generation
 - `download_sentinel2` — Sentinel-2 data download
 - `process_satellogic` — Satellogic processing
-- `process_umbra` — Umbra SAR processing
+- `process_umbra` — Umbra SAR (sigma/beta/gamma; always-on Lee filter, `--filter_size {3,5,7}`)
 - `process_capella` — Capella SAR (sigma0 + optional Lee filter)
 - `summarize_raster` — Print min/max/mean/nodata stats for a single GeoTIFF band (`-b`, `-n`, `--json`)
 
@@ -100,6 +101,14 @@ jupyter notebook notebooks/
 ## API Reference
 
 See `docs/SHARED_UTILS_API.md` for complete function signatures.
+
+## Git & Attribution
+
+- **No AI/Claude attribution in any artifact.** Commit messages, PR titles/bodies, and code
+  comments must NOT contain `Co-Authored-By: Claude` (or any `Co-authored-by: Claude ...`)
+  trailers, "Generated with Claude Code", the 🤖 emoji, or a Claude avatar/co-author. The human
+  is the sole author; commit/PR messages contain only real human co-authors. This applies even
+  when a harness default would otherwise append such a line.
 
 ## Contributing
 

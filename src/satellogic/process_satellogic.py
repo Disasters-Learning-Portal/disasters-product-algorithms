@@ -107,6 +107,14 @@ def main():
     )
 
     parser.add_argument(
+        "--filter_size",
+        type=int,
+        choices=[3, 5, 7],
+        default=5,
+        help="Lee-filter window applied to indices (NDVI/NDWI/EVI). Odd only: 3, 5, or 7.",
+    )
+
+    parser.add_argument(
         "--metadata-json",
         type=str,
         default=None,
@@ -231,22 +239,25 @@ def main():
                     scene_tifs,
                     metadata,
                     args.output,
+                    filter_size=args.filter_size,
                 )
-    
+
             elif args.product == "ndwi":
                 nodata_setting = -9999
                 outfile = genNDWI(
                     scene_tifs,
                     metadata,
                     args.output,
+                    filter_size=args.filter_size,
                 )
-    
+
             elif args.product == "evi":
                 nodata_setting = -9999
                 outfile = genEVI(
                     scene_tifs,
                     metadata,
                     args.output,
+                    filter_size=args.filter_size,
                 )
     
             if outfile:

@@ -28,6 +28,9 @@ PRODUCT="truecolor"
 LEVEL="L1D"
 VISUALIZE="false"
 GAMMA="0.7"
+FILTER_SIZE="5"
+# SOURCE is hardcoded to "csda" for Satellogic (ticket #320); not a job input.
+SOURCE_LABEL="csda"
 ACTIVATION_EVENT="YYYYMM_Hazard_Location"
 ENABLE_S3_UPLOAD="false"
 # S3 destination is LOCKED for this version: not exposed as a job input and not
@@ -44,11 +47,9 @@ while [[ $# -gt 0 ]]; do
     --date)              DATE="$2"; shift 2;;
     --product)           PRODUCT="$2"; shift 2;;
     --level)             LEVEL="$2"; shift 2;;
-    --bucket)            BUCKET="$2"; shift 2;;
-    --prefix)            PREFIX="$2"; shift 2;;
     --gamma)             GAMMA="$2"; shift 2;;
+    --filter_size)       FILTER_SIZE="$2"; shift 2;;
     --activation_event)  ACTIVATION_EVENT="$2"; shift 2;;
-    --source_label)      "csda"; shift 2;;
     --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
     --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
     --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
@@ -59,11 +60,21 @@ done
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 require_nonempty date "${DATE}" "'YYYY-MM-DD HH:MM:SS', to select a Satellogic scene"
-validate_regex date "${DATE}" '^(?:[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},?)+$' "'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS...'"
+# One datetime, or a comma-separated list of them (multi-date selection). Uses
+# ERE grouping -- bash [[ =~ ]] does NOT support PCRE (?:...) non-capturing groups.
+validate_regex date "${DATE}" '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})*$' "'YYYY-MM-DD HH:MM:SS' or a comma-separated list 'YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,...'"
 validate_in_set level "${LEVEL}" "L1D L1B"
 validate_activation_event "${ACTIVATION_EVENT}"
 validate_number gamma "${GAMMA}"
+validate_in_set filter_size "${FILTER_SIZE}" "3 5 7"
 # --product (truecolor|colorir|ndvi|ndwi|evi) is already enforced by argparse choices=.
+
+# PNG stretch range is fixed per product family (feeds _finalize.sh): 8-bit color
+# composites are [0,255]; spectral indices are [-1,1].
+case "${PRODUCT}" in
+  truecolor|colorir) PNG_MIN="0";  PNG_MAX="255" ;;
+  *)                 PNG_MIN="-1"; PNG_MAX="1"   ;;
+esac
 
 echo "INFO: vendor source = s3://csda-data-vendor-satellogic/disasters (read by process_satellogic; AWS read access required)"
 
@@ -81,6 +92,7 @@ args=( --product "${PRODUCT}"
        --level "${LEVEL}"
        --output "${OUT_HOME}"
        --gamma "${GAMMA}"
+       --filter_size "${FILTER_SIZE}"
        --metadata-json "${META_JSON}" )
 [[ "${VISUALIZE}" == "true" ]] && args+=( --visualize )
 

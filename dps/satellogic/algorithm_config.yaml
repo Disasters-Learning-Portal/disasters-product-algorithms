@@ -56,6 +56,11 @@ inputs:
     doc: Gamma correction for RGB products (only used when visualize is true).
     type: float
     default: 0.7
+  - name: filter_size
+    label: Index filter kernel
+    doc: "Lee-filter window (pixels) applied to spectral indices (NDVI/NDWI/EVI). Odd only: 3, 5, or 7."
+    type: int
+    default: 5
   - name: activation_event
     label: Activation event
     doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."

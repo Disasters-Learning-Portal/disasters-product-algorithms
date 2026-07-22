@@ -1,6 +1,7 @@
 import os
 import re
 import numpy as np
+from scipy.ndimage import uniform_filter
 from osgeo import gdal
 from datetime import datetime
 import json
@@ -315,10 +316,48 @@ def build_output_name(in_file, out_dir, product):
     return f"{out_dir}/{'_'.join(tokens)}_{stamp}.tif"
 
 
+# Adaptive Lee smoothing filter for spectral indices (NaN-aware).
+#
+# A fresh implementation -- NOT capella.lee_filter (that SAR version is naive
+# about NaN and would smear the -9999 nodata sentinel across cloud/edge pixels).
+# Here the local mean/variance are computed by normalized convolution over the
+# *valid* pixels only, so masked/NaN pixels neither contaminate nor receive a
+# smoothed value; they stay NaN for the caller to fill with nodata. `size` is
+# the odd window edge in pixels (restricted to {3,5,7} by the CLI).
+def apply_lee_filter(arr, size):
+    valid = np.isfinite(arr)
+    if not valid.any():
+        return arr
+
+    v = valid.astype(np.float64)
+    filled = np.where(valid, arr, 0.0).astype(np.float64)
+
+    # uniform_filter returns the window MEAN; dividing the filled mean by the
+    # valid-fraction recovers the mean over valid pixels only (the window size
+    # cancels), so invalid neighbours are ignored rather than counted as zero.
+    frac = uniform_filter(v, size, mode="constant")
+    safe = frac > 0
+
+    local_mean = np.zeros_like(filled)
+    local_mean[safe] = uniform_filter(filled, size, mode="constant")[safe] / frac[safe]
+
+    local_sqr = np.zeros_like(filled)
+    local_sqr[safe] = uniform_filter(filled ** 2, size, mode="constant")[safe] / frac[safe]
+
+    local_var = np.clip(local_sqr - local_mean ** 2, 0.0, None)
+    overall_var = arr[valid].var()
+
+    weights = local_var / (local_var + overall_var + 1e-12)
+    out = local_mean + weights * (filled - local_mean)
+
+    return np.where(valid, out, np.nan)
+
+
 # Functions for specific products
 
 def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
+    # Color composites never mask clouds (ticket #320); skip the cloud fetch.
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
 
     red = load_reflectance_band(ds, 3, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
@@ -345,7 +384,8 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
 
 
 def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
+    # Color composites never mask clouds (ticket #320); skip the cloud fetch.
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -371,8 +411,9 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     return outfile
 
 
-def genNDVI(paths, meta, out="/tmp/s3_temp"):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
+def genNDVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+    # Indices always mask clouds (ticket #320).
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -384,6 +425,7 @@ def genNDVI(paths, meta, out="/tmp/s3_temp"):
 
     ndvi = (nir - red) / (nir + red + 1e-10)
     ndvi = np.clip(ndvi, -1, 1)
+    ndvi = apply_lee_filter(ndvi, filter_size)   # smooth valid pixels before nodata fill
     ndvi[np.isnan(ndvi)] = NODATA_FLOAT
 
     outfile = build_output_name(in_file, out, "ndvi")
@@ -393,8 +435,9 @@ def genNDVI(paths, meta, out="/tmp/s3_temp"):
     return outfile
 
 
-def genNDWI(paths, meta, out="/tmp/s3_temp"):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
+def genNDWI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+    # Indices always mask clouds (ticket #320).
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
     nir = load_reflectance_band(ds, 4, scale_factor)
     green = load_reflectance_band(ds, 2, scale_factor)
@@ -406,6 +449,7 @@ def genNDWI(paths, meta, out="/tmp/s3_temp"):
 
     ndwi = (green - nir) / (green + nir + 1e-10)
     ndwi = np.clip(ndwi, -1, 1)
+    ndwi = apply_lee_filter(ndwi, filter_size)   # smooth valid pixels before nodata fill
     ndwi[np.isnan(ndwi)] = NODATA_FLOAT
 
     outfile = build_output_name(in_file, out, "ndwi")
@@ -415,8 +459,9 @@ def genNDWI(paths, meta, out="/tmp/s3_temp"):
     return outfile
 
 
-def genEVI(paths, meta, out="/tmp/s3_temp"):
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask)
+def genEVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+    # Indices always mask clouds (ticket #320).
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
     blue = load_reflectance_band(ds, 1, scale_factor)
     red = load_reflectance_band(ds, 3, scale_factor)
@@ -431,6 +476,7 @@ def genEVI(paths, meta, out="/tmp/s3_temp"):
 
     evi = 2.5 * (nir - red) / (denom + 1e-10)
     evi = np.clip(evi, -1, 1)
+    evi = apply_lee_filter(evi, filter_size)   # smooth valid pixels before nodata fill
     evi[np.isnan(evi)] = NODATA_FLOAT
 
     outfile = build_output_name(in_file, out, "evi")

@@ -774,6 +774,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndvi)
+  out_ds.GetRasterBand(1).SetNoDataValue(999)
   out_ds = None
   
 
@@ -860,6 +861,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndwi)
+  out_ds.GetRasterBand(1).SetNoDataValue(999)
   out_ds = None
 
 
@@ -944,6 +946,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(mndwi)
+  out_ds.GetRasterBand(1).SetNoDataValue(999)
   out_ds = None
 
 
@@ -1049,6 +1052,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(evi)
+  out_ds.GetRasterBand(1).SetNoDataValue(999)
   out_ds = None
 
 
@@ -1131,6 +1135,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(nbr)
+  out_ds.GetRasterBand(1).SetNoDataValue(999)
   out_ds = None
 
 

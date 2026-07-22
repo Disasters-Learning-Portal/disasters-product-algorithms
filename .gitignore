@@ -43,3 +43,5 @@ build_stac_*.json
 
 shared_utils/scripts
 shared_utils/scripts/*
+# Playwright MCP browser-automation artifacts (console logs + page snapshots)
+.playwright-mcp/

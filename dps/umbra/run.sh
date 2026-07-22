@@ -25,7 +25,6 @@ DATE=""
 PRODUCT="sigma"
 BUCKET="csda-data-vendor-umbra"
 PREFIX="disasters"
-APPLY_FILTER="false"
 FILTER_SIZE="5"
 DST_CRS="native"
 ACTIVATION_EVENT="YYYYMM_Hazard_Location"
@@ -58,7 +57,6 @@ while [[ $# -gt 0 ]]; do
     --nodata)            NODATA="$2"; shift 2;;
     --png_min)           PNG_MIN="$2"; shift 2;;
     --png_max)           PNG_MAX="$2"; shift 2;;
-    --apply_filter)      if [[ "${2:-}" =~ ^(true|false)$ ]]; then APPLY_FILTER="$2"; shift 2; else APPLY_FILTER="true"; shift; fi ;;
     --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
     --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
     --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
@@ -73,8 +71,9 @@ validate_activation_event "${ACTIVATION_EVENT}"
 require_nonempty source_label "${SOURCE_LABEL}" "e.g. USGS, NASA, NOAA, Umbra"
 validate_dst_crs "${DST_CRS}"
 validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
-# --product (sigma|beta|gamma|rcs) is already enforced by argparse choices=.
-[[ "${APPLY_FILTER}" == "true" ]] && validate_int_range filter_size "${FILTER_SIZE}" 1 101
+# --product (sigma|beta|gamma) is already enforced by argparse choices=.
+# Speckle filtering is always on; only the kernel is tunable (3, 5, or 7).
+validate_in_set filter_size "${FILTER_SIZE}" "3 5 7"
 [[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
 [[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
 [[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
@@ -93,10 +92,10 @@ args=( --product "${PRODUCT}"
        --bucket "${BUCKET}"
        --prefix "${PREFIX}"
        --output "${OUT_HOME}"
+       --filter_size "${FILTER_SIZE}"
        -dst_crs "${DST_CRS}"
        -compression_level "${COMPRESSION_LEVEL}"
        --metadata-json "${META_JSON}" )
-[[ "${APPLY_FILTER}" == "true" ]] && args+=( --apply_filter --filter_size "${FILTER_SIZE}" )
 [[ -n "${NODATA}" ]]             && args+=( -nodata "${NODATA}" )
 
 conda run --live-stream --name disasters_dps process_umbra "${args[@]}"

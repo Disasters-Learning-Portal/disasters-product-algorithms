@@ -60,8 +60,8 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
 def group_umbra_scenes(tifs: list[str]) -> list[list[str]]:
     """Split pooled Umbra tifs into one group per scene (one per GEC band).
 
-    The calibration functions (``sigmaCalib``/``betaCalib``/``gammaCalib``/
-    ``rcsCalib``) read the ``_gec.tif`` band, so each GEC file is a distinct
+    The calibration functions (``sigmaCalib``/``betaCalib``/``gammaCalib``)
+    read the ``_gec.tif`` band, so each GEC file is a distinct
     scene; folders without one contribute nothing. Returns one single-element
     ``[gec]`` list per GEC band so the caller loops and emits one COG per scene
     instead of silently keeping only the first.
@@ -115,9 +115,47 @@ def report_umbra_scenes(
     scenes.sort(key=lambda s: s["added_to_s3"], reverse=True)
     return scenes
 
-def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+
+def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
+    """NaN-aware Lee speckle filter (window ``size`` x ``size``).
+
+    Mirrors ``satellogic_v2.apply_lee_filter``: invalid (non-finite) pixels are
+    ignored rather than counted as zero, so a nodata border doesn't bleed into
+    the filtered interior. Applied to the linear backscatter before the dB
+    conversion in the calibration functions below.
+    """
+    valid = np.isfinite(img)
+    if not valid.any():
+        return img
+
+    v = valid.astype(np.float64)
+    filled = np.where(valid, img, 0.0).astype(np.float64)
+
+    # uniform_filter returns the window MEAN; dividing the filled mean by the
+    # valid-fraction recovers the mean over valid pixels only (window size
+    # cancels), so invalid neighbours are ignored rather than counted as zero.
+    frac = uniform_filter(v, size, mode="constant")
+    safe = frac > 0
+
+    local_mean = np.zeros_like(filled)
+    local_mean[safe] = uniform_filter(filled, size, mode="constant")[safe] / frac[safe]
+
+    local_sqr = np.zeros_like(filled)
+    local_sqr[safe] = uniform_filter(filled ** 2, size, mode="constant")[safe] / frac[safe]
+
+    local_var = np.clip(local_sqr - local_mean ** 2, 0.0, None)
+    overall_var = img[valid].var()
+
+    weights = local_var / (local_var + overall_var + 1e-12)
+    out = local_mean + weights * (filled - local_mean)
+
+    return np.where(valid, out, np.nan)
+
+
+def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
+    os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
     if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
@@ -143,25 +181,32 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     sigma_val = ds.GetMetadataItem('DN_TO_SIGMA')
     print(sigma_val)
     print(type(sigma_val))
-    
-    sigma_0 = 20. * np.log10(float(sigma_val) * dn)
-    print(np.max(sigma_0), np.min(sigma_0))
-    
+
+    # Filter the linear backscatter (always on), then convert to dB. Clipping
+    # keeps log10 finite where the filtered value would otherwise hit 0.
+    sigma_linear = float(sigma_val) * dn
+    sigma_linear = lee_filter(sigma_linear, size=filter_size)
+    sigma_linear = np.clip(sigma_linear, 1e-10, None)
+    sigma_0 = 20. * np.log10(sigma_linear)
+    print(np.nanmax(sigma_0), np.nanmin(sigma_0))
+
     outfile = (
         f"{save_location}/"
         f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
         f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
         f"sigma0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"_filtered{filter_size}.tif"
     )
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
     return outfile
     
-def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
+    os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
     if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
@@ -187,25 +232,30 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
     beta_val = ds.GetMetadataItem('DN_TO_BETA')
     print(beta_val)
     print(type(beta_val))
-  
-    beta_0 = 20. * np.log10(float(beta_val) * dn)
-    print(np.max(beta_0), np.min(beta_0))
+
+    beta_linear = float(beta_val) * dn
+    beta_linear = lee_filter(beta_linear, size=filter_size)
+    beta_linear = np.clip(beta_linear, 1e-10, None)
+    beta_0 = 20. * np.log10(beta_linear)
+    print(np.nanmax(beta_0), np.nanmin(beta_0))
 
     outfile = (
         f"{save_location}/"
         f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
         f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
         f"beta0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"_filtered{filter_size}.tif"
     )
     dump_geotiff_float(outfile, beta_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
+def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
+    os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
     if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
@@ -231,107 +281,25 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp")
     gamma_val = ds.GetMetadataItem('DN_TO_GAMMA')
     print(gamma_val)
     print(type(gamma_val))
-  
-    gamma_0 = 20. * np.log10(float(gamma_val) * dn)
-    print(np.max(gamma_0), np.min(gamma_0))
+
+    gamma_linear = float(gamma_val) * dn
+    gamma_linear = lee_filter(gamma_linear, size=filter_size)
+    gamma_linear = np.clip(gamma_linear, 1e-10, None)
+    gamma_0 = 20. * np.log10(gamma_linear)
+    print(np.nanmax(gamma_0), np.nanmin(gamma_0))
 
     outfile = (
         f"{save_location}/"
         f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
         f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
         f"gamma0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
+        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"_filtered{filter_size}.tif"
     )
     dump_geotiff_float(outfile, gamma_0, projref, in_geo)
 
     print(f"Generation completed, file saved to {outfile}")
     return outfile
-
-def rcsCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp"):
-    if save_location.endswith("/"):
-        save_location = save_location[:-1]
-    print("Collecting needed files...")
-    in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
-    if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
-        print("GEC file not found, downloading from s3")
-        in_file = download_s3_file(in_filepath)
-    else:
-        print("GEC file found, proceeding")
-        in_file = f'/tmp/s3_temp/{local_tif_basename(in_filepath)}'
-    print('Generating RCS Naught')
-    print("\n\t* Opening GEC File")
-    ds = gdal.Open(in_file)
-    cols = ds.RasterXSize
-    rows = ds.RasterYSize
-    in_geo = ds.GetGeoTransform()
-    projref = ds.GetProjectionRef()
-    dn = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
-    print(np.max(dn), np.min(dn))
-    #print(cols, rows)
-
-    metadata = ds.GetMetadata()
-    print(metadata)
-
-    rcs_val = ds.GetMetadataItem('DN_TO_RCS')
-    print(rcs_val)
-    print(type(rcs_val))
-  
-    rcs_0 = 20. * np.log10(float(rcs_val) * dn)
-    print(np.max(rcs_0), np.min(rcs_0))
-
-    outfile = (
-        f"{save_location}/"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
-        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
-        f"rcs0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}.tif"
-    )
-    dump_geotiff_float(outfile, rcs_0, projref, in_geo)
-
-    print(f"Generation completed, file saved to {outfile}")
-    return outfile
-
-def apply_filter(input_tif, size=5, output_tif=None):
-    with rio.open(input_tif) as src:
-        img = src.read(1).astype(float)
-        profile = src.profile.copy()
-
-    # preserve nodata mask
-    mask = np.isnan(img)
-
-    # percentile stretch
-    if 'rcs' in input_tif:
-        out_min, out_max = -40, 0
-    else:
-        out_min, out_max = -25, 10
-
-    p_low, p_high = np.nanpercentile(img, (2, 98))
-
-    img = np.interp(img, (p_low, p_high), (out_min, out_max))
-
-    img_mean = uniform_filter(img, (size, size))
-    img_sqr_mean = uniform_filter(img**2, (size, size))
-    img_variance = img_sqr_mean - img_mean**2
-
-    overall_variance = np.nanvar(img)
-
-    eps = 1e-10
-    weights = img_variance / (img_variance + overall_variance + eps)
-
-    img_out = img_mean + weights * (img - img_mean)
-
-    # restore nodata
-    img_out[mask] = np.nan
-
-    if output_tif is None:
-        output_tif = input_tif.replace(".tif", "_filtered.tif")
-
-    profile.update(dtype=rio.float32, nodata=np.nan)
-
-    with rio.open(output_tif, "w", **profile) as dst:
-        dst.write(img_out.astype(np.float32), 1)
-
-    return output_tif
 
 ######################################################################
 #f_path = '/mnt/disasters1/data/esops/eventData/2026/wintWeatherJan2026/umbra/Greenville'
@@ -343,6 +311,3 @@ def apply_filter(input_tif, size=5, output_tif=None):
 #sigmaCalib(infile[0])
 #betaCalib(infile[0])
 #gammaCalib(infile[0])
-#rcsCalib(infile[0])
-
-#genNDVI(infile[0], cloudfile[0], sunzen)

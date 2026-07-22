@@ -111,8 +111,9 @@ def main():
         default="native",
         help=(
             "Target CRS for COG output. 'native' (default) preserves the "
-            "source UTM projection; pass 'EPSG:3857' for Web Mercator "
-            "(required by veda-data-airflow build_stac)."
+            "source UTM projection; pass 'EPSG:3857' (Web Mercator) for "
+            "optimal VEDA titiler-pgstac tiling (also required by "
+            "veda-data-airflow build_stac)."
         ),
     )
 

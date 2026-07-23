@@ -76,7 +76,7 @@ inputs:
     default: 22
   - name: nodata
     label: No-data value (optional)
-    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    doc: "Override the no-data value; leave blank to use the default (-9999.0). SAR dB backscatter uses -9999.0, never 0 (0 dB is a legitimate value)."
     type: string
     default: ""
   - name: enable_s3_upload

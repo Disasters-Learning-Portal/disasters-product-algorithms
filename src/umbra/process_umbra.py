@@ -81,7 +81,7 @@ def main():
     )
 
     # COG options
-    parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
+    parser.add_argument('-nodata', type=float, default=-9999.0, help='No-data value for COG outputs (default -9999.0). SAR backscatter is float32 dB where 0 dB is a legitimate value, so nodata must never be 0.')
     parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
     parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
     parser.add_argument(

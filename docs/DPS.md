@@ -344,7 +344,9 @@ CLI, so bash does not re-check it. Assertions live in
   DPS `apply_filter` boolean input both removed — and restricted `filter_size` to
   `{3,5,7}` (default 5). It also **dropped the RCS product** (`sigma`/`beta`/`gamma`
   only). The COG now carries raw dB (the old per-product percentile stretch is gone);
-  use `png_min`/`png_max` for display stretch.
+  use `png_min`/`png_max` for display stretch. Both **Capella & Umbra** default
+  `-nodata` to **-9999.0** (float32 dB backscatter — 0 dB is a legitimate value, so
+  nodata is never 0); leave the DPS `nodata` input blank to use it.
 
 ### Not yet hardened (documented follow-ups)
 

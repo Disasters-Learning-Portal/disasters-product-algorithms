@@ -87,8 +87,9 @@ def main():
     parser.add_argument(
         "-nodata",
         type=float,
-        default=None,
-        help="No-data value for COG outputs"
+        default=-9999.0,
+        help="No-data value for COG outputs (default -9999.0). SAR backscatter is "
+             "float32 dB where 0 dB is a legitimate value, so nodata must never be 0."
     )
 
     parser.add_argument(

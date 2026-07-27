@@ -180,6 +180,12 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
         dates = [datetime.strptime(x.split("_")[5], "%Y%m%d%H%M%S") for x in subdirs]
         dates.sort()
         return dates
+    elif "skysat" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        datestrings = set([f"{x[0]}_{x[1]}" for y in filtered_files for x in [y.split("/")[-1].split("_")]])
+        dates = [datetime.strptime(x, "%Y%m%d_%H%M%S") for x in datestrings]
+        dates.sort()
+        return dates
     else:
         raise ValueError(f"The provided bucket '{bucket}' was not recognized as a valid vendor.")
 

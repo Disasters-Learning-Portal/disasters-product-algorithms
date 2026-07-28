@@ -606,7 +606,10 @@ def _read_vsimem(vsimem_path: str) -> bytes:
 
     data = gdal.VSIFReadL(1, file_size, vsi_file)
     gdal.VSIFCloseL(vsi_file)
-    return data
+    # GDAL's VSIFReadL returns a bytearray; normalize to bytes so callers can
+    # hand the result straight to rasterio.io.MemoryFile / boto3 put_object
+    # (MemoryFile rejects a bytearray). Matches the -> bytes annotation.
+    return bytes(data) if data else b""
 
 
 def _vsimem_to_file(vsimem_path: str, file_path: str) -> None:

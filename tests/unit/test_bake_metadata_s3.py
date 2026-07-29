@@ -80,6 +80,8 @@ def _run(cells, dry, csv_path):
     ns["INPUT"] = "s3://{}/{}".format(BUCKET, PREFIX)
     ns["DRY_RUN"] = dry
     ns["CSV_PATH"] = str(csv_path)
+    ns["SCAN_WORKERS"] = 2
+    ns["PROCESS_WORKERS"] = 2
     for c in cells:
         exec(c, ns)
     return ns
@@ -113,6 +115,20 @@ def _pixels(b):
         return s_.read()
 
 
+def _plain_geotiff():
+    # A non-COG GeoTIFF (untiled, no overviews) -> cog_validate returns False. Returns (bytes, data).
+    from rasterio.transform import from_bounds
+    from rasterio.crs import CRS
+    data = np.random.RandomState(0).uniform(0, 1, (1, 1024, 1024)).astype("float32")
+    prof = dict(driver="GTiff", height=1024, width=1024, count=1, dtype="float32",
+                crs=CRS.from_epsg(3857), transform=from_bounds(0, 0, 1024, 1024, 1024, 1024),
+                nodata=-9999.0, tiled=False, compress="deflate")
+    with MemoryFile() as mf:
+        with mf.open(**prof) as dst:
+            dst.write(data)
+        return mf.read(), data
+
+
 @mock_aws
 def test_scan_classifies_and_dry_run_is_readonly(tmp_path):
     s3 = boto3.client("s3", region_name="us-west-2")
@@ -126,6 +142,7 @@ def test_scan_classifies_and_dry_run_is_readonly(tmp_path):
     assert reasons[DUPA_KEY] == "name_collision"
     assert reasons[DUPB_KEY] == "name_collision"
     assert ns["already_baked"] == []
+    assert ns["matched"][0]["is_cog"] is True   # gaia fixture is already a valid COG
     # dry run must touch nothing in S3
     assert ns["results"] == []
     assert not _exists(s3, NEW_KEY)
@@ -182,7 +199,7 @@ def test_bulk_fix_bakes_in_place_from_csv(tmp_path):
         if r["filename"] == "randomscene.tif":
             r["ACTIVATION_EVENT"] = "202601_Quake_PR"
     with open(csvp, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["bucket", "key", "filename", "reason", "ACTIVATION_EVENT"])
+        w = csv.DictWriter(f, fieldnames=["bucket", "key", "filename", "reason", "cog", "ACTIVATION_EVENT"])
         w.writeheader()
         w.writerows(rows)
 
@@ -197,3 +214,29 @@ def test_bulk_fix_bakes_in_place_from_csv(tmp_path):
     assert validate_cog_in_memory(rb, "r.tif")[0]
     # blank-event dup rows were skipped, not baked
     assert _tags(_obytes(s3, DUPA_KEY)).get("ACTIVATION_EVENT") is None
+
+
+@mock_aws
+def test_non_cog_input_flagged_and_converted(tmp_path):
+    from shared_utils.cog_metadata import validate_cog_in_memory
+    plain_bytes, data = _plain_geotiff()
+    assert not validate_cog_in_memory(plain_bytes, "p.tif")[0]   # precondition: input is NOT a COG
+    s3 = boto3.client("s3", region_name="us-west-2")
+    s3.create_bucket(Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": "us-west-2"})
+    src_key = PREFIX + "202510_Flood_AK_plain_2025-01-11.tif"
+    new_key = PREFIX + "plain_2025-01-11.tif"
+    s3.put_object(Bucket=BUCKET, Key=src_key, Body=plain_bytes)
+
+    # dry scan flags it as not-a-COG
+    dns = _run([SCAN, REPORT, EXECUTE], dry=True, csv_path=tmp_path / "c.csv")
+    assert [m["is_cog"] for m in dns["matched"]] == [False]
+
+    # execute converts it to a COG, in place (renamed, old key deleted)
+    ns = _run([SCAN, REPORT, EXECUTE], dry=False, csv_path=tmp_path / "c.csv")
+    assert [r["status"] for r in ns["results"]] == ["success"]
+    assert ns["results"][0]["converted"] is True
+    assert _exists(s3, new_key) and not _exists(s3, src_key)
+    b = _obytes(s3, new_key)
+    assert validate_cog_in_memory(b, "n.tif")[0]                 # output is now a valid COG
+    assert _tags(b)["ACTIVATION_EVENT"] == "202510_Flood_AK"
+    assert np.array_equal(_pixels(b), data)                      # pixels bit-identical

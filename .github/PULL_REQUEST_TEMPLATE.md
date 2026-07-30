@@ -41,9 +41,9 @@ Useful docs:
 - [ ] If a new pip dependency: added to `pyproject.toml [project.dependencies]`.
 - [ ] If a new conda dependency:
   - [ ] Added to `dev-conda-deps.txt` (local dev + CI smoke env).
-  - [ ] If NOT already in the Pangeo base image: also added to
-        `hub-conda-deps.txt` (the `sync-conda-deps` workflow will open a
-        PR in `pangeo-notebook-veda-image` after this merges to `main`).
+  - [ ] If needed in the hub image (not already in the MAAP `2i2c/pangeo`
+        base): also added to `image/environment.yml` (triggers a hub
+        rebuild on merge to `dev`/`main`).
 - [ ] If touching the COG output path or `convert_to_cog` defaults:
       confirmed downstream `build_stac` compatibility (see `CLAUDE.md`
       "Critical Constraints" — Web Mercator default is load-bearing).

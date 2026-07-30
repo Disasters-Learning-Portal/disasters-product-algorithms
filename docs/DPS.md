@@ -116,7 +116,16 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   `download_date` via the `download_sentinel2` CLI, then runs `process_sentinel2`
   on the downloaded dir. Copernicus credentials are read from **MAAP secrets** at
   run time (see "Sentinel-2 credentials via MAAP secrets" below) — never job inputs,
-  so they never appear in the job parameters or log.
+  so they never appear in the job parameters or log. **If a job downloads fewer
+  scenes than you expect for the tile list**, check the per-tile search lines the
+  download prints to the job log (`tile T17RLN → N product(s)` / `→ 0 products ⚠` /
+  `→ search FAILED (…) ⚠`, plus a missing-tiles summary — added 2026-07-29). A
+  `0 products` tile usually just had no acquisition on that `download_date`
+  (Sentinel-2 revisit ≈ 5 days ⇒ a single date only catches that day's orbit
+  swath — widen the date, or check `level` 1=L1C vs 2=L2A); a `search FAILED`
+  line is a transient CDSE API error — re-run. There is **no per-file cap** (the
+  `limit` input is the OData `$top` page size, default 50). See `.clinerules.md`
+  rule 34.
 
 ### Vendor read access — the `AccessDenied` fix (2026-07-20)
 

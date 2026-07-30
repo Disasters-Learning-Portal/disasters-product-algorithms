@@ -229,6 +229,14 @@ create_cog_with_metadata(
 
 Automatically adds `PROCESSING_DATE` if not present in metadata dict.
 
+**Thread-safe (bytes path).** The in-memory (`bytes`) route builds the COG in GDAL
+`/vsimem` using **per-call `uuid`-suffixed paths**, so it is safe to fan out over a
+thread pool (e.g. `map_threaded`). Before 2026-07-30 it used constant vsimem paths,
+which raced under concurrency and produced spurious `IndexError` /
+`RuntimeError('unknown error occurred')` / `IFD offset > 300` / `Invalid data type for
+tag TileOffsets` errors. Pinned by
+`tests/unit/test_cog_metadata.py::TestInMemoryThreadSafety`.
+
 #### `load_metadata_json(path: Optional[str]) -> Optional[Dict[str, str]]`
 
 Parse a JSON file into a metadata dict, intended for sensor-CLI integration

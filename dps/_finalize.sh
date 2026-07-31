@@ -42,8 +42,7 @@ PY
 import os, sys, glob
 from shared_utils import upload_file_to_s3
 bucket, prefix, out_home = sys.argv[1], sys.argv[2], sys.argv[3]
-files = sorted(glob.glob(os.path.join(out_home, "**", "*.tif"), recursive=True) +
-               glob.glob(os.path.join(out_home, "**", "*.png"), recursive=True))
+files = sorted(glob.glob(os.path.join(out_home, "**", "*.tif"), recursive=True))
 for f in files:
     # Preserve the sub-path under OUT_HOME in the S3 key (mirrors the output/
     # cp -r tree) so same-named COGs in different scene/product subdirs don't

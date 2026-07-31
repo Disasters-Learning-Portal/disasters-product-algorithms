@@ -18,7 +18,7 @@ the import path — so packages are still imported by their bare name (`import s
 `from sentinel2.sentinel2_functions import *`) and the console scripts keep their
 `<pkg>.cli:<verb>_cli` targets. Importing requires an install (`pip install -e .`).
 
-- `src/shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata)
+- `src/shared_utils/` — Reusable processing library (COG conversion, S3 ops, validation, metadata, MAAP staging upload)
 - `src/landsat/`, `src/sentinel2/`, `src/satellogic/`, `src/umbra/`, `src/capella/` — Sensor-specific product generation (CLI entry points)
 - `src/raster_tools/` — Standalone, sensor-agnostic raster utilities exposed as CLIs (currently: `summarize_raster`)
 - `notebooks/` — Operator-facing Jupyter templates for disaster event processing

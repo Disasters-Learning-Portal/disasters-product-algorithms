@@ -27,6 +27,28 @@ from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 
 
+@pytest.fixture(scope="session")
+def report_dates():
+    """Load ``dps/list_dates/report_dates.py`` by path.
+
+    It's the list-dates DPS discovery tool's entry point -- a loose script under
+    ``dps/`` (cloned by MAAP at run time), NOT part of the installed package, so
+    it can't be imported by name. Loading it here lets the per-sensor report
+    tests exercise its table/CSV formatting.
+    """
+    import importlib.util
+    import pathlib
+
+    path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "dps" / "list_dates" / "report_dates.py"
+    )
+    spec = importlib.util.spec_from_file_location("list_dates_report_dates", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture
 def uint8_geotiff(tmp_path):
     """64x64 uint8 3-band RGB GeoTIFF in EPSG:32610, nodata=0"""

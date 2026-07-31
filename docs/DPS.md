@@ -129,45 +129,32 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   `limit` input is the OData `$top` page size, default 50). See `.clinerules.md`
   rule 34.
 
-### Vendor read access — the `AccessDenied` fix (2026-07-20)
+### Vendor read access
 
-A DPS worker runs as **`dps-verdi-role`** (account `884094767067`). That role can
-*write* to `nasa-disasters` (the `_finalize.sh` upload uses plain
-`boto3.client("s3")` = ambient creds) but has **no `s3:ListBucket`** on the
-cross-account CSDA vendor buckets — so an un-assisted `list-dates` / SAR fetch dies
-with `AccessDenied ... s3:ListBucket ... csdap-*`. The hub reads those same buckets
-as the **`disasters-prod`** role (account `515966502221`, granted via EKS/IRSA). So
-DPS must **assume `disasters-prod`** for vendor reads.
+A DPS worker runs as **`dps-verdi-role`** (account `884094767067`). It reads the
+CSDA vendor buckets with its **ambient credentials** — `s3utils._read_session()`
+returns a plain `boto3.Session` (default credential chain), and the SAR / list-dates
+run.sh no longer set any read-role env. So the **worker role must have direct read
+access** (`s3:ListBucket` + `s3:GetObject`) on the cross-account CSDA buckets; if it
+doesn't, `list-dates` / SAR fetch dies with `AccessDenied ... s3:ListBucket ...
+csdap-*`, and the fix is an **IAM grant on `dps-verdi-role` (or the bucket policy)**,
+not anything in this repo.
 
-This is now wired by default: **`dps/_env.sh`** exports
-`READ_ROLE_ARN=arn:aws:iam::515966502221:role/disasters-prod` and is `source`d by
-the four vendor-reading run.sh (capella / umbra / satellogic / list_dates), right
-after `_validate.sh`. `s3utils._read_session()` then assumes it for **every** vendor
-read (list + download), passing **no `ExternalId`**. `${READ_ROLE_ARN:-…}` lets an
-operator override it; set `READ_ROLE_EXTERNAL_ID` too only if you switch to an
-ExternalId-gated role. The upload path is untouched — it stays on `dps-verdi-role`.
+> **History (removed 2026-07-31).** An earlier approach (2026-07-20) had
+> `dps/_env.sh` export `READ_ROLE_ARN=…:role/disasters-prod` and had
+> `_read_session()` **assume** that role for every vendor read. That path **broke
+> vendor reads** (on the hub the ambient identity already *is* `disasters-prod`, so
+> the assume self-assumed and failed; on DPS it depended on an untestable manual
+> trust-policy edit) and was **removed entirely** — `_env.sh` is deleted, the
+> `READ_ROLE_ARN`/`sts:AssumeRole` branch is gone from `_read_session`, and the
+> per-sensor run.sh no longer source `_env.sh`. There is no role assumption in the
+> vendor-read path anymore. (The unrelated `aws_credentials.py` **upload** assume in
+> `s3_operations.py` — used by notebook/hub uploads to `nasa-disasters` — is a
+> separate mechanism and was left in place.)
 
-- **NOT a library default, on purpose.** On the hub the ambient identity already
-  *is* `disasters-prod`, so an unconditional assume would force a self-assume, which
-  the role's trust policy rejects. Keep the export DPS-only (that's why it lives in
-  `dps/_env.sh`, not in `_read_session`).
-- **One infra prerequisite, not settable from this repo.** `disasters-prod`'s
-  **trust policy** must let `dps-verdi-role` assume it — add a statement alongside
-  the existing EKS `AssumeRoleWithWebIdentity` one:
-  ```json
-  { "Effect": "Allow",
-    "Principal": { "AWS": "arn:aws:iam::884094767067:role/dps-verdi-role" },
-    "Action": "sts:AssumeRole" }
-  ```
-  No `ExternalId`. This is a manual IAM edit in account `515966502221`.
-- **You cannot test the assume from the hub notebook** — the notebook *is*
-  `disasters-prod`, and a role can't assume itself, so that `AccessDenied ...
-  sts:AssumeRole` is expected and tells you nothing. Test inside a DPS job.
-- **Error taxonomy after a re-register** (the log tells you exactly where you are):
-  scene table + CSV = fixed; `AccessDenied ... sts:AssumeRole` = code is assuming
-  correctly, the trust grant above is still missing; `AccessDenied ... s3:ListBucket`
-  (unchanged) = the rebuild didn't pick up the push, i.e. the code isn't on
-  `origin/dev` yet (the #1 "re-registered but nothing changed" trap).
+The `_finalize.sh` **upload** path is likewise plain ambient `boto3` (writes to
+`nasa-disasters`) / MAAP workspace creds (writes to `nasa-disasters-staging`) — it
+never used the removed read-role.
 
 ## Finding available scenes / dates (`aws s3 ls`)
 
@@ -237,9 +224,11 @@ algorithm**, not a per-sensor toggle. Pick a **`sensor`** input (capella | umbra
 satellogic) and Submit: `run.sh` **normalizes** the selector (trims whitespace and
 folds case via `normalize_token`, so `Capella`/` umbra ` work) then **validates**
 it — an unrecognized `sensor`/`level` **aborts in ~0s, before any S3 listing or
-dispatch**, so the job never "runs" on bad criteria. On a clean selector it
-dispatches to `process_<sensor> --list_dates --output output`, a **report-only**
-job — no COG, no upload. (Satellogic's report is **level-scoped**: `level` is
+dispatch**, so the job never "runs" on bad criteria. On a clean selector it runs
+the algorithm's own **`report_dates.py --sensor <sensor> --output output`**, a
+**report-only** job — no COG, no upload. Discovery lives ONLY here now: the
+per-sensor `process_<sensor>` CLIs no longer carry a `--list_dates` flag.
+(Satellogic's report is **level-scoped**: `level` is
 validated up front too, so set it before submitting; for capella/umbra a
 deliberately-set `level` is ignored with a `NOTE` in the log.) If the DPS worker
 lacks read access to the vendor bucket, the report path prints **one actionable
@@ -266,14 +255,15 @@ extension panel (the extension only links to a job's output folder; it has no
 inline text/HTML view). So there is no auto-popup either way — you still submit the
 discovery job, wait, then open the log or the CSV.
 
-Mechanics (the `list-dates` algorithm reuses each sensor's kept `process_<sensor> --list_dates` CLI path):
+Mechanics (`dps/list_dates/report_dates.py` calls each sensor's
+`report_<sensor>_scenes()` helper directly):
 `shared_utils.s3utils.retrieve_s3_file_list_with_timestamps(bucket, prefix)`
 returns `(key, LastModified)` pairs; each sensor's
 `report_<sensor>_scenes()` (`capella_v2` / `umbra_v2` / `satellogic_v2`) groups by
 scene folder — Capella `parts[1]`, Umbra `parts[2]`, Satellogic `parts[1]` filtered
 by `level` — keeps the newest `LastModified` per scene, parses the acquisition date
 from the folder name, and returns dicts (`date`/`scene`/`acquired`/`added_to_s3`)
-sorted most-recent-delivered first; `process_<sensor> --list_dates` formats the
+sorted most-recent-delivered first; `report_dates.py` formats the
 table and writes the CSV to `--output` (run.sh passes `--output output`). The
 `date` field is pre-formatted to the sensor's own `--date` grammar (Capella
 `YYYYMMDDHHMMSS`, Umbra/Satellogic `YYYY-MM-DD HH:MM:SS`) so it round-trips as

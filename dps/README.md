@@ -42,10 +42,11 @@ concrete examples of the pattern — copy the closest one when adding a new algo
 
 One algorithm deliberately deviates: **`list_dates/`** (registered as `list-dates`)
 is a **discovery** tool, not a processing algorithm — it takes a `sensor` selector
-(capella|umbra|satellogic), multiplexes across the three `process_<sensor>
---list_dates` CLIs to print available vendor-bucket scene dates, and has **no
-`_finalize.sh` step** (no COG; only an `available_<sensor>_dates.csv` artifact).
-See `docs/DPS.md` "Scene-date discovery".
+(capella|umbra|satellogic) and runs its own `report_dates.py`, which calls each
+sensor's `report_<sensor>_scenes()` helper to print available vendor-bucket scene
+dates. Discovery lives ONLY here — the per-sensor `process_<sensor>` CLIs no longer
+carry a `--list_dates` flag. It has **no `_finalize.sh` step** (no COG; only an
+`available_<sensor>_dates.csv` artifact). See `docs/DPS.md` "Scene-date discovery".
 
 ## The run.sh contract
 
@@ -72,9 +73,11 @@ Every `run.sh` has the same skeleton, whatever the CLI underneath:
 Two input archetypes: a **file-input** algorithm takes a `File` granule
 (`--file_path_of_raw_data`, e.g. landsat/sentinel2); a **fetch** algorithm takes no
 file and its CLI pulls source rasters from a bucket keyed by `--date` etc. (e.g. the
-SAR sensors). A fetch algorithm needs the DPS-worker role to have read access to that
-bucket — set the optional `READ_ROLE_ARN` (+ `READ_ROLE_EXTERNAL_ID`) env to assume a
-read role when the ambient role lacks it.
+SAR sensors). A fetch algorithm needs the **DPS-worker role (`dps-verdi-role`) to have
+direct read access** to that bucket — vendor reads use the worker's ambient
+credentials (no role assumption). If the worker lacks read on a cross-account CSDA
+bucket, the fix is an IAM grant on that role, not a repo change. See `docs/DPS.md`
+"Vendor read access".
 
 ## Adding a new algorithm
 

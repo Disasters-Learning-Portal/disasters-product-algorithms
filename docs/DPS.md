@@ -101,7 +101,7 @@ Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
 -compression_level` single-dash) and then `source dps/_finalize.sh`.
 
-## Three input models
+## Four input models
 
 - **File-input (landsat):** takes a **`file_path_of_raw_data`** File input (a
   `.tar`/`.zip` Collection-2 granule the operator downloaded from USGS). run.sh
@@ -128,6 +128,12 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   line is a transient CDSE API error — re-run. There is **no per-file cap** (the
   `limit` input is the OData `$top` page size, default 50). See `.clinerules.md`
   rule 34.
+- **Download-from-Earthdata/STAC/OSM (blackmarble):** **no file input** — run.sh
+  takes a WGS84 `bbox` + `date` and the vendored `blackmarble` pipeline downloads
+  VIIRS VNP46A2 (NASA Earthdata), Landsat (STAC), and OSM roads, fusing them into an
+  urban-focused COG. The NASA Earthdata token is read from **MAAP secrets** at run
+  time (default name `EARTHDATA_TOKEN`) — never a job input. This is a **vendored
+  package**, not a `process_*` sensor; see "Black Marble (VEDA nighttime lights)" below.
 
 ### Vendor read access — the `AccessDenied` fix (2026-07-20)
 
@@ -561,6 +567,64 @@ time. The whole mechanism:
 
 Prereq: repo secret **`MAAP_PGT`** (only used when `register_to_maap` is checked).
 This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub UI.
+
+## Black Marble (VEDA nighttime lights)
+
+`black-marble` (`dps/blackmarble/`, OGC descriptor `dps/ogc/blackmarble.yml`) is the
+one processing algorithm that is **not** a `process_*` sensor. It's the **VEDA Black
+Marble** pipeline — a **vendored, self-contained package** at `src/blackmarble/`
+(source: `github.com/HarshiniGirish/veda-black-marble`, itself a fork of
+`NASA-IMPACT/veda-black-marble`). Given a WGS84 `bbox` + `date` it downloads VIIRS
+VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and OSM roads, and
+fuses them into an urban-focused Cloud Optimized GeoTIFF (inferno-colormap RGB).
+
+What makes it deviate from the sensor pattern (all deliberate):
+
+- **No console script.** It has **no `[project.scripts]` entry** and is invoked as
+  `python -m blackmarble.cli` (a typer app; a single-command typer app runs without a
+  subcommand). Why: the console-script `--help` smoke loop in CI would otherwise import
+  its whole stack. Keeping it script-less keeps that stack off every non-DPS surface.
+- **Dependencies isolated to `dps/environment.yml`.** Its heavy, divergent deps
+  (`earthaccess`, `osmnx`, `pystac-client`, `obstore`, `typer`, `duckdb`) live **only**
+  in the DPS worker env — **not** in `[project.dependencies]`, `dev-conda-deps.txt`, or
+  `image/environment.yml`. So the hub image, CI (`pip install .` stays lean —
+  installing the package ≠ importing it), and a laptop `pip install` never pull them.
+  The geo stack it shares (gdal/rasterio/geopandas/pyproj/numpy/scipy/matplotlib) is
+  already in `dps/environment.yml`. The `dps/Dockerfile` build-time smoke
+  (`import blackmarble` + `python -m blackmarble.cli --help`) is what proves those
+  isolated deps resolved.
+- **Writes its own COG** (`blackmarble/export/cog.py`) — it does **not** route through
+  `shared_utils.convert_to_cog`, so there's no `-dst_crs`/`-compression`/`-nodata`/
+  `--metadata-json` knob. `activation_event` is used only for the S3 output path
+  (`dps_output/<event>/`); the pipeline embeds its own GeoTIFF metadata.
+- **The WRS2 shapefile ships as package data.** `blackmarble/data/WRS2_descending/*`
+  (~18 MB, the Landsat path/row index) is loaded via a plain `Path(__file__)…` lookup,
+  so `pyproject.toml`'s `[tool.setuptools.package-data]` includes it in the wheel.
+
+**Earthdata token via MAAP secrets** — exactly the Sentinel-2 credential mechanism.
+The NASA Earthdata token is **never a job input** (it would land in the job log). Store
+it once from any MAAP notebook, then run.sh reads it at run time via
+`dps/_get_secret.py` and exports `EARTHDATA_TOKEN` (which the pipeline reads from the
+environment):
+
+```python
+from maap.maap import MAAP
+MAAP().secrets.add_secret("EARTHDATA_TOKEN", "<your-earthdata-token>")
+```
+
+Get a token at <https://urs.earthdata.nasa.gov/> (Profile → Generate Token). The
+`earthdata_secret_name` input only names *which* secret to read (default
+`EARTHDATA_TOKEN`; names are not sensitive) — unlike Sentinel-2's hardcoded
+`COP_USER`/`COP_PASS`, blackmarble exposes the secret name as an input so an operator
+can point at a differently-named secret without a re-register.
+
+**Inputs** (all optional in the OGC descriptor; run.sh validates after parsing):
+`bbox` (WGS84, lat span ≥ 0.05° — enforced by `validate_bbox` in `dps/_validate.sh`),
+`activation_event`, `date` (YYYY-MM-DD), `config` (`fast`|`default`|`high_quality`),
+`osm_source` (`overpass`|`layercake`), `wgs84` (also emit an EPSG:4326 COG), `basename`
+(output filename stem), `earthdata_secret_name`. Output publishes to
+`nasa-disasters-staging/dps_output/<activation_event>/` via the shared `_finalize.sh`
+(same locked staging path as every other algorithm).
 
 ## Deploying a code change (push → re-register)
 

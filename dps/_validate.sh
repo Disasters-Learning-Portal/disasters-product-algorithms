@@ -98,3 +98,31 @@ validate_in_set() {
   done
   die "$name '$value' is invalid. Allowed: ${allowed// /, }."
 }
+
+# validate_bbox VALUE -- WGS84 bounding box "min_lon,min_lat,max_lon,max_lat".
+# Used by the Black Marble DPS job. Enforces: exactly 4 comma-separated numbers,
+# lon in [-180,180] / lat in [-90,90], min < max on both axes, and a lat span of
+# at least 0.05 deg (blackmarble.crs rejects a thinner box -- the processing grid
+# needs a minimum height). bash can't compare floats, so the numeric checks run in
+# a single awk pass; awk exit 1 -> the message here fires.
+validate_bbox() {
+  local v="$1"
+  [[ "$v" =~ ^[-+0-9.,\ ]+$ ]] || \
+    die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)."
+  awk -v s="$v" 'BEGIN {
+    n = split(s, a, /[, ]+/);
+    if (n != 4) exit 1;
+    for (i = 1; i <= 4; i++) if (a[i] !~ /^[-+]?[0-9]*\.?[0-9]+$/) exit 1;
+    minlon=a[1]+0; minlat=a[2]+0; maxlon=a[3]+0; maxlat=a[4]+0;
+    if (minlon < -180 || maxlon > 180 || minlat < -90 || maxlat > 90) exit 2;
+    if (minlon >= maxlon || minlat >= maxlat) exit 3;
+    if (maxlat - minlat < 0.05) exit 4;
+    exit 0;
+  }' && return 0
+  case $? in
+    2) die "bbox '$v' is out of range (lon in [-180,180], lat in [-90,90])." ;;
+    3) die "bbox '$v' must have min_lon<max_lon and min_lat<max_lat." ;;
+    4) die "bbox '$v' latitude span is < 0.05 deg; widen it (blackmarble needs a taller box)." ;;
+    *) die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)." ;;
+  esac
+}

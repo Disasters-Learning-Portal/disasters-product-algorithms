@@ -102,7 +102,7 @@ inputs:
     default: "0"
   - name: enable_s3_upload
     label: Publish to S3
-    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless). ON by default."
+    doc: "Upload products to s3://nasa-disasters-staging/dps_output/<activation_event>/ (locked destination, not operator-editable; written with short-lived MAAP workspace credentials. DPS also uploads output/ to its job bucket regardless). ON by default."
     type: boolean
     default: true
   - name: save_png

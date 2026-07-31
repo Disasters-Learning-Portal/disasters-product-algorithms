@@ -305,6 +305,42 @@ parsed from a flag, so operators can't redirect output. To change the target,
 publish a new `algorithm_version` with the two constants edited at the top of each
 `run.sh`. Only `enable_s3_upload` (the on/off toggle) is operator-facing.
 
+### Sentinel-2 → `nasa-disasters-staging` via MAAP workspace credentials
+
+The DPS worker's own role (`dps-verdi-role`) can write `nasa-disasters` but **not**
+`nasa-disasters-staging` — so the ambient upload above `AccessDenied`s there. MAAP
+issues a job short-lived credentials for the org buckets its team was authorized on
+via `maap.aws.workspace_bucket_credentials()` (docs: *Accessing bucket data*), and
+the MAAP + Data Services group enabled write for `nasa-disasters-staging`
+(disasters-portal#342). The **Sentinel-2** `run.sh` therefore sets a locked staging
+override instead of the two `S3_BUCKET`/`S3_DEST_BASE` constants:
+
+```sh
+STAGING_UPLOAD="true"
+STAGING_BUCKET="nasa-disasters-staging"
+STAGING_DEST_BASE="dps_output"          # @anayeaye's requested prefix
+```
+
+When `STAGING_UPLOAD=true`, `_finalize.sh` step 3 routes the publish through
+`shared_utils.staging_upload.upload_dir_to_staging(out_home, bucket, "dps_output/<event>")`
+instead of the ambient `upload_file_to_s3`. That helper: requests the workspace
+credentials, builds a boto3 session from `resp["credentials"]`, confirms
+`nasa-disasters-staging` is present in `resp["authorized_s3_paths"]` with
+`access == "read_write"` (**fails loud**, listing what *was* authorized, if the grant
+is missing/read-only or the response shape is unexpected — never silently uploads
+nothing), then uploads every `**/*.tif`+`**/*.png` under `~/drcs_outputs` keyed by its
+OUT_HOME-relative path → `s3://nasa-disasters-staging/dps_output/<event>/<rel>`.
+
+`maap-py` is a **DPS-only** dep (pinned in `dps/environment.yml`), so
+`staging_upload.py` defers `from maap.maap import MAAP` into the function — importing
+`shared_utils` never requires maap-py; only a live DPS job invokes it (auth is ambient
+via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). The switch is a locked
+per-sensor constant, **not** an operator input: `enable_s3_upload` still just toggles
+whether to publish at all. The other 4 sensors leave `STAGING_UPLOAD` unset
+(`${STAGING_UPLOAD:-false}`) and keep the ambient `nasa-disasters` upload unchanged.
+This is the POC for disasters-portal#342 (acceptance criterion A); fan out to the
+other sensors once a Sentinel-2 job confirms objects land in the staging bucket.
+
 ## Guard rails: fail-fast input validation (`dps/_validate.sh`)
 
 The OGC/CWL input schema is `{name,label,doc,type,default}` only — **no `enum`,

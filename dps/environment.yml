@@ -58,6 +58,15 @@ dependencies:
   # ("sh: 7z: not found") -> "NO SCENES MATCHED". Same pin as the hub image
   # (image/environment.yml).
   - p7zip==16.02
+  # --- VEDA Black Marble (dps/blackmarble/run.sh runs `python -m blackmarble.cli`) ---
+  # blackmarble is a VENDORED package (src/blackmarble/) with a heavy, divergent
+  # dependency stack that is DELIBERATELY isolated to this DPS worker env -- it is
+  # NOT in [project.dependencies], dev-conda-deps.txt, or image/environment.yml, so
+  # the hub image / CI / base install never carry it. The geo stack blackmarble needs
+  # (gdal, rasterio, geopandas, pyproj, numpy, scipy, matplotlib-base) is already
+  # above; only these extras are new. duckdb is conda (only used by the layercake OSM
+  # backend); the rest are pip (mirrors the upstream fork's environment.yml split).
+  - duckdb
   # --- pip (build-env.sh uses it to install the repo) ---
   - pip
   - pip:
@@ -72,3 +81,12 @@ dependencies:
     # `from maap.maap import MAAP` + `MAAP().secrets.get_secret()` are unchanged in
     # 5.1.0 (verified against the 5.1.0 source), so _get_secret.py needs no change.
     - maap-py==5.1.0
+    # VEDA Black Marble pip-only deps (pip, not conda, mirrors the upstream fork's
+    # environment.yml). These are the ONLY blackmarble deps not already satisfied by
+    # the conda geo stack above; kept here (DPS worker env) so they never reach the
+    # hub image / CI / base install. pinned to the fork's floors.
+    - earthaccess>=0.16.0
+    - osmnx>=2.0.2
+    - pystac-client>=0.9.0
+    - typer>=0.15.3
+    - obstore>=0.8.2

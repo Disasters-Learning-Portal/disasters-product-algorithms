@@ -32,10 +32,10 @@ license: Apache-2.0
 release_notes: DPS discovery tool -- list available vendor-bucket scene dates for a chosen sensor.
 citation: NASA Disasters Program
 keywords: discovery, list-dates, capella, umbra, satellogic, disasters
-# AWS read access: NO file input -- the underlying process_<sensor> --list_dates
-# path LISTS the sensor's CSDA vendor bucket at run time. The DPS-worker role
-# needs read access to those buckets (the same buckets the per-sensor processing
-# algorithms already use). A single list-dates worker now touches all three.
+# AWS read access: NO file input -- report_dates.py LISTS the sensor's CSDA
+# vendor bucket at run time. The DPS-worker role needs read access to those
+# buckets (the same buckets the per-sensor processing algorithms already use).
+# A single list-dates worker now touches all three.
 inputs:
   # Both inputs are base-type strings with NON-FALSY defaults, so this algorithm
   # registers + submits cleanly via the normal Register-Algorithm GUI (no `?`

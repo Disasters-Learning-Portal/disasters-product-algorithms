@@ -313,9 +313,13 @@ issues a job short-lived credentials for the org buckets its team was authorized
 via `maap.aws.workspace_bucket_credentials()` (docs: *Accessing bucket data*), and
 the MAAP + Data Services group enabled write for `nasa-disasters-staging`
 (disasters-portal#342). The **Sentinel-2** `run.sh` therefore sets a locked staging
-override instead of the two `S3_BUCKET`/`S3_DEST_BASE` constants:
+override instead of the two `S3_BUCKET`/`S3_DEST_BASE` constants — and because the
+destination is hard-coded, Sentinel-2 exposes **no `enable_s3_upload` input** (it was
+removed): publishing is always on, `ENABLE_S3_UPLOAD` stays a locked internal `"true"`
+purely so the shared `_finalize.sh` gate still fires:
 
 ```sh
+ENABLE_S3_UPLOAD="true"                  # locked internal, not a job input/flag
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"          # @anayeaye's requested prefix
@@ -334,10 +338,10 @@ OUT_HOME-relative path → `s3://nasa-disasters-staging/dps_output/<event>/<rel>
 `maap-py` is a **DPS-only** dep (pinned in `dps/environment.yml`), so
 `staging_upload.py` defers `from maap.maap import MAAP` into the function — importing
 `shared_utils` never requires maap-py; only a live DPS job invokes it (auth is ambient
-via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). The switch is a locked
-per-sensor constant, **not** an operator input: `enable_s3_upload` still just toggles
-whether to publish at all. The other 4 sensors leave `STAGING_UPLOAD` unset
-(`${STAGING_UPLOAD:-false}`) and keep the ambient `nasa-disasters` upload unchanged.
+via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). The staging switch is a
+locked per-sensor constant, **not** an operator input. The other 4 sensors leave
+`STAGING_UPLOAD` unset (`${STAGING_UPLOAD:-false}`) and keep their `enable_s3_upload`
+toggle + ambient `nasa-disasters` upload unchanged.
 This is the POC for disasters-portal#342 (acceptance criterion A); fan out to the
 other sensors once a Sentinel-2 job confirms objects land in the staging bucket.
 

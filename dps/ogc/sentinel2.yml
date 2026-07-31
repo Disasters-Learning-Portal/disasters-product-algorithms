@@ -124,11 +124,6 @@ inputs:
     doc: "No-data value for the output COGs (Sentinel-2 default 0)."
     type: string?
     default: "0"
-  - name: enable_s3_upload
-    label: Publish to S3
-    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination; DPS also uploads output/ regardless). ON by default."
-    type: boolean?
-    default: true
   - name: save_png
     label: Save PNG quicklook
     doc: Also write a .png quicklook next to each product COG.

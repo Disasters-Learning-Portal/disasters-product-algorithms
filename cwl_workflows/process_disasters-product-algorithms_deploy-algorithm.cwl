@@ -87,12 +87,6 @@ $graph:
       label: No-data value
       type: string?
       default: '0'
-    enable_s3_upload:
-      doc: Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/
-        (locked destination; DPS also uploads output/ regardless). ON by default.
-      label: Publish to S3
-      type: boolean?
-      default: true
     save_png:
       doc: Also write a .png quicklook next to each product COG.
       label: Save PNG quicklook
@@ -137,7 +131,6 @@ $graph:
         we_nstd: we_nstd
         compression_level: compression_level
         nodata: nodata
-        enable_s3_upload: enable_s3_upload
         save_png: save_png
         png_min: png_min
         png_max: png_max
@@ -235,34 +228,28 @@ $graph:
         position: 13
         prefix: --nodata
       default: '0'
-    enable_s3_upload:
-      type: boolean?
-      inputBinding:
-        position: 14
-        prefix: --enable_s3_upload
-      default: true
     save_png:
       type: boolean?
       inputBinding:
-        position: 15
+        position: 14
         prefix: --save_png
       default: true
     png_min:
       type: string?
       inputBinding:
-        position: 16
+        position: 15
         prefix: --png_min
       default: ''
     png_max:
       type: string?
       inputBinding:
-        position: 17
+        position: 16
         prefix: --png_max
       default: ''
     delete_cog:
       type: boolean?
       inputBinding:
-        position: 18
+        position: 17
         prefix: --delete_cog
       default: true
   outputs:
@@ -278,7 +265,7 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 4d1c3cc27ed89d38513c7a575eb0286b1405fdfe
+s:commitHash: 65da7b8f3e14667319c22b2cbf6947c7bc15b517
 s:dateCreated: 2026-07-31
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0

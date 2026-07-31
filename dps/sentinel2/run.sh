@@ -60,10 +60,13 @@ ENABLE_S3_UPLOAD="true"
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"
+# DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
+# COG in ~/drcs_outputs is always removed to free worker disk -- the product already
+# lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
+DELETE_COG="true"
 SAVE_PNG="true"
 PNG_MIN=""
 PNG_MAX=""
-DELETE_COG="true"
 
 # --- parse named flags ---
 while [[ $# -gt 0 ]]; do
@@ -84,7 +87,6 @@ while [[ $# -gt 0 ]]; do
     --merge)                 if [[ "${2:-}" =~ ^(true|false)$ ]]; then MERGE="$2"; shift 2; else MERGE="true"; shift; fi ;;
     --mask)                  if [[ "${2:-}" =~ ^(true|false)$ ]]; then MASK="$2"; shift 2; else MASK="true"; shift; fi ;;
     --save_png)              if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
-    --delete_cog)            if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done

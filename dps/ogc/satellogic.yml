@@ -90,11 +90,6 @@ inputs:
     doc: "Override the auto-detected no-data value; leave blank to auto-detect."
     type: string?
     default: ""
-  - name: enable_s3_upload
-    label: Publish to S3
-    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination)."
-    type: boolean?
-    default: false
   - name: save_png
     label: Save PNG quicklook
     doc: Also write a .png quicklook next to each product COG.
@@ -110,12 +105,6 @@ inputs:
     doc: "Manual upper bound for PNG scaling; blank = auto."
     type: string?
     default: ""
-  - name: delete_cog
-    label: Delete COG from home after upload
-    doc: "Delete the COG from ~/drcs_outputs after copy to output/ + upload (PNG + output/ copy kept)."
-    type: boolean?
-    default: true
-
 outputs:
   - name: output
     type: Directory

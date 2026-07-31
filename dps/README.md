@@ -63,9 +63,11 @@ Every `run.sh` has the same skeleton, whatever the CLI underneath:
    process_<name> ...`, writing products into `${OUT_HOME}` (`~/drcs_outputs/<event>/`).
 5. **`source "${basedir}/../_finalize.sh"`** — the shared output flow: optional PNG
    quicklook → copy to `output/` (DPS uploads this, so the COG is never lost) →
-   optional publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → optional
-   COG delete. Toggled by the `save_png` / `enable_s3_upload` / `delete_cog` inputs.
-   The S3 destination is **locked per algorithm_version** (not a job input).
+   publish to `s3://nasa-disasters-staging/dps_output/<event>/` (always on, via
+   short-lived MAAP workspace credentials) → scratch-COG delete (always on). Only
+   `save_png` is an operator toggle; the destination, publish, and scratch-delete are
+   **locked per algorithm_version** (the `enable_s3_upload` / `delete_cog` inputs were
+   removed). See `docs/DPS.md` "All sensors → nasa-disasters-staging".
 
 Two input archetypes: a **file-input** algorithm takes a `File` granule
 (`--file_path_of_raw_data`, e.g. landsat/sentinel2); a **fetch** algorithm takes no

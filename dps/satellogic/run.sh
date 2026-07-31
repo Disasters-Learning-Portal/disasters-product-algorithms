@@ -10,7 +10,7 @@ set -euo pipefail
 # required (confirmed available).
 #
 # Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
-# -> delete COG.
+# (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
@@ -32,13 +32,20 @@ FILTER_SIZE="5"
 # SOURCE is hardcoded to "csda" for Satellogic (ticket #320); not a job input.
 SOURCE_LABEL="csda"
 ACTIVATION_EVENT="YYYYMM_Hazard_Location"
-ENABLE_S3_UPLOAD="false"
-# S3 destination is LOCKED for this version: not exposed as a job input and not
-# parsed from flags, so operators cannot change it. To target a different
-# bucket/prefix, publish a new algorithm_version with these two values changed.
-S3_BUCKET="nasa-disasters"
-S3_DEST_BASE="drcs_activations_new"
+# Publishing is ALWAYS ON and the S3 destination is LOCKED for this version --
+# neither is a job input nor parsed from a flag. Satellogic publishes to the MAAP
+# staging bucket nasa-disasters-staging (prefix dps_output/<event>/) using short-
+# lived MAAP workspace credentials -- the DPS worker's own role can't write there;
+# see shared_utils/staging_upload.py + dps/_finalize.sh step 3a. To target a
+# different bucket/prefix, publish a new algorithm_version with these constants changed.
+ENABLE_S3_UPLOAD="true"
+STAGING_UPLOAD="true"
+STAGING_BUCKET="nasa-disasters-staging"
+STAGING_DEST_BASE="dps_output"
 SAVE_PNG="true"
+# DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
+# COG in ~/drcs_outputs is always removed to free worker disk -- the product already
+# lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
 DELETE_COG="true"
 
 # --- parse named flags ---
@@ -51,9 +58,7 @@ while [[ $# -gt 0 ]]; do
     --filter_size)       FILTER_SIZE="$2"; shift 2;;
     --activation_event)  ACTIVATION_EVENT="$2"; shift 2;;
     --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
-    --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
     --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
-    --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done

@@ -115,11 +115,6 @@ inputs:
     doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
     type: string
     default: ""
-  - name: delete_cog
-    label: Delete COG from home after upload
-    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
-    type: boolean
-    default: true
 outputs:
   - name: output
     type: Directory

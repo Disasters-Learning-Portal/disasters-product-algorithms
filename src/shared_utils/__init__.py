@@ -97,6 +97,12 @@ try:
 except ImportError:
     pass  # boto3/rasterio not available
 
+# MAAP staging-bucket uploader (requires boto3; maap-py imported lazily at call time)
+try:
+    from shared_utils.staging_upload import upload_dir_to_staging
+except ImportError:
+    pass  # boto3 not available
+
 # Raster inspection helpers (requires rasterio)
 try:
     from shared_utils.geotiff_analyzer import summarize_raster
@@ -151,6 +157,7 @@ __all__ = [
     'parse_s3_uri',
     'upload_file_to_s3',
     'build_flat_s3_uri',
+    'upload_dir_to_staging',
     # Unified filename / categorization (file_naming.py)
     'DATETIME_PATTERNS',
     'extract_datetime_from_filename',

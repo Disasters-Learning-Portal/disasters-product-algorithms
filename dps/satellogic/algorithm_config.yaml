@@ -66,11 +66,6 @@ inputs:
     doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is rejected at run time -- you MUST set a real value."
     type: string
     default: "YYYYMM_Hazard_Location"
-  - name: save_png
-    label: Save PNG quicklook
-    doc: Also write a .png quicklook next to each product COG.
-    type: boolean
-    default: true
 outputs:
   - name: output
     type: Directory

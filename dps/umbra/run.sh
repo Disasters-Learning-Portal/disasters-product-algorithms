@@ -7,7 +7,7 @@ set -euo pipefail
 # NO file input: process_umbra FETCHES the source GEC raster from the CSDA vendor
 # bucket at run time (DPS-worker read access required, confirmed available).
 #
-# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
+# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> output/ -> S3
 # (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
@@ -41,9 +41,6 @@ ENABLE_S3_UPLOAD="true"
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"
-SAVE_PNG="true"
-PNG_MIN=""
-PNG_MAX=""
 # DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
 # COG in ~/drcs_outputs is always removed to free worker disk -- the product already
 # lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
@@ -62,9 +59,6 @@ while [[ $# -gt 0 ]]; do
     --source_label)      SOURCE_LABEL="$2"; shift 2;;
     --compression_level) COMPRESSION_LEVEL="$2"; shift 2;;
     --nodata)            NODATA="$2"; shift 2;;
-    --png_min)           PNG_MIN="$2"; shift 2;;
-    --png_max)           PNG_MAX="$2"; shift 2;;
-    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -80,8 +74,6 @@ validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # Speckle filtering is always on; only the kernel is tunable (3, 5, or 7).
 validate_in_set filter_size "${FILTER_SIZE}" "3 5 7"
 [[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
-[[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
-[[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"

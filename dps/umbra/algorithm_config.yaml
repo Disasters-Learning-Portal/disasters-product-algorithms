@@ -79,21 +79,6 @@ inputs:
     doc: "Override the no-data value; leave blank to use the default (-9999.0). SAR dB backscatter uses -9999.0, never 0 (0 dB is a legitimate value)."
     type: string
     default: ""
-  - name: save_png
-    label: Save PNG quicklook
-    doc: Also write a .png quicklook next to each product COG.
-    type: boolean
-    default: true
-  - name: png_min
-    label: PNG min (optional)
-    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
-    type: string
-    default: ""
-  - name: png_max
-    label: PNG max (optional)
-    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
-    type: string
-    default: ""
 outputs:
   - name: output
     type: Directory

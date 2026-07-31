@@ -46,9 +46,9 @@ that each cost a failed registration if you get them wrong:
   `os.cpu_count()` (rasterio reproject), so a job uses **every core on whatever
   worker it lands on**, regardless of `cores_min` — the declared value only
   biases instance selection, it doesn't throttle the process. `outdir_max` (GB)
-  bounds the **aggregated** output: a job keeps *all* the COGs + PNGs it produces
+  bounds the **aggregated** output: a job keeps *all* the COGs it produces
   (multi-product / multi-scene runs accumulate — `dps/_finalize.sh` globs every
-  `**/*.tif`+`**/*.png`), and they must all fit under `outdir_max` before the
+  `**/*.tif`), and they must all fit under `outdir_max` before the
   always-on scratch-COG delete frees the home dir.
 - **`inputs` is a flat list** of `{name, label, doc, type, default}`. Valid
   `type`: `string, int, File, Directory, long, float, boolean, double` — **no
@@ -86,14 +86,14 @@ DPS passes every input as a **named flag** `--name value` via `"$@"` — NOT
 positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
 run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
-`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask`/`save_png` default
+`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask` default
 `true`; satellogic `visualize` default `false` — its `use_mask` boolean was removed
 in PR #45, masking is now hardcoded).
 This way an input left at its form default round-trips correctly **whether or not**
 MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
 config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the
 run.sh defaults all to `false`: if MAAP omits default-`true` booleans, that would
-silently invert `merge`/`mask`/`save_png`.) The publish + scratch-delete booleans
+silently invert `merge`/`mask`.) The publish + scratch-delete booleans
 (`ENABLE_S3_UPLOAD`/`STAGING_UPLOAD`/`DELETE_COG`) are **locked internal constants**,
 not job inputs — see "Output flow" below.
 
@@ -284,19 +284,18 @@ inline without a submit-and-wait round-trip.
 
 ## Output flow (dps/_finalize.sh)
 
-Products → `~/drcs_outputs/<activation_event>/` → optional PNG quicklook →
+Products → `~/drcs_outputs/<activation_event>/` →
 **copied to `output/`** (DPS uploads this to the job's own bucket — the COG is never
 lost) → **published to `s3://nasa-disasters-staging/dps_output/<event>/`** (always on,
 via short-lived MAAP workspace credentials — see below) → **scratch COG deleted from
-`~/drcs_outputs`** (always on; frees home-dir space — the PNG and the `output/` copy
-are kept). The only output-related job inputs are `save_png` (default true) and
-`png_min`/`png_max` (blank = auto 2–98 pct, or 0–255 for uint8); PNGs come from
-`shared_utils.plotting.save_cog_png` (needs `matplotlib-base`, in the DPS env).
-Publishing and the scratch-delete are **not** operator inputs — they're locked on (the
-old `enable_s3_upload` / `delete_cog` toggles were removed: with a hard-coded
-destination, a per-run on/off switch was just confusing).
+`~/drcs_outputs`** (always on; frees home-dir space — the `output/` copy is kept).
+**No PNG quicklooks are produced** — the `save_png`/`png_min`/`png_max` inputs and the
+`_finalize.sh` PNG step were removed. Publishing and the scratch-delete are **not**
+operator inputs either — they're locked on (the old `enable_s3_upload` / `delete_cog`
+toggles were removed: with a hard-coded destination, a per-run on/off switch was just
+confusing).
 
-`_finalize.sh` globs **every** `**/*.tif`+`**/*.png` under `~/drcs_outputs`, so a
+`_finalize.sh` globs **every** `**/*.tif` under `~/drcs_outputs`, so a
 job that produces many COGs (Satellogic multi-tile, Landsat/S2 multi-product,
 Capella/Umbra multi-scene) keeps them all. The S3 key is the **OUT_HOME-relative
 path** (`os.path.relpath`), not the bare basename — so same-named products in
@@ -366,7 +365,7 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | `require_nonempty source_label` | non-empty | all except Satellogic¹ |
 | `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹ |
 | `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹ |
-| `validate_number` (nodata / png_min / png_max / gamma / we_nstd) | numeric when set | all |
+| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all |
 | `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
 | `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
 | `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
@@ -396,7 +395,7 @@ CLI, so bash does not re-check it. Assertions live in
   DPS `apply_filter` boolean input both removed — and restricted `filter_size` to
   `{3,5,7}` (default 5). It also **dropped the RCS product** (`sigma`/`beta`/`gamma`
   only). The COG now carries raw dB (the old per-product percentile stretch is gone);
-  use `png_min`/`png_max` for display stretch. Both **Capella & Umbra** default
+  apply any display stretch downstream at the visualization layer (VEDA/leafmap). Both **Capella & Umbra** default
   `-nodata` to **-9999.0** (float32 dB backscatter — 0 dB is a legitimate value, so
   nodata is never 0); leave the DPS `nodata` input blank to use it.
 

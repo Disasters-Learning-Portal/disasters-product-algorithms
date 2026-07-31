@@ -9,7 +9,7 @@ set -euo pipefail
 # bucket/prefix are hardcoded in the CLI (not flags). DPS-worker read access
 # required (confirmed available).
 #
-# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
+# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> output/ -> S3
 # (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
@@ -42,7 +42,6 @@ ENABLE_S3_UPLOAD="true"
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"
-SAVE_PNG="true"
 # DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
 # COG in ~/drcs_outputs is always removed to free worker disk -- the product already
 # lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
@@ -58,7 +57,6 @@ while [[ $# -gt 0 ]]; do
     --filter_size)       FILTER_SIZE="$2"; shift 2;;
     --activation_event)  ACTIVATION_EVENT="$2"; shift 2;;
     --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
-    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -73,13 +71,6 @@ validate_activation_event "${ACTIVATION_EVENT}"
 validate_number gamma "${GAMMA}"
 validate_in_set filter_size "${FILTER_SIZE}" "3 5 7"
 # --product (truecolor|colorir|ndvi|ndwi|evi) is already enforced by argparse choices=.
-
-# PNG stretch range is fixed per product family (feeds _finalize.sh): 8-bit color
-# composites are [0,255]; spectral indices are [-1,1].
-case "${PRODUCT}" in
-  truecolor|colorir) PNG_MIN="0";  PNG_MAX="255" ;;
-  *)                 PNG_MIN="-1"; PNG_MAX="1"   ;;
-esac
 
 echo "INFO: vendor source = s3://csda-data-vendor-satellogic/disasters (read by process_satellogic; AWS read access required)"
 

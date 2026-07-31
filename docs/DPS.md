@@ -544,7 +544,18 @@ time. The whole mechanism:
   `register_to_maap` is checked. Create that **GitHub Environment with Required
   reviewers** (Settings → Environments) to actually gate live registrations —
   until it exists *with reviewers*, GitHub auto-creates it unprotected and runs
-  ungated.
+  ungated. **Managing approvers** (max 6; any **one** approval releases a run —
+  it's OR, not unanimous): Settings → Environments → `maap-registration` → Required
+  reviewers, or via API —
+  `gh api -X PUT repos/<owner>/<repo>/environments/maap-registration` with a
+  `reviewers` array. Footgun: the PUT **REPLACES the whole reviewer list**, so
+  include every existing reviewer's *numeric user id* plus the new one
+  (`{"type":"User","id":<id>}`; get an id via `gh api users/<login> --jq .id`), and
+  re-send `wait_timer`/`prevent_self_review`/`deployment_branch_policy` to avoid
+  resetting them. A reviewer **must have ≥ write access** to the repo. The env's
+  **`can_admins_bypass` defaults `true`** — repo admins can deploy without waiting
+  for approval; set it `false` in the same PUT to make approval mandatory even for
+  admins. Current approvers: kyle-lesinger, gwlayne, alex-melancon, acblackford.
 - **`gh workflow run` validates inputs against the target `--ref`'s** workflow file
   (not only the default branch), so a new input (e.g. `algorithm`) must be pushed to
   the branch you run from before dispatching.

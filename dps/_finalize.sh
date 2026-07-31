@@ -2,42 +2,24 @@
 #
 # Contract: the caller has already produced the product COG(s) in ${OUT_HOME}
 # and set these variables:
-#   OUT_HOME ACTIVATION_EVENT SAVE_PNG PNG_MIN PNG_MAX
-#   ENABLE_S3_UPLOAD S3_BUCKET S3_DEST_BASE DELETE_COG
-# Optional staging override (default off; only Sentinel-2 sets these today): when
-#   STAGING_UPLOAD=true the publish step targets the MAAP org bucket STAGING_BUCKET
-#   under STAGING_DEST_BASE/<event> using short-lived MAAP workspace credentials
-#   (the DPS worker's own role can't write there) instead of the ambient S3_BUCKET
-#   upload. See shared_utils/staging_upload.py.
+#   OUT_HOME ACTIVATION_EVENT ENABLE_S3_UPLOAD S3_BUCKET S3_DEST_BASE DELETE_COG
+# Staging publish (ALL sensors set these today): when STAGING_UPLOAD=true the
+#   publish step targets the MAAP org bucket STAGING_BUCKET under
+#   STAGING_DEST_BASE/<event> using short-lived MAAP workspace credentials (the DPS
+#   worker's own role can't write there) instead of the ambient S3_BUCKET upload.
+#   See shared_utils/staging_upload.py.
 #
-# Flow: optional PNG quicklook -> copy products into output/ (DPS uploads these,
-# so the COG is never lost) -> optional publish to S3 (operational bucket via the
-# worker role, or the MAAP staging bucket when STAGING_UPLOAD=true) -> optionally
-# delete the COGs from ${OUT_HOME} to free home-dir space (PNGs + output/ kept).
+# Flow: copy products into output/ (DPS uploads these, so the COG is never lost)
+# -> publish to S3 (the MAAP staging bucket when STAGING_UPLOAD=true, else the
+# ambient operational bucket) -> delete the COGs from ${OUT_HOME} to free home-dir
+# space (the output/ copy is retained for DPS). No PNG quicklooks are produced.
 
 mkdir -p output
 
-# 1) PNG quicklooks (one .png next to each COG, in OUT_HOME)
-if [[ "${SAVE_PNG}" == "true" ]]; then
-  echo "Generating PNG quicklooks in ${OUT_HOME} ..."
-  conda run --live-stream --name disasters_dps python - "${OUT_HOME}" "${PNG_MIN}" "${PNG_MAX}" <<'PY'
-import os, sys, glob
-from shared_utils.plotting import save_cog_png
-out_home, pmin, pmax = sys.argv[1], sys.argv[2], sys.argv[3]
-vmin = float(pmin) if pmin else None
-vmax = float(pmax) if pmax else None
-for cog in sorted(glob.glob(os.path.join(out_home, "**", "*.tif"), recursive=True)):
-    try:
-        save_cog_png(cog, os.path.splitext(cog)[0] + ".png", vmin=vmin, vmax=vmax)
-    except Exception as e:
-        print(f"  WARN: png failed for {cog}: {e}")
-PY
-fi
-
-# 2) copy products (COG + PNG) into the DPS output/ dir -- DPS uploads these
+# 1) copy products into the DPS output/ dir -- DPS uploads these
 cp -r "${OUT_HOME}/." output/ 2>/dev/null || true
 
-# 3) optional: publish products (COG + PNG) to S3
+# 2) publish products (COG) to S3
 if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
   if [[ "${STAGING_UPLOAD:-false}" == "true" ]]; then
     # 3a) MAAP staging path: publish to a MAAP org bucket (e.g. nasa-disasters-
@@ -73,9 +55,9 @@ PY
   fi
 fi
 
-# 4) free home-dir space: delete the COGs from OUT_HOME (default true). The PNGs
-#    stay as lightweight previews and the output/ copy is retained for DPS.
+# 3) free home-dir space: delete the COGs from OUT_HOME (locked on). The output/
+#    copy is retained for DPS's own upload, so nothing is lost.
 if [[ "${DELETE_COG}" == "true" ]]; then
-  echo "Deleting COGs from ${OUT_HOME} (PNGs kept; output/ copy retained for DPS) ..."
+  echo "Deleting COGs from ${OUT_HOME} (output/ copy retained for DPS) ..."
   find "${OUT_HOME}" -type f -name '*.tif' -delete
 fi

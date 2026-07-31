@@ -46,10 +46,10 @@ that each cost a failed registration if you get them wrong:
   `os.cpu_count()` (rasterio reproject), so a job uses **every core on whatever
   worker it lands on**, regardless of `cores_min` — the declared value only
   biases instance selection, it doesn't throttle the process. `outdir_max` (GB)
-  bounds the **aggregated** output: a job keeps *all* the COGs + PNGs it produces
+  bounds the **aggregated** output: a job keeps *all* the COGs it produces
   (multi-product / multi-scene runs accumulate — `dps/_finalize.sh` globs every
-  `**/*.tif`+`**/*.png`), and they must all fit under `outdir_max` before
-  `delete_cog` frees the home dir.
+  `**/*.tif`), and they must all fit under `outdir_max` before the
+  always-on scratch-COG delete frees the home dir.
 - **`inputs` is a flat list** of `{name, label, doc, type, default}`. Valid
   `type`: `string, int, File, Directory, long, float, boolean, double` — **no
   enum, no array**. So:
@@ -86,14 +86,16 @@ DPS passes every input as a **named flag** `--name value` via `"$@"` — NOT
 positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
 run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
-`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask`/`save_png`/
-`delete_cog` default `true`; satellogic `visualize` default `false` — its `use_mask`
-boolean was removed in PR #45, masking is now hardcoded).
+`algorithm_config.yaml` default** (e.g. landsat `merge`/`mask` default
+`true`; satellogic `visualize` default `false` — its `use_mask` boolean was removed
+in PR #45, masking is now hardcoded).
 This way an input left at its form default round-trips correctly **whether or not**
 MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
 config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the
 run.sh defaults all to `false`: if MAAP omits default-`true` booleans, that would
-silently invert `merge`/`mask`/`save_png`/`delete_cog`.)
+silently invert `merge`/`mask`.) The publish + scratch-delete booleans
+(`ENABLE_S3_UPLOAD`/`STAGING_UPLOAD`/`DELETE_COG`) are **locked internal constants**,
+not job inputs — see "Output flow" below.
 
 Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
@@ -282,16 +284,18 @@ inline without a submit-and-wait round-trip.
 
 ## Output flow (dps/_finalize.sh)
 
-Products → `~/drcs_outputs/<activation_event>/` → optional PNG quicklook →
-**copied to `output/`** (DPS uploads this — the COG is never lost) → optional
-publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → **COG deleted
-from `~/drcs_outputs`** (default; frees home-dir space — the PNG and the `output/`
-copy are kept). Controlled by inputs `save_png` (default true), `png_min`/
-`png_max` (blank = auto 2–98 pct, or 0–255 for uint8), `enable_s3_upload`,
-`delete_cog` (default true). PNGs come from
-`shared_utils.plotting.save_cog_png` (needs `matplotlib-base`, in the DPS env).
+Products → `~/drcs_outputs/<activation_event>/` →
+**copied to `output/`** (DPS uploads this to the job's own bucket — the COG is never
+lost) → **published to `s3://nasa-disasters-staging/dps_output/<event>/`** (always on,
+via short-lived MAAP workspace credentials — see below) → **scratch COG deleted from
+`~/drcs_outputs`** (always on; frees home-dir space — the `output/` copy is kept).
+**No PNG quicklooks are produced** — the `save_png`/`png_min`/`png_max` inputs and the
+`_finalize.sh` PNG step were removed. Publishing and the scratch-delete are **not**
+operator inputs either — they're locked on (the old `enable_s3_upload` / `delete_cog`
+toggles were removed: with a hard-coded destination, a per-run on/off switch was just
+confusing).
 
-`_finalize.sh` globs **every** `**/*.tif`+`**/*.png` under `~/drcs_outputs`, so a
+`_finalize.sh` globs **every** `**/*.tif` under `~/drcs_outputs`, so a
 job that produces many COGs (Satellogic multi-tile, Landsat/S2 multi-product,
 Capella/Umbra multi-scene) keeps them all. The S3 key is the **OUT_HOME-relative
 path** (`os.path.relpath`), not the bare basename — so same-named products in
@@ -299,35 +303,35 @@ different subdirs don't overwrite each other in the bucket (this nests optical
 products under `<date>/<product>/` and Capella/Umbra multi-scene output under
 `scene_1/`, `scene_2/`). All of it must fit under `outdir_max` before deletion.
 
-The S3 destination (`S3_BUCKET=nasa-disasters`, `S3_DEST_BASE=drcs_activations_new`)
-is **locked per algorithm_version** — it is intentionally NOT a job input and NOT
-parsed from a flag, so operators can't redirect output. To change the target,
-publish a new `algorithm_version` with the two constants edited at the top of each
-`run.sh`. Only `enable_s3_upload` (the on/off toggle) is operator-facing.
+The S3 destination (`STAGING_BUCKET=nasa-disasters-staging`,
+`STAGING_DEST_BASE=dps_output`) is **locked per algorithm_version** — it is NOT a job
+input and NOT parsed from a flag, so operators can't redirect output. To change the
+target, publish a new `algorithm_version` with the constants edited at the top of each
+`run.sh`.
 
-### Sentinel-2 → `nasa-disasters-staging` via MAAP workspace credentials
+### All sensors → `nasa-disasters-staging` via MAAP workspace credentials
 
 The DPS worker's own role (`dps-verdi-role`) can write `nasa-disasters` but **not**
-`nasa-disasters-staging` — so the ambient upload above `AccessDenied`s there. MAAP
+`nasa-disasters-staging` — an ambient `boto3` upload there `AccessDenied`s. MAAP
 issues a job short-lived credentials for the org buckets its team was authorized on
 via `maap.aws.workspace_bucket_credentials()` (docs: *Accessing bucket data*), and
 the MAAP + Data Services group enabled write for `nasa-disasters-staging`
-(disasters-portal#342). The **Sentinel-2** `run.sh` therefore sets a locked staging
-override instead of the two `S3_BUCKET`/`S3_DEST_BASE` constants — and because the
-destination is hard-coded, Sentinel-2 exposes **no `enable_s3_upload` input** (it was
-removed): publishing is always on, `ENABLE_S3_UPLOAD` stays a locked internal `"true"`
-purely so the shared `_finalize.sh` gate still fires:
+(disasters-portal#342). **Every** sensor `run.sh` (landsat, sentinel2, capella, umbra,
+satellogic) therefore sets the same locked staging constants — there is no
+`S3_BUCKET`/`S3_DEST_BASE` and no `enable_s3_upload` / `delete_cog` job input anymore:
 
 ```sh
 ENABLE_S3_UPLOAD="true"                  # locked internal, not a job input/flag
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"          # @anayeaye's requested prefix
+DELETE_COG="true"                        # locked: scratch COG always removed post-upload
 ```
 
-When `STAGING_UPLOAD=true`, `_finalize.sh` step 3 routes the publish through
+With `STAGING_UPLOAD=true`, `_finalize.sh` step 3 routes the publish through
 `shared_utils.staging_upload.upload_dir_to_staging(out_home, bucket, "dps_output/<event>")`
-instead of the ambient `upload_file_to_s3`. That helper: requests the workspace
+(the ambient `upload_file_to_s3` branch is retained only as a `${STAGING_UPLOAD:-false}`
+fallback for a future non-staging sensor). That helper: requests the workspace
 credentials, builds a boto3 session from `resp["credentials"]`, confirms
 `nasa-disasters-staging` is present in `resp["authorized_s3_paths"]` with
 `access == "read_write"` (**fails loud**, listing what *was* authorized, if the grant
@@ -338,10 +342,8 @@ OUT_HOME-relative path → `s3://nasa-disasters-staging/dps_output/<event>/<rel>
 `maap-py` is a **DPS-only** dep (pinned in `dps/environment.yml`), so
 `staging_upload.py` defers `from maap.maap import MAAP` into the function — importing
 `shared_utils` never requires maap-py; only a live DPS job invokes it (auth is ambient
-via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). The staging switch is a
-locked per-sensor constant, **not** an operator input. The other 4 sensors leave
-`STAGING_UPLOAD` unset (`${STAGING_UPLOAD:-false}`) and keep their `enable_s3_upload`
-toggle + ambient `nasa-disasters` upload unchanged.
+via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). This is the fan-out of the
+disasters-portal#342 POC to all five sensors.
 This is the POC for disasters-portal#342 (acceptance criterion A); fan out to the
 other sensors once a Sentinel-2 job confirms objects land in the staging bucket.
 
@@ -363,7 +365,7 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | `require_nonempty source_label` | non-empty | all except Satellogic¹ |
 | `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹ |
 | `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹ |
-| `validate_number` (nodata / png_min / png_max / gamma / we_nstd) | numeric when set | all |
+| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all |
 | `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
 | `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
 | `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
@@ -393,7 +395,7 @@ CLI, so bash does not re-check it. Assertions live in
   DPS `apply_filter` boolean input both removed — and restricted `filter_size` to
   `{3,5,7}` (default 5). It also **dropped the RCS product** (`sigma`/`beta`/`gamma`
   only). The COG now carries raw dB (the old per-product percentile stretch is gone);
-  use `png_min`/`png_max` for display stretch. Both **Capella & Umbra** default
+  apply any display stretch downstream at the visualization layer (VEDA/leafmap). Both **Capella & Umbra** default
   `-nodata` to **-9999.0** (float32 dB backscatter — 0 dB is a legitimate value, so
   nodata is never 0); leave the DPS `nodata` input blank to use it.
 
@@ -406,7 +408,7 @@ CLI, so bash does not re-check it. Assertions live in
   plus `use_mask`/`dst_crs`/`compression_level`/`nodata`/`png_min`/`png_max`/`source_label`
   (all hardcoded) and added `filter_size` {3,5,7}. **Still deferred:** Capella `product`
   is single-valued (`sigma`); Capella/Umbra `bucket`/`prefix` could be locked run.sh
-  constants like `S3_BUCKET`.
+  constants like `STAGING_BUCKET`/`STAGING_DEST_BASE`.
 
 ## Registering (from the MAAP hub)
 
@@ -541,7 +543,18 @@ time. The whole mechanism:
   `register_to_maap` is checked. Create that **GitHub Environment with Required
   reviewers** (Settings → Environments) to actually gate live registrations —
   until it exists *with reviewers*, GitHub auto-creates it unprotected and runs
-  ungated.
+  ungated. **Managing approvers** (max 6; any **one** approval releases a run —
+  it's OR, not unanimous): Settings → Environments → `maap-registration` → Required
+  reviewers, or via API —
+  `gh api -X PUT repos/<owner>/<repo>/environments/maap-registration` with a
+  `reviewers` array. Footgun: the PUT **REPLACES the whole reviewer list**, so
+  include every existing reviewer's *numeric user id* plus the new one
+  (`{"type":"User","id":<id>}`; get an id via `gh api users/<login> --jq .id`), and
+  re-send `wait_timer`/`prevent_self_review`/`deployment_branch_policy` to avoid
+  resetting them. A reviewer **must have ≥ write access** to the repo. The env's
+  **`can_admins_bypass` defaults `true`** — repo admins can deploy without waiting
+  for approval; set it `false` in the same PUT to make approval mandatory even for
+  admins. Current approvers: kyle-lesinger, gwlayne, alex-melancon, acblackford.
 - **`gh workflow run` validates inputs against the target `--ref`'s** workflow file
   (not only the default branch), so a new input (e.g. `algorithm`) must be pushed to
   the branch you run from before dispatching.

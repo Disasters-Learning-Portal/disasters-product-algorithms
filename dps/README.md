@@ -26,7 +26,7 @@ relative `output/` dir is uploaded to S3 by DPS.
 ```
 dps/
 ├── environment.yml          # SHARED lean conda env (name: disasters_dps)
-├── _finalize.sh             # SHARED output flow: PNG -> output/ -> S3 -> delete COG
+├── _finalize.sh             # SHARED output flow: output/ -> S3 -> delete COG (no PNGs)
 ├── register_algorithms.py   # legacy maap-py registration helper (see "Registering")
 ├── README.md
 └── <name>/                  # one subfolder per algorithm
@@ -61,11 +61,13 @@ Every `run.sh` has the same skeleton, whatever the CLI underneath:
    (`YYYYMM_Hazard_Location`) and require `source_label`; both must be real values.
 4. **Build the CLI arg list** and run it under `conda run --name disasters_dps
    process_<name> ...`, writing products into `${OUT_HOME}` (`~/drcs_outputs/<event>/`).
-5. **`source "${basedir}/../_finalize.sh"`** — the shared output flow: optional PNG
-   quicklook → copy to `output/` (DPS uploads this, so the COG is never lost) →
-   optional publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → optional
-   COG delete. Toggled by the `save_png` / `enable_s3_upload` / `delete_cog` inputs.
-   The S3 destination is **locked per algorithm_version** (not a job input).
+5. **`source "${basedir}/../_finalize.sh"`** — the shared output flow: copy to
+   `output/` (DPS uploads this, so the COG is never lost) → publish to
+   `s3://nasa-disasters-staging/dps_output/<event>/` (always on, via short-lived MAAP
+   workspace credentials) → scratch-COG delete (always on). No operator toggles and
+   **no PNG quicklooks**: destination, publish, and scratch-delete are **locked per
+   algorithm_version** (the `enable_s3_upload` / `delete_cog` / `save_png` inputs were
+   all removed). See `docs/DPS.md` "All sensors → nasa-disasters-staging".
 
 Two input archetypes: a **file-input** algorithm takes a `File` granule
 (`--file_path_of_raw_data`, e.g. landsat/sentinel2); a **fetch** algorithm takes no

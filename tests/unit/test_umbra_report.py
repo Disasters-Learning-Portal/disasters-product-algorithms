@@ -8,9 +8,11 @@ Pins two things the DPS in-job date-discovery UX depends on:
    groups objects by the scene subdir (`parts[2]`, as `retrieve_umbra_resources`
    does), keeps the newest `LastModified` per scene, skips subdirs without a
    parseable acquisition date, and sorts most-recently-delivered first.
-2. `process_umbra --list_dates` prints the aligned table (with a `scene folder`
-   column) AND writes the sortable `available_umbra_dates.csv` artifact into
-   `--output` (on DPS that dir is uploaded and browsable from the Jobs panel).
+2. The list-dates DPS tool (`dps/list_dates/report_dates.py`, `--sensor umbra`)
+   prints the aligned table (with a `scene folder` column) AND writes the
+   sortable `available_umbra_dates.csv` artifact into `--output` (on DPS that
+   dir is uploaded and browsable from the Jobs panel). The per-sensor
+   `process_umbra` CLI no longer carries a `--list_dates` flag.
 """
 
 import csv
@@ -23,7 +25,7 @@ pytest.importorskip("osgeo.gdal")
 pytest.importorskip("rasterio")
 pytest.importorskip("scipy")
 
-from umbra import umbra_v2, process_umbra
+from umbra import umbra_v2
 
 
 def _dt(y, mo, d, h, mi, s):
@@ -67,7 +69,7 @@ def test_report_umbra_scenes_carries_scene_and_sorts(monkeypatch):
     assert scenes[0]["added_to_s3"] == _dt(2026, 6, 10, 7, 11, 21)
 
 
-def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys):
+def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys, report_dates):
     scenes = [
         {"date": "2026-04-18 19:33:05", "scene": SCENE_A,
          "acquired": datetime(2026, 4, 18, 19, 33, 5),
@@ -76,15 +78,18 @@ def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys):
          "acquired": datetime(2026, 4, 15, 22, 57, 47),
          "added_to_s3": _dt(2026, 6, 10, 4, 54, 52)},
     ]
+    # report_dates imports umbra_v2 lazily and calls umbra_v2.report_umbra_scenes,
+    # so patch it on the source module.
     monkeypatch.setattr(
-        process_umbra, "report_umbra_scenes",
-        lambda bucket, prefix: scenes,
+        umbra_v2, "report_umbra_scenes",
+        lambda *a, **k: scenes,
     )
     monkeypatch.setattr(
-        "sys.argv", ["process_umbra", "--list_dates", "--output", str(tmp_path)],
+        "sys.argv",
+        ["report_dates", "--sensor", "umbra", "--output", str(tmp_path)],
     )
 
-    process_umbra.main()
+    report_dates.main()
 
     # stdout table includes the new scene-folder column + a copy-ready date
     out = capsys.readouterr().out

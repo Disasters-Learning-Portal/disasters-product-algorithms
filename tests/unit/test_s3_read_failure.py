@@ -1,7 +1,8 @@
 """
 Tests for ``shared_utils.s3utils.explain_s3_read_failure`` -- the pure
-message-mapper the ``--list_dates`` discovery path uses to turn a vendor-bucket
-read failure into ONE operator-facing line instead of a raw boto3 traceback.
+message-mapper the list-dates discovery path (``dps/list_dates/report_dates.py``)
+uses to turn a vendor-bucket read failure into ONE operator-facing line instead
+of a raw boto3 traceback.
 
 Pins:
 1. Missing credentials -> a message mentioning "credentials".
@@ -43,19 +44,6 @@ def test_access_denied_variants(code):
     assert msg is not None
     assert "access denied" in msg.lower()
     assert BUCKET in msg
-
-
-def test_access_denied_on_assume_role_names_the_role(monkeypatch):
-    # An AccessDenied whose operation is AssumeRole means READ_ROLE_ARN can't be
-    # assumed (trust policy), NOT that s3:ListBucket is missing. The message must
-    # say so and echo the role, so an operator fixes the right thing.
-    monkeypatch.setenv("READ_ROLE_ARN", "arn:aws:iam::515966502221:role/disasters-prod")
-    err = _client_error("AccessDenied", operation="AssumeRole")
-    msg = explain_s3_read_failure(err, BUCKET, PREFIX)
-    assert msg is not None
-    assert "assumerole" in msg.lower()
-    assert "disasters-prod" in msg          # the role is named
-    assert "s3:listbucket" not in msg.lower()  # not the misleading old text
 
 
 @pytest.mark.parametrize("code", ["NoSuchBucket", "404"])

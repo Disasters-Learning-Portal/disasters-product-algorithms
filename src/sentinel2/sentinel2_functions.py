@@ -53,7 +53,10 @@ def dump_geotiff(data_array, crs, trans, nodata_val, outfile):
 def extract_band_geotiffs(band, safe, level, res):
   if level == 'MSIL2A':
     # find .jp2 file matching band/resolution
-    jp2_file = glob.glob(safe + f'/GRANULE/*/IMG_DATA/R{res}m/*{band}*.jp2')[0]
+    jp2_matches = glob.glob(safe + f'/GRANULE/*/IMG_DATA/R{res}m/*{band}*.jp2')
+    if not jp2_matches:
+      raise FileNotFoundError(f'band {band} ({res}m) not found in {safe} (GRANULE/*/IMG_DATA/R{res}m/)')
+    jp2_file = jp2_matches[0]
 
     # create output filename
     outname = os.path.basename(safe).replace('.SAFE', f'_{band}_{res}m.tif')
@@ -78,7 +81,10 @@ def extract_band_geotiffs(band, safe, level, res):
 
   elif level == 'MSIL1C':
     # find .jp2 file matching band
-    jp2_file = glob.glob(safe + f'/GRANULE/*/IMG_DATA/*{band}*.jp2')[0]
+    jp2_matches = glob.glob(safe + f'/GRANULE/*/IMG_DATA/*{band}*.jp2')
+    if not jp2_matches:
+      raise FileNotFoundError(f'band {band} ({res}m) not found in {safe} (GRANULE/*/IMG_DATA/) -- verify the L1C product contains this band')
+    jp2_file = jp2_matches[0]
 
     # create output filename
     outname = os.path.basename(safe).replace('.SAFE', f'_{band}_{res}m.tif')
@@ -1047,9 +1053,17 @@ def gen_merge(list_of_files, outfile, method='first'):
     if tmp_dir is not None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-def s2_merge(dir_to_merge, mask=False, method='first'): 
-  # create output filename
-  ims = glob.glob(os.path.join(dir_to_merge, '*tif'))
+def s2_merge(dir_to_merge, mask=False, method='first'):
+  # Gather inputs, excluding any prior merged output so a re-merge (e.g. -force)
+  # doesn't fold the previous mosaic back into the new one. Raise (not IndexError
+  # on ims[0]) when the product dir has no output -- mirrors ls_merge so the merge
+  # loop can skip a product that failed to generate instead of crashing the job.
+  ims = sorted(
+      im for im in glob.glob(os.path.join(dir_to_merge, '*tif'))
+      if 'merged' not in os.path.basename(im)
+  )
+  if not ims:
+      raise FileNotFoundError(f'No (non-merged) .tif files to merge in: {dir_to_merge}')
 
   parts = os.path.splitext(os.path.basename(ims[0]))[0].split("_")
 

@@ -25,6 +25,14 @@ def retrieve_capella_resources(
     bucket: str = "csdap-capellaspace-delivery",
     prefix: str = "disasters"
 ) -> list[str]:
+    """Return every Capella tif for the acquisition closest to ``date``.
+
+    One acquisition can appear under more than one folder (different processing
+    levels -- e.g. ``_GEO_`` and ``_SLC_``), so all folders whose timestamp
+    matches are pooled into one flat list. ``sigmaCalib`` reads the ``_GEO_``
+    band; pass the result through :func:`group_capella_scenes` to split it into
+    one group per GEO band (i.e. per genuine scene). Real-case S3 keys preserved.
+    """
 
     files = retrieve_s3_file_list(bucket, prefix)
 
@@ -59,6 +67,17 @@ def retrieve_capella_resources(
     return tifs
 
 
+def group_capella_scenes(tifs: list[str]) -> list[list[str]]:
+    """Split pooled Capella tifs into one group per scene (one per GEO band).
+
+    ``sigmaCalib`` only reads the ``_GEO_`` band, so each GEO file is a distinct
+    scene; folders without a GEO band (e.g. an ``_SLC_``-only level) contribute
+    nothing. Returns one single-element ``[geo]`` list per GEO band so the caller
+    loops and emits one COG per scene instead of silently keeping only the first.
+    """
+    return [[geo] for geo in tifs if "_GEO_" in geo]
+
+
 def report_capella_scenes(
     bucket: str = "csdap-capellaspace-delivery",
     prefix: str = "disasters",
@@ -73,6 +92,7 @@ def report_capella_scenes(
     Returns a list of dicts sorted by ``added_to_s3`` descending::
 
         {"date": "20231107120000",          # pass back as --date
+         "scene": "CAPELLA_..._20231107120000_...",  # S3 scene folder name
          "acquired": datetime(...),          # acquisition time from the key
          "added_to_s3": datetime(...)}       # newest LastModified for the scene
     """
@@ -97,6 +117,7 @@ def report_capella_scenes(
             continue  # subdir doesn't carry a parseable acquisition date
         scenes.append({
             "date": acquired.strftime("%Y%m%d%H%M%S"),
+            "scene": subdir,
             "acquired": acquired,
             "added_to_s3": added,
         })
@@ -127,7 +148,7 @@ def sigmaCalib(
     save_location: str = "/tmp/s3_temp",
     do_filt : bool = True,
     filter_size : int = 5
-) -> str:
+) -> tuple[str, str]:
 
     if save_location.endswith("/"):
         save_location = save_location[:-1]
@@ -224,4 +245,6 @@ def sigmaCalib(
 
     print(f"Generation completed, file saved to {outfile}")
 
-    return outfile
+    # Return the sigma0 product plus the raw downloaded source raster so the
+    # caller can delete the (large) original once a valid COG exists.
+    return outfile, in_file

@@ -11,6 +11,7 @@ Single responsibility: COG creation with custom metadata injection.
 import os
 import re
 import tempfile
+import uuid
 from typing import Dict, List, Optional, Tuple, Union, Any
 from datetime import datetime
 
@@ -288,7 +289,11 @@ def validate_cog_in_memory(file_bytes: bytes, filename: str = "temp.tif") -> Tup
             is_cog, errors, warnings, width, height, bands,
             compression, blocksize, overviews.
     """
-    vsimem_path = f'/vsimem/validate_{filename}'
+    # Unique per call: /vsimem is a process-global filesystem, so a constant path
+    # would collide when multiple threads validate concurrently (e.g. the S3 metadata
+    # baker's map_threaded pool) — a torn read of another thread's bytes surfaces as
+    # bogus "IFD offset > 300" / "Invalid data type for tag TileOffsets" errors.
+    vsimem_path = f'/vsimem/validate_{uuid.uuid4().hex}_{filename}'
 
     try:
         gdal.FileFromMemBuffer(vsimem_path, file_bytes)
@@ -392,8 +397,14 @@ def _create_cog_in_memory(
     quiet: bool,
 ) -> Union[bytes, str]:
     """In-memory COG creation via GDAL vsimem."""
-    input_vsi = '/vsimem/cog_meta_input.tif'
-    output_vsi = '/vsimem/cog_meta_output.tif'
+    # Unique per call: /vsimem is process-global. Constant paths race when the caller
+    # fans this out across threads (the S3 metadata baker runs bake_s3 under
+    # map_threaded), where concurrent bakes clobber each other's input/output buffers —
+    # surfacing as IndexError, RuntimeError('unknown error occurred'),
+    # "Could not read /vsimem/cog_meta_output.tif", or a "geotransform changed" mismatch.
+    _uid = uuid.uuid4().hex
+    input_vsi = f'/vsimem/cog_meta_input_{_uid}.tif'
+    output_vsi = f'/vsimem/cog_meta_output_{_uid}.tif'
 
     try:
         gdal.FileFromMemBuffer(input_vsi, file_bytes)
@@ -606,7 +617,10 @@ def _read_vsimem(vsimem_path: str) -> bytes:
 
     data = gdal.VSIFReadL(1, file_size, vsi_file)
     gdal.VSIFCloseL(vsi_file)
-    return data
+    # GDAL's VSIFReadL returns a bytearray; normalize to bytes so callers can
+    # hand the result straight to rasterio.io.MemoryFile / boto3 put_object
+    # (MemoryFile rejects a bytearray). Matches the -> bytes annotation.
+    return bytes(data) if data else b""
 
 
 def _vsimem_to_file(vsimem_path: str, file_path: str) -> None:

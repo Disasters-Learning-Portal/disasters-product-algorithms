@@ -6,8 +6,8 @@ algorithm_description: >-
   Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response
   products. Fetches the source GEC raster for the requested date from the CSDA
   vendor S3 bucket (csda-data-vendor-umbra), applies the selected radiometric
-  calibration (sigma/beta/gamma/rcs), optionally Lee-filters it, reprojects, and
-  embeds activation-event GeoTIFF metadata tags.
+  calibration (sigma/beta/gamma) with an always-on Lee speckle filter, reprojects,
+  and embeds activation-event GeoTIFF metadata tags.
 code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 # MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
 # command paths MUST be prefixed with the repo directory name.
@@ -33,11 +33,11 @@ keywords: umbra, sar, cog, disasters, flood, sigma0, calibration
 inputs:
   - name: date
     label: Target date
-    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. List available dates: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
+    doc: "Target acquisition date 'YYYY-MM-DD HH:MM:SS'; the closest scene in the vendor bucket is selected. To discover valid dates, run the standalone 'list-dates' discovery algorithm (sensor=umbra) or use: aws s3 ls s3://csda-data-vendor-umbra/disasters/ (see docs/DPS.md 'Finding available scenes')."
     type: string
   - name: product
     label: Calibration product
-    doc: "Calibration product to generate: sigma, beta, gamma, or rcs."
+    doc: "Calibration product to generate: sigma, beta, or gamma."
     type: string
     default: "sigma"
   - name: bucket
@@ -50,14 +50,9 @@ inputs:
     doc: Key prefix within the vendor bucket to search for scenes.
     type: string
     default: "disasters"
-  - name: apply_filter
-    label: Apply Lee filter
-    doc: Apply a Lee speckle filter to the product.
-    type: boolean
-    default: false
   - name: filter_size
     label: Lee filter window size
-    doc: Lee filter window size (e.g. 3, 5, 7); only used when apply_filter is true.
+    doc: "Lee speckle-filter kernel. Filtering is always applied to the backscatter (no opt-out); only the kernel is tunable. Must be 3, 5, or 7."
     type: int
     default: 5
   - name: dst_crs
@@ -81,34 +76,9 @@ inputs:
     default: 22
   - name: nodata
     label: No-data value (optional)
-    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    doc: "Override the no-data value; leave blank to use the default (-9999.0). SAR dB backscatter uses -9999.0, never 0 (0 dB is a legitimate value)."
     type: string
     default: ""
-  - name: enable_s3_upload
-    label: Publish to S3
-    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination, not operator-editable; DPS also uploads output/ to its job bucket regardless)."
-    type: boolean
-    default: false
-  - name: save_png
-    label: Save PNG quicklook
-    doc: Also write a .png quicklook next to each product COG.
-    type: boolean
-    default: true
-  - name: png_min
-    label: PNG min (optional)
-    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
-    type: string
-    default: ""
-  - name: png_max
-    label: PNG max (optional)
-    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
-    type: string
-    default: ""
-  - name: delete_cog
-    label: Delete COG from home after upload
-    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (frees space; PNG and the output/ copy are kept)."
-    type: boolean
-    default: true
 outputs:
   - name: output
     type: Directory

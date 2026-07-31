@@ -398,9 +398,10 @@ locally before pushing.
 
 1. **CI on `dev` triggers `.github/workflows/build-and-push-dev.yaml`**
    directly — single-repo flow, no cross-repo dispatch. The same shape
-   exists for `main` (`build-and-push.yaml`). Both filter `paths-ignore`
-   on docs/notebooks/tests/tools/markdown, so a sensor-code push always
-   fires a rebuild.
+   exists for `main` (`build-and-push.yaml`). Both filter on a `paths`
+   allowlist (`image/**`, `src/**`, `pyproject.toml`), so a sensor-code
+   push (new files under `src/<sensor>/` + a `pyproject.toml` edit)
+   always fires a rebuild.
 2. **Image build** takes ~1-1.5 min if you only added Python code
    (Layer 2 pip install ~30s + ~1 min of runner overhead) or ~3-4 min
    if `image/environment.yml` changed (Layer 1 conda env update ~2-3 min).
@@ -427,8 +428,9 @@ locally before pushing.
 If `process_<sensor>` is missing on a fresh pod after a green CI + image
 rebuild, see the debug checklist in
 [HUB_DEPLOYMENT.md](HUB_DEPLOYMENT.md). Most common causes now: the
-build workflow didn't fire (push was doc-only, hit `paths-ignore`) or
-you spawned the prod pod (`...image:latest`) before merging `dev` → `main`.
+build workflow didn't fire (push touched nothing in the `paths`
+allowlist — e.g. a docs-only or `dps/`-only push) or you spawned the
+prod pod (`...image:latest`) before merging `dev` → `main`.
 
 ---
 

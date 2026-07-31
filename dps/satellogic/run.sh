@@ -9,8 +9,8 @@ set -euo pipefail
 # bucket/prefix are hardcoded in the CLI (not flags). DPS-worker read access
 # required (confirmed available).
 #
-# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> PNG -> output/ -> S3
-# -> delete COG.
+# Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> output/ -> S3
+# (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
@@ -24,25 +24,25 @@ source "${basedir}/../_validate.sh"
 DATE=""
 PRODUCT="truecolor"
 LEVEL="L1D"
-BUCKET="csda-data-vendor-satellogic"   # informational; CLI hardcodes this
-PREFIX="disasters"                      # informational; CLI hardcodes this
-USE_MASK="false"
 VISUALIZE="false"
 GAMMA="0.7"
-DST_CRS="native"
+FILTER_SIZE="5"
+# SOURCE is hardcoded to "csda" for Satellogic (ticket #320); not a job input.
+SOURCE_LABEL="csda"
 ACTIVATION_EVENT="YYYYMM_Hazard_Location"
-SOURCE_LABEL=""
-COMPRESSION_LEVEL="22"
-NODATA=""
-ENABLE_S3_UPLOAD="false"
-# S3 destination is LOCKED for this version: not exposed as a job input and not
-# parsed from flags, so operators cannot change it. To target a different
-# bucket/prefix, publish a new algorithm_version with these two values changed.
-S3_BUCKET="nasa-disasters"
-S3_DEST_BASE="drcs_activations_new"
-SAVE_PNG="true"
-PNG_MIN=""
-PNG_MAX=""
+# Publishing is ALWAYS ON and the S3 destination is LOCKED for this version --
+# neither is a job input nor parsed from a flag. Satellogic publishes to the MAAP
+# staging bucket nasa-disasters-staging (prefix dps_output/<event>/) using short-
+# lived MAAP workspace credentials -- the DPS worker's own role can't write there;
+# see shared_utils/staging_upload.py + dps/_finalize.sh step 3a. To target a
+# different bucket/prefix, publish a new algorithm_version with these constants changed.
+ENABLE_S3_UPLOAD="true"
+STAGING_UPLOAD="true"
+STAGING_BUCKET="nasa-disasters-staging"
+STAGING_DEST_BASE="dps_output"
+# DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
+# COG in ~/drcs_outputs is always removed to free worker disk -- the product already
+# lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
 DELETE_COG="true"
 
 # --- parse named flags ---
@@ -51,40 +51,26 @@ while [[ $# -gt 0 ]]; do
     --date)              DATE="$2"; shift 2;;
     --product)           PRODUCT="$2"; shift 2;;
     --level)             LEVEL="$2"; shift 2;;
-    --bucket)            BUCKET="$2"; shift 2;;
-    --prefix)            PREFIX="$2"; shift 2;;
     --gamma)             GAMMA="$2"; shift 2;;
-    --dst_crs)           DST_CRS="$2"; shift 2;;
+    --filter_size)       FILTER_SIZE="$2"; shift 2;;
     --activation_event)  ACTIVATION_EVENT="$2"; shift 2;;
-    --source_label)      SOURCE_LABEL="$2"; shift 2;;
-    --compression_level) COMPRESSION_LEVEL="$2"; shift 2;;
-    --nodata)            NODATA="$2"; shift 2;;
-    --png_min)           PNG_MIN="$2"; shift 2;;
-    --png_max)           PNG_MAX="$2"; shift 2;;
-    --use_mask)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then USE_MASK="$2"; shift 2; else USE_MASK="true"; shift; fi ;;
     --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
-    --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
-    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
-    --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 require_nonempty date "${DATE}" "'YYYY-MM-DD HH:MM:SS', to select a Satellogic scene"
-validate_regex date "${DATE}" '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$' "'YYYY-MM-DD HH:MM:SS'"
+# One datetime, or a comma-separated list of them (multi-date selection). Uses
+# ERE grouping -- bash [[ =~ ]] does NOT support PCRE (?:...) non-capturing groups.
+validate_regex date "${DATE}" '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(,[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})*$' "'YYYY-MM-DD HH:MM:SS' or a comma-separated list 'YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,...'"
 validate_in_set level "${LEVEL}" "L1D L1B"
 validate_activation_event "${ACTIVATION_EVENT}"
-require_nonempty source_label "${SOURCE_LABEL}" "e.g. USGS, NASA, NOAA, Satellogic"
-validate_dst_crs "${DST_CRS}"
-validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 validate_number gamma "${GAMMA}"
+validate_in_set filter_size "${FILTER_SIZE}" "3 5 7"
 # --product (truecolor|colorir|ndvi|ndwi|evi) is already enforced by argparse choices=.
-[[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
-[[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
-[[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
 
-echo "INFO: vendor source = s3://${BUCKET}/${PREFIX} (read by process_satellogic; AWS read access required)"
+echo "INFO: vendor source = s3://csda-data-vendor-satellogic/disasters (read by process_satellogic; AWS read access required)"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"
@@ -99,13 +85,10 @@ args=( --product "${PRODUCT}"
        --date "${DATE}"
        --level "${LEVEL}"
        --output "${OUT_HOME}"
-       -dst_crs "${DST_CRS}"
-       -compression_level "${COMPRESSION_LEVEL}"
        --gamma "${GAMMA}"
+       --filter_size "${FILTER_SIZE}"
        --metadata-json "${META_JSON}" )
-[[ "${USE_MASK}"  == "true" ]] && args+=( --use_mask )
 [[ "${VISUALIZE}" == "true" ]] && args+=( --visualize )
-[[ -n "${NODATA}" ]]          && args+=( -nodata "${NODATA}" )
 
 conda run --live-stream --name disasters_dps process_satellogic "${args[@]}"
 

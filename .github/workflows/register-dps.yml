@@ -1,63 +1,134 @@
 name: Register DPS algorithm (OGC)
+# Per-run title so the Actions list shows which algorithm + version is registering
+# and whether it's a live register vs a dry run.
+run-name: Register ${{ inputs.algorithm }} (${{ inputs.algorithm_version }}) ${{ inputs.register_to_maap && '→ MAAP (deploy)' || '(dry-run)' }}
 
-# Registers a DPS sensor as an OGC process on MAAP via MAAP's ogc-app-pack-generator
-# action — the registration path that supports the `?` optional-input suffix (the
-# Register Algorithm GUI's Type dropdown does not; see docs/DPS.md). The action:
-#   1. builds a CWL workflow from the OGC config (dps/ogc/<sensor>.yml),
-#   2. validates it (cwltool --validate + ap-validator),
-#   3. commits the generated CWL to cwl_workflows/ and pushes it, then
-#   4. (if deploy=true) POST/PUTs it to the OGC processes API (prod).
-# Because the config sets algorithm_container_url (a prebuilt image), the action
-# SKIPS the Docker build — we do NOT pass dockerfile-path (validate_inputs.py
-# rejects providing both).
+# Builds the DPS worker image + generates the OGC CWL for a sensor and
+# (optionally) registers it to MAAP, via MAAP-Project/ogc-app-pack-generator.
+# Because we pass `dockerfile-path: dps/Dockerfile`, the action:
+#   1. BUILDS the worker image from dps/Dockerfile on the ref this run uses and
+#      PUSHES it to ghcr.io,
+#   2. generates a CWL from the OGC config (dps/ogc/<algorithm>.yml) with that image,
+#   3. validates the CWL (cwltool + ap-validator),
+#   4. COMMITS the generated CWL to cwl_workflows/ and PUSHES it, then
+#   5. if register_to_maap is checked, registers it to the OGC processes API.
 #
-# Manual only: registration is a deliberate act against a LIVE MAAP endpoint.
+# ⚠️ RUN THIS FROM AN UNPROTECTED BRANCH. Step 4 pushes a commit to the branch
+#    this run executes on. `dev` and `main` are PROTECTED, so the bot's push is
+#    rejected ("GH006: Protected branch update failed") and the run fails AFTER
+#    the image + CWL are already built. Run it from the unprotected
+#    `deploy-algorithm` branch (one step up from dev; has the OGC files).
+#
+# ✅ ONE-BEHIND DEPLOY — FIXED by our pinned fork of the generator (see the `uses:`
+#    step below). Upstream deployed the CWL at the CHECKOUT commit (github.sha) =
+#    the PREVIOUS run's CWL (the CWL filename is branch-based and overwritten each
+#    run), so registering N algorithms needed N+1 runs / a single one needed 2.
+#    Our fork deploys at the just-pushed HEAD, so a SINGLE run now registers its
+#    OWN CWL. Detail: docs/DPS.md "Registering via the OGC / GitHub Action path".
 #
 # ── PREREQUISITES (one-time) ────────────────────────────────────────────────
-#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (the same MAAP_PGT
-#     you put in the hub's MAAP Settings). Sent as the `proxy-ticket` header.
-#   • The image in the config's algorithm_container_url must be PUBLICLY pullable
-#     (docker.io/klesinger/disasters-dps-image:kyle-test).
-#   • The repo must be readable by MAAP's ADES: the deploy step registers the CWL
-#     by its raw.githubusercontent.com URL, which the ADES fetches. Public repo = OK.
-#   • The "Run workflow" button only appears once THIS file exists on the default
-#     branch (main) — cherry-pick it there. You can then pick the ref (kyle-test)
-#     to run against.
+#   • Repo secret MAAP_PGT = your MAAP proxy-granting ticket (only used when
+#     register_to_maap is checked).
+#   • Admin approval: create a GitHub Environment named `maap-registration`
+#     (repo Settings → Environments → New environment) with **Required reviewers**
+#     = the admin(s). When register_to_maap is checked, the run PAUSES until an
+#     admin approves before it registers. Dry runs are NOT gated. NOTE: until that
+#     environment exists WITH reviewers, register runs are effectively ungated.
+#   • After the first build, make the ghcr.io package PUBLIC so MAAP's ADES can
+#     pull it (org Settings → Packages must ALLOW public packages first, then the
+#     package → make Public). Needed before you SUBMIT A JOB (not for registration).
+#   • The "Run workflow" button appears because this file is on the default branch
+#     (main); pick the UNPROTECTED `deploy-algorithm` ref in "Use workflow from".
 on:
   workflow_dispatch:
     inputs:
-      config_path:
-        description: OGC algorithm config to register (dps/ogc/<sensor>.yml)
-        required: true
-        default: dps/ogc/capella.yml
-      deploy:
-        description: Register to MAAP prod? (false = generate + validate CWL only)
+      algorithm:
+        # Dropdown of the registerable algorithms. Maps to dps/ogc/<name>.yml.
+        description: "Which algorithm to register"
+        type: choice
+        options:
+          - capella
+          - umbra
+          - satellogic
+          - list_dates
+          - landsat
+          - sentinel2
+        default: capella
+      register_to_maap:
+        # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless
+        # you deliberately check it — a safe dry run is the default.
+        description: "UNCHECKED = safe dry run (build image + validate CWL only; registers NOTHING). CHECK to REGISTER the algorithm to MAAP (LIVE)."
         type: boolean
+        required: false
+        default: false
+      algorithm_version:
+        # Stamped into the OGC config's `algorithm_version` before the generator
+        # runs, so it becomes the registered process's version in MAAP. Use 'dev'
+        # for iterating, or a release tag like v1.0 / v1.1 / v2.0 to pin one.
+        description: "Algorithm version to register (e.g. dev, v1.0, v1.1, v2.0). Overrides algorithm_version in the OGC config."
         required: true
-        default: true
+        default: dev
 
 permissions:
-  contents: write  # the generator commits the generated CWL to cwl_workflows/ and pushes it
-  packages: write  # per the generator README (only exercised if a Dockerfile is built — it isn't here)
+  contents: write  # the generator commits the generated CWL and pushes it
+  packages: write  # push the built DPS worker image to ghcr.io
+
+# Serialize against sync-deploy-algorithm.yml. BOTH workflows push to the
+# unprotected `deploy-algorithm` branch — this one commits+pushes the generated
+# CWL, the sync merges `dev` in on every dev push. With no coordination, a sync
+# push that lands AFTER this run checked out `deploy-algorithm` makes this run's
+# CWL push a non-fast-forward -> rejected, and the run dies before registering
+# (observed 2026-07-20, run 29755367859). Sharing ONE concurrency group makes
+# GitHub run the two one-at-a-time (queue, never overlap). The group string MUST
+# match sync-deploy-algorithm.yml's `concurrency.group` verbatim. cancel-in-progress
+# false = queue behind an in-flight run, never kill a build/register mid-flight.
+concurrency:
+  group: sync-dev-to-deploy-algorithm
+  cancel-in-progress: false
 
 jobs:
   register:
-    name: Generate + register OGC application package
+    name: Build image + generate CWL + (optionally) register to MAAP
     runs-on: ubuntu-latest
+    # Admin-approval gate — ONLY when actually registering. When register_to_maap
+    # is checked, the job targets the `maap-registration` GitHub Environment
+    # (required reviewers = admins), so it PAUSES for approval before registering.
+    # When unchecked, the name evaluates to '' (no environment) so dry runs run
+    # freely with no approval.
+    environment: ${{ inputs.register_to_maap && 'maap-registration' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build + register OGC application package
-        uses: MAAP-Project/ogc-app-pack-generator@main
+      - name: Stamp algorithm_version into the OGC config
+        # Overwrite the config's algorithm_version with the dispatch input so the
+        # registered process carries that version (dev, v1.0, ...). Passed via env
+        # to avoid injecting the expression straight into the shell.
+        env:
+          ALG_VER: ${{ inputs.algorithm_version }}
+          CONFIG: dps/ogc/${{ inputs.algorithm }}.yml
+        run: |
+          sed -i -E "s|^algorithm_version:.*|algorithm_version: ${ALG_VER}|" "${CONFIG}"
+          echo "algorithm_version stamped:"; grep -E '^algorithm_version:' "${CONFIG}"
+
+      - name: Build image + generate CWL + (optionally) register
+        # Our FORK of MAAP's generator, pinned to a SHA — it patches the ONE-BEHIND
+        # deploy so a single run registers its OWN CWL (upstream deploys the CWL at
+        # github.sha = the CHECKOUT commit, which is the PREVIOUS run's CWL because
+        # the CWL filename is branch-based and overwritten each run). Fork main =
+        # upstream main + that one-line fix. Re-pin this SHA when pulling upstream
+        # updates into the fork. Upstream: MAAP-Project/ogc-app-pack-generator.
+        uses: Disasters-Learning-Portal/ogc-app-pack-generator@3c95ec1ee5b737a9be0e6fb2449a7fd1686f5259
         with:
-          algorithm-configuration-path: ${{ inputs.config_path }}
+          algorithm-configuration-path: dps/ogc/${{ inputs.algorithm }}.yml
+          # Build the worker image in-workflow from this Dockerfile and push to
+          # ghcr.io; the action injects it into the generated CWL.
+          dockerfile-path: dps/Dockerfile
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          deploy-app-pack: ${{ inputs.deploy }}
-          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT would be
-          # https://api.dit.maap-project.org/api/ogc/processes.
+          # Checkbox: false (default) = build + validate only; true = register.
+          deploy-app-pack: ${{ inputs.register_to_maap }}
+          # Prod OGC processes endpoint (no /ui, no trailing slash). DIT (test)
+          # would be https://api.dit.maap-project.org/api/ogc/processes.
           app-pack-register-endpoint: https://api.maap-project.org/api/ogc/processes
         env:
-          # MAAP proxy-granting ticket — required by deploy_app_pack.py to auth the
-          # POST/PUT. Never printed; supplied from repo secrets.
           MAAP_PGT: ${{ secrets.MAAP_PGT }}

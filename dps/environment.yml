@@ -21,6 +21,16 @@ dependencies:
   - python=3.12
   # --- Geospatial stack (conda only) ---
   - gdal
+  # Sentinel-2 bands ship as JPEG2000 (.jp2). conda-forge GDAL 3.9+ moved the
+  # OpenJPEG JP2 driver into a SEPARATE plugin package that a bare `gdal` install
+  # does NOT pull in -- without it every S2 band read fails with
+  # "gdal_JP2OpenJPEG.so is not available" and process_sentinel2 produces ZERO
+  # products (empty-success job: downloads + unzips fine, then can't open a
+  # single .jp2 band). The hub image gets JP2 for free from the MAAP base; this
+  # lean DPS worker env must pin the plugin explicitly. The version floats to
+  # match whatever `gdal`/`libgdal-core` conda resolves (plugin ABI is pinned to
+  # the core GDAL build, so do NOT hard-pin a version here).
+  - libgdal-jp2openjpeg
   - rasterio
   - rio-cogeo
   - geopandas
@@ -41,5 +51,24 @@ dependencies:
   - psutil
   - fsspec
   - s3fs
+  # --- Archive tools ---
+  # p7zip provides the `7z` binary that process_sentinel2 shells out to
+  # (`7z x <scene>.SAFE.zip`, process_sentinel2.py) to extract Sentinel-2 .SAFE
+  # archives. Without it the DPS job downloads scenes fine but fails to unzip
+  # ("sh: 7z: not found") -> "NO SCENES MATCHED". Same pin as the hub image
+  # (image/environment.yml).
+  - p7zip==16.02
   # --- pip (build-env.sh uses it to install the repo) ---
   - pip
+  - pip:
+    # maap-py: lets a run.sh pull data-provider credentials from MAAP's encrypted
+    # secret store at runtime (maap.secrets.get_secret via dps/_get_secret.py) so
+    # they never pass through the DPS job's parameters or log. Used by the
+    # Sentinel-2 job for Copernicus COP_USER/COP_PASS. pip-only (not on conda-forge).
+    # v5.1.0 is the OGC-compliant client (MAAP guidance 2026-07-21: "use maap-py
+    # 5.1.0 for OGC"); the DPS worker image is plain miniforge (NOT the MAAP base),
+    # so unlike the hub image it does NOT inherit maap-py and must pin it here.
+    # The v5 "breaking" changes are in the LEGACY register path we don't use;
+    # `from maap.maap import MAAP` + `MAAP().secrets.get_secret()` are unchanged in
+    # 5.1.0 (verified against the 5.1.0 source), so _get_secret.py needs no change.
+    - maap-py==5.1.0

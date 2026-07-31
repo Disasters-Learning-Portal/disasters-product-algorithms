@@ -9,7 +9,7 @@ import os
 
 from capella.capella_v2 import (
     retrieve_capella_resources,
-    report_capella_scenes,
+    group_capella_scenes,
     sigmaCalib
 )
 
@@ -24,20 +24,9 @@ def main():
     )
 
     parser.add_argument(
-        "--list_dates",
-        action="store_true",
-        help=(
-            "Report the Capella scenes available in the vendor bucket "
-            "(--bucket/--prefix), newest first by S3 delivery time, then exit "
-            "without processing. Use it to discover which --date values exist; "
-            "each printed date can be passed straight back as --date. Ignores "
-            "--date/--product."
-        ),
-    )
-
-    parser.add_argument(
         "--product",
         choices=["sigma"],
+        required=True,
         help="Calibration product to generate"
     )
 
@@ -56,6 +45,7 @@ def main():
 
     parser.add_argument(
         "--date",
+        required=True,
         help="Target date (YYYYMMDDHHMMSS)"
     )
 
@@ -81,8 +71,9 @@ def main():
     parser.add_argument(
         "-nodata",
         type=float,
-        default=None,
-        help="No-data value for COG outputs"
+        default=-9999.0,
+        help="No-data value for COG outputs (default -9999.0). SAR backscatter is "
+             "float32 dB where 0 dB is a legitimate value, so nodata must never be 0."
     )
 
     parser.add_argument(
@@ -105,8 +96,9 @@ def main():
         default="native",
         help=(
             "Target CRS for COG output. 'native' (default) preserves the "
-            "source UTM projection; pass 'EPSG:3857' for Web Mercator "
-            "(required by veda-data-airflow build_stac)."
+            "source UTM projection; pass 'EPSG:3857' (Web Mercator) for "
+            "optimal VEDA titiler-pgstac tiling (also required by "
+            "veda-data-airflow build_stac)."
         ),
     )
 
@@ -124,28 +116,6 @@ def main():
 
     args = parser.parse_args()
 
-    if args.list_dates:
-        scenes = report_capella_scenes(bucket=args.bucket, prefix=args.prefix)
-        print(
-            f"{len(scenes)} available Capella scene(s) in "
-            f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
-            f"first (top = closest to today). Pass a --date value to process:\n"
-        )
-        print(f"  {'--date':<16}{'acquired (UTC)':<22}added to S3 (UTC)")
-        for s in scenes:
-            print(
-                f"  {s['date']:<16}"
-                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        return
-
-    # --date / --product are optional above so --list_dates can run without
-    # them; enforce them here for the normal processing path.
-    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
-    if missing:
-        parser.error("the following arguments are required: " + ", ".join(missing))
-
     dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)
 
@@ -157,21 +127,50 @@ def main():
         prefix=args.prefix
     )
 
-    outfile = None
+    # One group per GEO band = one genuine scene. Folders may hold several
+    # processing levels of the same acquisition (GEO, SLC); only GEO is used,
+    # so grouping by GEO both drops the unused levels and, in the rare case of
+    # multiple same-timestamp acquisitions, processes every one.
+    scenes = group_capella_scenes(tifs)
 
-    if args.product == "sigma":
-
-        outfile = sigmaCalib(
-            tifs,
-            save_location=args.output,
-            do_filt=args.apply_filter,
-            filter_size=args.filter_size
+    if not scenes:
+        raise FileNotFoundError(
+            f"No Capella GEO band found for --date {args.date} "
+            f"in s3://{args.bucket}/{args.prefix}"
         )
 
-    # Convert to COG
-    if outfile:
+    print(f"Found {len(scenes)} Capella scene(s) for --date {args.date}")
 
-        print("\nConverting to COG...")
+    cog_paths = []
+
+    for i, scene_tifs in enumerate(scenes, start=1):
+
+        print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
+
+        # Keep single-scene output flat (byte-identical to before). Isolate each
+        # scene in its own subdir only when there are several, so identically
+        # named (same-timestamp) COGs don't clobber each other locally or in S3.
+        scene_out = (
+            args.output if len(scenes) == 1
+            else os.path.join(args.output, f"scene_{i}")
+        )
+
+        outfile = None
+        source_tif = None
+
+        if args.product == "sigma":
+
+            outfile, source_tif = sigmaCalib(
+                scene_tifs,
+                save_location=scene_out,
+                do_filt=args.apply_filter,
+                filter_size=args.filter_size
+            )
+
+        if not outfile:
+            continue
+
+        print("Converting to COG...")
 
         cog_path = convert_to_cog(
             outfile,
@@ -183,6 +182,16 @@ def main():
         )
 
         print(f"COG created: {cog_path}")
+        cog_paths.append(cog_path)
+
+        # Delete the raw downloaded source raster now that a valid COG exists.
+        # Gated on COG success (a failure/exception above skips cleanup so the
+        # download is preserved for a retry).
+        if cog_path and source_tif and os.path.exists(source_tif):
+            os.remove(source_tif)
+            print(f"Removed source raster: {source_tif}")
+
+    print(f"\nCreated {len(cog_paths)} COG(s).")
 
 
 if __name__ == "__main__":

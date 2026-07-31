@@ -1,0 +1,121 @@
+# =============================================================================
+# OGC Application Package config for Landsat 8/9 — CLI/GitHub-Action registration.
+# =============================================================================
+# Registered via MAAP-Project/ogc-app-pack-generator (.github/workflows/register-dps.yml)
+# instead of the Register Algorithm GUI. What this buys us over the GUI:
+#
+#   1. Every input EXCEPT the granule File is OGC-optional (the `?` type-suffix
+#      -> minOccurs:0). The GUI cannot express optional (its Type dropdown rejects
+#      `?`), so on a GUI-registered algorithm the Submit Job form errors "Valid
+#      value required" on any falsy value (a toggle left off, a blank box). Here
+#      only file_path_of_raw_data is required — nothing else blocks Submit. run.sh
+#      remains the real enforcement point (it rejects a missing granule, blank
+#      source, and the placeholder activation_event). See docs/DPS.md.
+#
+#   2. No prebuilt image to maintain. register-dps.yml passes `dockerfile-path:
+#      dps/Dockerfile`, so the Action BUILDS the DPS worker image from the branch
+#      it runs on and pushes it to ghcr.io, then injects that image into the
+#      generated CWL. There is therefore NO algorithm_container_url field here.
+#      `run_command` is an ABSOLUTE path inside that image (the Dockerfile bakes
+#      the repo at /app/disasters-product-algorithms); the CWL baseCommand runs
+#      from the ADES job CWD, so a repo-relative path would not resolve.
+#
+# UNLIKE the SAR/discovery OGC configs (capella/umbra/satellogic/list_dates), this
+# is a FILE-INPUT algorithm: file_path_of_raw_data is a REQUIRED `File` (no `?`,
+# minOccurs:1) — you cannot process without a granule, so the Submit form should
+# require one. Every other input stays optional.
+#
+# algorithm_name is intentionally distinct ("landsat-8-9-ogc-test") so registering
+# this does NOT overwrite the existing GUI-registered "landsat-8-9" process.
+# =============================================================================
+algorithm_name: landsat-8-9-ogc-test
+algorithm_version: dev
+algorithm_description: >-
+  Process Landsat 8/9 Collection 2 Level-2 granule archives (.tar/.zip) into
+  Cloud Optimized GeoTIFF disaster-response products (true color, NDVI, water
+  extent, etc.) with reprojection and activation-event GeoTIFF metadata tags.
+  OGC test build: the granule File is required, every other input is optional in
+  the schema so the Submit form never blocks on a falsy default; run.sh enforces
+  the real requirements (granule, source, non-placeholder activation_event).
+keywords: landsat, cog, disasters, flood, fire, ndvi, water-extent
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: OGC registration test — file input required, all other inputs optional (no "Valid value required") + image built in-workflow from dps/Dockerfile.
+# Absolute path INSIDE the built image (Dockerfile bakes the repo at
+# /app/disasters-product-algorithms). Not repo-relative.
+run_command: /app/disasters-product-algorithms/dps/landsat/run.sh
+ram_min: 64
+cores_min: 8
+outdir_max: 20
+
+# INPUTS — file_path_of_raw_data is REQUIRED (`File`, no `?`); all others are
+# optional (`?`) so no falsy value trips the Submit form's "Valid value required"
+# check. Defaults mirror dps/landsat/run.sh; run.sh does the real validation
+# after parsing.
+inputs:
+  - name: file_path_of_raw_data
+    label: Raw data file
+    doc: A Landsat Collection 2 Level-2 granule archive (.tar or .zip). REQUIRED.
+    type: File
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is REJECTED at run time -- set a real value for a real run."
+    type: string?
+    default: "YYYYMM_Hazard_Location"
+  - name: products
+    label: Products
+    doc: "Space-separated list (true pan nat colorIR ndvi ndwi mndwi evi nbr we) or 'all'."
+    type: string?
+    default: "true"
+  - name: source_label
+    label: Source
+    doc: "Data origin, e.g. USGS, NASA, NOAA. REQUIRED for a real run (run.sh rejects an empty source)."
+    type: string?
+    default: ""
+  - name: dst_crs
+    label: Target CRS
+    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
+    type: string?
+    default: "native"
+  - name: merge
+    label: Merge by date/product
+    doc: Mosaic tiles by date and product (-merge).
+    type: boolean?
+    default: true
+  - name: mask
+    label: Cloud mask
+    doc: Generate and apply a cloud mask (-mask).
+    type: boolean?
+    default: true
+  - name: process_date
+    label: Process date (optional)
+    doc: "Only process this date, YYYYMMDD; leave blank for all dates."
+    type: string?
+    default: ""
+  - name: process_tile
+    label: Process tile (optional)
+    doc: "Only process this path/row, e.g. 171035; leave blank for all tiles."
+    type: string?
+    default: ""
+  - name: we_nstd
+    label: Water-extent std devs
+    doc: 'Space-separated std-dev thresholds for water extent (only used when products includes "we").'
+    type: string?
+    default: "1 1.5"
+  - name: compression_level
+    label: COG compression level
+    doc: "ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max (default)."
+    type: int?
+    default: 22
+  - name: nodata
+    label: No-data value (optional)
+    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
+    type: string?
+    default: ""
+
+outputs:
+  - name: output
+    type: Directory

@@ -13,7 +13,7 @@ disasters-product-algorithms (this repo)
         │
         │ .github/workflows/build-and-push{,-dev}.yaml
         │   on: push: branches: [<branch>]
-        │   paths-ignore: docs/**, notebooks/**, tests/**, tools/**, **.md
+        │   paths (allowlist): image/**, src/**, pyproject.toml, <workflow file>
         ▼
   docker build -f image/Dockerfile .   (build context = repo root)
         │
@@ -56,7 +56,7 @@ Layer 1.
   of the COPYed file tree (post-`.dockerignore` filtering). Cold runtime
   ~30s. Re-runs on any algorithms code change.
 
-Why `--no-deps`: the Pangeo base image + Layer 1's conda env already
+Why `--no-deps`: the MAAP base image + Layer 1's conda env already
 provide everything `[project.dependencies]` resolves to. Letting pip
 walk the dep graph would either be a no-op (if conda already satisfies
 the requirement) or, worse, install a pip variant that shadows the
@@ -71,7 +71,7 @@ SHA is implicit in the build context.
 
 ### Dockerfile gotcha: `ADD --chown=` for files NB_USER will later delete
 
-The Pangeo base image declares `USER ${NB_USER}` before our `RUN` steps,
+The base image declares `USER ${NB_USER}` (`jovyan`) before our `RUN` steps,
 so everything in `image/Dockerfile` runs as the non-root notebook user.
 `ADD` and `COPY` default to creating files owned by `root` — fine for
 files that just need to be read by NB_USER, but **fatal if NB_USER later
@@ -127,6 +127,10 @@ Need a new dep?
 
 Three files, three audiences, no cross-repo PR ceremony.
 
+For a curated shortlist of **JupyterLab extensions that complement the MAAP DPS workflow**
+(COG preview, notebook productivity, MAAP ecosystem tiles) — plus what's already in the Pangeo
+base and what to skip — see [HUB_EXTENSIONS.md](HUB_EXTENSIONS.md).
+
 ## Pulling upstream image changes
 
 The `image/` subtree was added via
@@ -145,11 +149,15 @@ remains valid for read-only fetches. NASA-IMPACT's `pangeo-notebook-veda-image`
 upstream-of-upstream is still active; pulls from there go through the
 archived fork unless you rewire the remote.
 
-Bumping the Pangeo base image: edit
-`image/Dockerfile`'s top line — `FROM pangeo/pangeo-notebook:<tag>` —
-to the new tag (see https://github.com/pangeo-data/pangeo-docker-images
-for release cadence). Push the change; Layer 1 invalidates cleanly,
-Layer 2 cache is preserved (different cache key).
+Bumping the base image: edit `image/Dockerfile`'s top line —
+`FROM mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:<tag>` —
+to the new tag (browse tags at the MAAP container registry:
+https://repo.maap-project.org/root/maap-workspaces/container_registry/).
+Push the change; Layer 1 invalidates cleanly, Layer 2 cache is preserved
+(different cache key). The MAAP base is a NASA-VEDA / pangeo derivative, so
+`NB_USER=jovyan` and the `/srv/conda/envs/notebook` prefix are unchanged — the
+`--chown` gotcha below still applies. It also ships `maap-py` + the MAAP
+JupyterLab extensions, so those are inherited (not pinned in `environment.yml`).
 
 ## Debugging: `process_*` CLI missing in a fresh hub pod
 
@@ -168,13 +176,20 @@ Order of checks:
    Look for a green run whose SHA matches the algorithms commit you
    expect to be in the pod.
 
-2. **Was the push doc-only?** `paths-ignore` on both workflows excludes
-   `docs/**`, `notebooks/**`, `tests/**`, `tools/**`, `**.md`,
-   `.clinerules.md`, `.pre-commit-config.yaml`. A push touching ONLY
-   those paths fires no rebuild. Intentional — saves ~2-4 min per
-   doc-only push — but it does mean a CLI added in the same commit
-   as a README change won't ship until a subsequent code-touching
-   push lands.
+2. **Did the push touch a real image input?** Both workflows use a
+   **`paths` allowlist** (switched 2026-07-21 from a `paths-ignore`
+   denylist): a build fires ONLY when `image/**`, `src/**`,
+   `pyproject.toml`, or the build workflow file itself changes. A push
+   touching only `dps/`, `docs/`, `notebooks/`, `tests/`, `tools/`,
+   `.github/` (other workflows), `bin/`, `dev-conda-deps.txt`, etc.
+   fires no rebuild — all of those are `.dockerignore`d out of the
+   build context, so they can't change image content anyway. The
+   allowlist is exhaustive by construction (the old denylist leaked:
+   `dps/` wasn't on it, so every `dps/` push triggered a redundant
+   byte-identical rebuild). Caveat: a CLI added in the same commit as
+   a `docs/`-only README change still ships because that commit also
+   touches `src/`; but a `dps/`-only commit won't rebuild the hub
+   image (correct — `dps/` isn't in the image).
 
 3. **Did `lint.yml` (`sensor-consistency` + `cli-smoke`) fail on the
    same commit?** The build workflow doesn't gate on lint, so a broken
@@ -226,10 +241,11 @@ of the build itself.
 **Red flags in build logs:**
 
 - A build that finishes in under 60 seconds when you'd expect a real
-  rebuild → check `paths-ignore`: maybe only doc files changed and the
-  build shouldn't have fired at all (in which case it didn't), or
-  Layer 2's COPY didn't actually pick up the file you expected (check
-  `.dockerignore` for an accidental over-exclusion).
+  rebuild → check the `paths` allowlist: maybe the push touched nothing
+  in `image/**`, `src/**`, or `pyproject.toml`, so the build shouldn't
+  have fired at all (in which case it didn't), or Layer 2's COPY didn't
+  actually pick up the file you expected (check `.dockerignore` for an
+  accidental over-exclusion).
 - "Successfully installed disasters-product-algorithms-..." line is
   **missing** from the build log → Layer 2 was cached entirely. Means
   the COPYed file tree post-`.dockerignore` was bit-identical to the
@@ -291,7 +307,7 @@ Non-obvious rules when editing it:
   Then check **Help → Disasters Resources**. `python -m json.tool
   image/overrides.json` catches syntax errors before you build.
 - **It is its own COPY layer** (between Layer 1 and Layer 2 in the Dockerfile),
-  and `image/**` is **not** in the workflows' `paths-ignore` — so editing
+  and `image/**` **is** in the workflows' `paths` allowlist — so editing
   `overrides.json` *does* trigger a hub rebuild (unlike a docs-only change). It
   busts its own layer + Layer 2 (~30-60s); conda Layer 1 stays cached.
 

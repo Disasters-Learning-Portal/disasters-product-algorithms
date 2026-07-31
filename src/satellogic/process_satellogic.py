@@ -67,16 +67,14 @@ def main():
 
     parser.add_argument(
         "--product",
-        required=True,
         choices=["truecolor", "colorir", "ndvi", "ndwi", "evi"],
+        required=True,
         help="Product to generate",
     )
 
-    parser.add_argument("--date", required=True, help="Target datetime (YYYY-MM-DD HH:MM:SS)")
+    parser.add_argument("--date", required=True, help="Target datetime (YYYY-MM-DD HH:MM:SS) or (YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,etc) for multiple")
     parser.add_argument("--level", required=True, help="Processing level (e.g. L1D, L1B)")
     parser.add_argument("--output", default="/tmp/s3_temp")
-
-    parser.add_argument("--use_mask", action="store_true", help="Apply cloud mask")
 
     parser.add_argument(
         "--visualize",
@@ -91,18 +89,12 @@ def main():
         help="Gamma correction for RGB products (default 0.7)",
     )
 
-    parser.add_argument("-nodata", type=float, default=None)
-    parser.add_argument("-compression", type=str, default="ZSTD")
-    parser.add_argument("-compression_level", type=int, default=22)
     parser.add_argument(
-        "-dst_crs",
-        type=str,
-        default="native",
-        help=(
-            "Target CRS for COG output. 'native' (default) preserves the "
-            "source projection; pass 'EPSG:3857' for Web Mercator "
-            "(required by veda-data-airflow build_stac)."
-        ),
+        "--filter_size",
+        type=int,
+        choices=[3, 5, 7],
+        default=5,
+        help="Lee-filter window applied to indices (NDVI/NDWI/EVI). Odd only: 3, 5, or 7.",
     )
 
     parser.add_argument(
@@ -119,87 +111,91 @@ def main():
 
     args = parser.parse_args()
 
-    dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
     activation_metadata = load_metadata_json(args.metadata_json)
 
     os.makedirs(args.output, exist_ok=True)
 
-    print("Retrieving Satellogic resources...")
+    for datestring in args.date.split(","):
+    
+        print(f"Retrieving Satellogic resources for {datestring}...")
+    
+        metadata, tifs = retrieve_satellogic_resources(datestring, args.level)
+    
+        scene_groups = group_satellogic_tifs(tifs)
+    
+        print(f"Generating {args.product}...")
+        print(f"Found {len(scene_groups)} Satellogic scene/tile groups to process")
+    
+        outfiles = []
+    
+        for i, scene_tifs in enumerate(scene_groups, start=1):
+            print(f"\nProcessing scene/tile {i}/{len(scene_groups)}")
+    
+            outfile = None
+    
+            if args.product == "truecolor":
+                nodata_setting = 0
+                outfile = genTrueColor(
+                    scene_tifs,
+                    metadata,
+                    args.output,
+                    visualize=args.visualize,
+                    gamma=args.gamma,
+                )
+    
+            elif args.product == "colorir":
+                nodata_setting = 0
+                outfile = gencolorIR(
+                    scene_tifs,
+                    metadata,
+                    args.output,
+                    visualize=args.visualize,
+                    gamma=args.gamma,
+                )
+    
+            elif args.product == "ndvi":
+                nodata_setting = -9999
+                outfile = genNDVI(
+                    scene_tifs,
+                    metadata,
+                    args.output,
+                    filter_size=args.filter_size,
+                )
 
-    metadata, tifs = retrieve_satellogic_resources(args.date, args.level)
+            elif args.product == "ndwi":
+                nodata_setting = -9999
+                outfile = genNDWI(
+                    scene_tifs,
+                    metadata,
+                    args.output,
+                    filter_size=args.filter_size,
+                )
 
-    scene_groups = group_satellogic_tifs(tifs)
-
-    print(f"Generating {args.product}...")
-    print(f"Found {len(scene_groups)} Satellogic scene/tile groups to process")
-
-    outfiles = []
-
-    for i, scene_tifs in enumerate(scene_groups, start=1):
-        print(f"\nProcessing scene/tile {i}/{len(scene_groups)}")
-
-        outfile = None
-
-        if args.product == "truecolor":
-            outfile = genTrueColor(
-                scene_tifs,
-                metadata,
-                args.output,
-                use_mask=False,
-                visualize=args.visualize,
-                gamma=args.gamma,
-            )
-
-        elif args.product == "colorir":
-            outfile = gencolorIR(
-                scene_tifs,
-                metadata,
-                args.output,
-                use_mask=False,
-                visualize=args.visualize,
-                gamma=args.gamma,
-            )
-
-        elif args.product == "ndvi":
-            outfile = genNDVI(
-                scene_tifs,
-                metadata,
-                args.output,
-                use_mask=args.use_mask,
-            )
-
-        elif args.product == "ndwi":
-            outfile = genNDWI(
-                scene_tifs,
-                metadata,
-                args.output,
-                use_mask=args.use_mask,
-            )
-
-        elif args.product == "evi":
-            outfile = genEVI(
-                scene_tifs,
-                metadata,
-                args.output,
-                use_mask=args.use_mask,
-            )
-
-        if outfile:
-            print("\nConverting to COG...")
-
-            cog_path = convert_to_cog(
-                outfile,
-                nodata=args.nodata,
-                dst_crs=dst_crs_value,
-                compression=args.compression,
-                compression_level=args.compression_level,
-                metadata=activation_metadata,
-            )
-
-            print(f"COG created: {cog_path}")
-            outfiles.append(cog_path)
-
-    print(f"\nFinished {args.product}. Created {len(outfiles)} COG(s).")
+            elif args.product == "evi":
+                nodata_setting = -9999
+                outfile = genEVI(
+                    scene_tifs,
+                    metadata,
+                    args.output,
+                    filter_size=args.filter_size,
+                )
+    
+            if outfile:
+                print("\nConverting to COG...")
+    
+                cog_path = convert_to_cog(
+                    outfile,
+                    nodata=nodata_setting,
+                    dst_crs=None,
+                    compression="ZSTD",
+                    compression_level=22,
+                    metadata=activation_metadata,
+                )
+    
+                print(f"COG created: {cog_path}")
+                outfiles.append(cog_path)
+    
+        print(f"\nFinished {args.product}. Created {len(outfiles)} COG(s).")
 
 
 if __name__ == "__main__":

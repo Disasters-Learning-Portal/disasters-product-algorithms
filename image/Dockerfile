@@ -1,4 +1,4 @@
-FROM pangeo/pangeo-notebook:2026.06.04
+FROM mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:v6.0.0
 
 LABEL org.opencontainers.image.source="https://github.com/Disasters-Learning-Portal/disasters-product-algorithms"
 

@@ -54,15 +54,19 @@ args=parser.parse_args()
 
 ###########INPUTS###########
 
-# Logic to handle credentials via arguments (subprocess) or manual input
-if args.user and args.password:
-    cop_user = args.user[0]
-    cop_pass = args.password[0]
-    print("Credentials received via arguments.")
+# Logic to handle credentials via arguments (subprocess), environment (DPS), or
+# manual input. Precedence: CLI args -> env vars (COP_USER/COP_PASS) -> prompt.
+# The env path lets a headless caller (e.g. the DPS run.sh, which pulls the values
+# from MAAP secrets) pass credentials WITHOUT putting the password on the command
+# line, so it never lands in argv / `ps` / a process log.
+cop_user = args.user[0] if args.user else os.environ.get('COP_USER')
+cop_pass = args.password[0] if args.password else os.environ.get('COP_PASS')
+if cop_user and cop_pass:
+    print("Credentials received.")
 else:
     # Manual fallback for interactive use
-    cop_user = input('Copernicus Username (email): ')
-    cop_pass = input('Copernicus Password: ')
+    cop_user = cop_user or input('Copernicus Username (email): ')
+    cop_pass = cop_pass or input('Copernicus Password: ')
 
 # parse user arguments
 out_dir = args.output[0]
@@ -169,6 +173,30 @@ def get_refresh(refresh):
         raise Exception(f"Refresh failed: {r.json()}")
     return (r.json()["access_token"], r.json()["refresh_token"])
 
+def search_catalogue(url):
+    """Run one OData product search. Returns (products, error).
+
+    products = list of (Id, Name, ContentLength) tuples (possibly empty).
+    error    = None on success, else a short human-readable string.
+
+    Never raises — a failed search is surfaced to the caller and logged,
+    never silently swallowed (mirrors the get_keycloak error-wrap style).
+    """
+    try:
+        r = requests.get(url)
+        r.raise_for_status()
+    except Exception as e:
+        return [], f"request failed: {e}"
+    try:
+        body = r.json()
+    except Exception as e:
+        return [], f"invalid JSON response: {e}"
+    if isinstance(body, dict) and body.get('error'):
+        return [], f"OData error: {body['error']}"
+    values = body.get('value') or []
+    prods = [(v['Id'], v['Name'], v['ContentLength']) for v in values]
+    return prods, None
+
 # Search Logic
 collection_url = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2'"
 prod_filter = f" and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq '{level}')"
@@ -177,28 +205,40 @@ base_url = collection_url + prod_filter + date_filter
 prods_to_download = []
 
 if args.tile:
+    print('\nSearching catalogue...')
+    missing = []
     for tile in tile_ids:
-        if tile[0] == 'T': tile = tile[1:]
-        tile_search = base_url + f" and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'tileId' and att/OData.CSC.StringAttribute/Value eq '{tile}')&$top={limit}"
-        json=requests.get(tile_search).json()
-        if json.get('value'):
-            for result in json['value']:
-                prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
+        label = tile                                        # keep the operator's form for display
+        query_tile = tile[1:] if tile[0] == 'T' else tile   # catalogue tileId has no leading T
+        tile_search = base_url + f" and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'tileId' and att/OData.CSC.StringAttribute/Value eq '{query_tile}')&$top={limit}"
+        prods, err = search_catalogue(tile_search)
+        if err:
+            print(f'  tile {label} → search FAILED ({err}) ⚠')
+            missing.append(label)
+        elif not prods:
+            print(f'  tile {label} → 0 products ⚠')
+            missing.append(label)
+        else:
+            print(f'  tile {label} → {len(prods)} product(s)')
+        prods_to_download.extend(prods)                      # [] on empty/error, so always safe
+    if missing:
+        print(f'\n⚠ {len(missing)} of {len(tile_ids)} tiles returned no products (or failed): {", ".join(missing)}')
+        print('   Likely causes: (a) no acquisition for that tile on this date — Sentinel-2 revisit is ~5 days,')
+        print('   so widen -date to a start/end range; (b) wrong -level (1=L1C vs 2=L2A);')
+        print('   (c) a transient API error on a "search FAILED" line — just re-run.')
 
 elif args.polygon:
     aoi_str = str(aoi_poly)
     poly_search = base_url + f" and OData.CSC.Intersects(area=geography'SRID=4326;{aoi_str}')&$top={limit}"
-    json = requests.get(poly_search).json()
-    if json.get('value'):
-        for result in json['value']:
-            prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
+    prods, err = search_catalogue(poly_search)
+    print(f'  polygon search FAILED ({err}) ⚠' if err else f'  polygon → {len(prods)} product(s)')
+    prods_to_download.extend(prods)
 
 elif args.point:
     point_search = base_url + f" and OData.CSC.Intersects(area=geography'SRID=4326;POINT({lon} {lat})')&$top={limit}"
-    json = requests.get(point_search).json()
-    if json.get('value'):
-        for result in json['value']:
-            prods_to_download.append((result['Id'], result['Name'], result['ContentLength']))
+    prods, err = search_catalogue(point_search)
+    print(f'  point search FAILED ({err}) ⚠' if err else f'  point → {len(prods)} product(s)')
+    prods_to_download.extend(prods)
 
 num_of_prods = len(prods_to_download)
 print('\nNumber of products to download: ', num_of_prods)

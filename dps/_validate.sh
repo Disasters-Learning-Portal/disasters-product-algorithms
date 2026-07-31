@@ -71,6 +71,25 @@ validate_granule() {
   [[ -n "$ok" ]] || die "$name '$path' must be one of: ${exts// /, } (case-insensitive)."
 }
 
+# normalize_token VALUE CASE("lower"|"upper") -- trim surrounding whitespace and
+# fold case; echo the result. PURE transform (never dies), so it is safe to call
+# in `X="$(normalize_token ...)"`: the actual accept/reject stays in
+# validate_in_set, which runs in the caller's shell and dies there on a bad
+# value. Use to make selectors (sensor/level) tolerant of the common copy-paste
+# mistakes ("Capella", " L1d ") without silently accepting an unknown value.
+# tr is used for case-folding (as validate_granule already does) so there is no
+# bash-4 `${v,,}`/`${v^^}` dependency -- works on the CI Linux box and macOS 3.2.
+normalize_token() {
+  local v="$1" c="$2"
+  v="${v#"${v%%[![:space:]]*}"}"        # ltrim
+  v="${v%"${v##*[![:space:]]}"}"        # rtrim
+  case "$c" in
+    lower) printf '%s' "$v" | tr '[:upper:]' '[:lower:]' ;;
+    upper) printf '%s' "$v" | tr '[:lower:]' '[:upper:]' ;;
+    *)     printf '%s' "$v" ;;
+  esac
+}
+
 # validate_in_set NAME VALUE "tok1 tok2 ..." -- membership check.
 validate_in_set() {
   local name="$1" value="$2" allowed="$3" tok

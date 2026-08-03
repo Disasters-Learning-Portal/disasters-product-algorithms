@@ -1,66 +1,76 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: black-marble-ogc-test
-  doc: 'VEDA Black Marble nighttime-lights pipeline: for a WGS84 bbox + date, download
-    VIIRS VNP46A2 (Earthdata), Landsat (STAC), and OSM roads, then fuse into an urban-focused
-    Cloud Optimized GeoTIFF. OGC test build: every input is optional in the schema
-    so the Submit form never blocks; run.sh enforces the real requirements (valid
-    bbox/date, non-placeholder activation_event, readable Earthdata secret). The Earthdata
-    token comes from MAAP secrets, never the job inputs.'
-  id: black-marble-ogc-test
+  label: capella-ogc-test
+  doc: 'Process Capella SAR scenes into Cloud Optimized GeoTIFF disaster-response
+    products (sigma-naught, optional Lee filter). Fetches source rasters from the
+    CSDA Capella vendor S3 bucket keyed by date. OGC test build: every input is optional
+    in the schema so the Submit form never blocks; run.sh enforces the real requirements
+    (date, source, non-placeholder activation_event).'
+  id: capella-ogc-test
   inputs:
-    bbox:
-      doc: min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81.
-        Latitude span must be >= 0.05 deg. Pre-filled with a known-good San Francisco
-        test box; change it for a real activation.
-      label: Bounding box (WGS84)
-      type: string?
-      default: -122.55,37.69,-122.32,37.81
-    activation_event:
-      doc: Activation event, e.g. 202511_Flood_TX -- used for the S3 output path (dps_output/<event>/).
-        Pre-filled with a test value so a bare Submit runs; set a REAL event for a
-        real activation (the placeholder YYYYMM_Hazard_Location is rejected at run
-        time).
-      label: Activation event
-      type: string?
-      default: 202601_KyleWx_US
     date:
-      doc: Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date.
-        Pre-filled with a known-good test date.
+      doc: Target acquisition date, YYYYMMDDHHMMSS. Closest matching Capella scene
+        is selected. Discover valid dates via the 'list-dates' algorithm (sensor=capella).
+        REQUIRED for a real run (run.sh rejects an empty date).
       label: Target date
       type: string?
-      default: '2023-06-15'
-    config:
-      doc: 'Processing preset: fast (quick smoke, minimal enhancements) | default
-        | high_quality. Default fast.'
-      label: Quality preset
+      default: ''
+    product:
+      doc: Calibration product to generate. Only 'sigma' (sigma-naught) is supported.
+      label: Calibration product
       type: string?
-      default: fast
-    osm_source:
-      doc: 'OpenStreetMap road backend: overpass (Overpass API via OSMnx) | layercake
-        (OSM-US parquet, faster on large/dense areas, experimental). Default overpass.'
-      label: OSM road source
+      default: sigma
+    bucket:
+      doc: CSDA Capella vendor S3 bucket to fetch source rasters from (DPS worker
+        needs read access).
+      label: Vendor S3 bucket
       type: string?
-      default: overpass
-    wgs84:
-      doc: Also write an EPSG:4326 (WGS84) COG next to the native output (for web
-        mapping).
-      label: Also export EPSG:4326
+      default: csdap-capellaspace-delivery
+    prefix:
+      doc: Key prefix within the vendor bucket to search for scenes.
+      label: Vendor S3 prefix
+      type: string?
+      default: disasters
+    apply_filter:
+      doc: Apply a Lee speckle filter to the sigma0 product.
+      label: Apply Lee filter
       type: boolean?
       default: false
-    basename:
-      doc: Output COG filename stem -> <basename>.tif (letters, digits, . _ - only).
-      label: Output filename stem
+    filter_size:
+      doc: Lee filter window size in pixels (only used when apply_filter is true).
+      label: Lee filter window size
+      type: int?
+      default: 5
+    dst_crs:
+      doc: 'Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857
+        | EPSG:4326.'
+      label: Target CRS
       type: string?
-      default: black_marble_output
-    earthdata_secret_name:
-      doc: NAME of the MAAP secret holding your NASA Earthdata token (not the token
-        value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN',
-        '<token>').
-      label: Earthdata secret name
+      default: native
+    activation_event:
+      doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
+        is REJECTED at run time -- set a real value for a real run.
+      label: Activation event
       type: string?
-      default: EARTHDATA_TOKEN
+      default: YYYYMM_Hazard_Location
+    source_label:
+      doc: Data origin, e.g. USGS, NASA, NOAA, Capella Space. REQUIRED for a real
+        run (run.sh rejects an empty source).
+      label: Source
+      type: string?
+      default: ''
+    compression_level:
+      doc: ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max
+        (default).
+      label: COG compression level
+      type: int?
+      default: 22
+    nodata:
+      doc: Override the auto-detected no-data value; leave blank to auto-detect.
+      label: No-data value (optional)
+      type: string?
+      default: ''
   outputs:
     output:
       type: Directory
@@ -69,14 +79,17 @@ $graph:
     process:
       run: '#main'
       in:
-        bbox: bbox
-        activation_event: activation_event
         date: date
-        config: config
-        osm_source: osm_source
-        wgs84: wgs84
-        basename: basename
-        earthdata_secret_name: earthdata_secret_name
+        product: product
+        bucket: bucket
+        prefix: prefix
+        apply_filter: apply_filter
+        filter_size: filter_size
+        dst_crs: dst_crs
+        activation_event: activation_event
+        source_label: source_label
+        compression_level: compression_level
+        nodata: nodata
       out:
       - outputs_result
 - class: CommandLineTool
@@ -87,59 +100,77 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 16
+      ramMin: 32
       coresMin: 4
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/blackmarble/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/capella/run.sh
   inputs:
-    bbox:
-      type: string?
-      inputBinding:
-        position: 1
-        prefix: --bbox
-      default: -122.55,37.69,-122.32,37.81
-    activation_event:
-      type: string?
-      inputBinding:
-        position: 2
-        prefix: --activation_event
-      default: 202601_KyleWx_US
     date:
       type: string?
       inputBinding:
-        position: 3
+        position: 1
         prefix: --date
-      default: '2023-06-15'
-    config:
+      default: ''
+    product:
+      type: string?
+      inputBinding:
+        position: 2
+        prefix: --product
+      default: sigma
+    bucket:
+      type: string?
+      inputBinding:
+        position: 3
+        prefix: --bucket
+      default: csdap-capellaspace-delivery
+    prefix:
       type: string?
       inputBinding:
         position: 4
-        prefix: --config
-      default: fast
-    osm_source:
-      type: string?
-      inputBinding:
-        position: 5
-        prefix: --osm_source
-      default: overpass
-    wgs84:
+        prefix: --prefix
+      default: disasters
+    apply_filter:
       type: boolean?
       inputBinding:
-        position: 6
-        prefix: --wgs84
+        position: 5
+        prefix: --apply_filter
       default: false
-    basename:
+    filter_size:
+      type: int?
+      inputBinding:
+        position: 6
+        prefix: --filter_size
+      default: 5
+    dst_crs:
       type: string?
       inputBinding:
         position: 7
-        prefix: --basename
-      default: black_marble_output
-    earthdata_secret_name:
+        prefix: --dst_crs
+      default: native
+    activation_event:
       type: string?
       inputBinding:
         position: 8
-        prefix: --earthdata_secret_name
-      default: EARTHDATA_TOKEN
+        prefix: --activation_event
+      default: YYYYMM_Hazard_Location
+    source_label:
+      type: string?
+      inputBinding:
+        position: 9
+        prefix: --source_label
+      default: ''
+    compression_level:
+      type: int?
+      inputBinding:
+        position: 10
+        prefix: --compression_level
+      default: 22
+    nodata:
+      type: string?
+      inputBinding:
+        position: 11
+        prefix: --nodata
+      default: ''
   outputs:
     outputs_result:
       outputBinding:
@@ -153,15 +184,14 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 236e39f5a6213a8436a4d53c507b2858cd5d5560
-s:dateCreated: 2026-07-31
+s:commitHash: 767a9add41a792a9e74f15c7a72677e335dc962f
+s:dateCreated: 2026-08-03
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 download-from-Earthdata/STAC/OSM (token\
-  \ via MAAP secrets, not job inputs); all inputs optional; image built in-workflow\
-  \ from dps/Dockerfile."
-s:keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
+s:releaseNotes: "OGC registration test \u2014 all inputs optional (no \"Valid value\
+  \ required\") + image built in-workflow from dps/Dockerfile."
+s:keywords: capella, sar, sigma0, cog, disasters, flood
 $namespaces:
   s: https://schema.org/
 $schemas:

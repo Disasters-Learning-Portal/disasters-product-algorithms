@@ -21,10 +21,20 @@ from capella.capella_v2 import (
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
 from shared_utils.s3utils import explain_s3_read_failure
+from shared_utils.plotting import save_cog_png
 
 
 def main():
+    CAPELLA_BUCKET = "csdap-capellaspace-delivery"
+    CAPELLA_PREFIX = "disasters"
+    SOURCE = "CSDA"
+    
+    NODATA = -9999
+    COMPRESSION = "ZSTD"
+    COMPRESSION_LEVEL = 22
+    DST_CRS = None        # native projection
 
+    
     parser = argparse.ArgumentParser(
         description="Process Capella imagery"
     )
@@ -42,22 +52,14 @@ def main():
     )
 
     parser.add_argument(
-        "--product",
-        choices=["sigma"],
-        help="Calibration product to generate"
-    )
-
-    parser.add_argument(
-        "--apply_filter",
-        action="store_true",
-        help="Apply Lee filtering"
-    )
-
-    parser.add_argument(
         "--filter_size",
         type=int,
+        choices=[3, 5, 7],
         default=5,
-        help="Lee filter window size"
+        help=(
+            "Lee speckle-filter window size. Filtering is always applied to "
+            "the backscatter (there is no opt-out); only the kernel is tunable."
+        ),
     )
 
     parser.add_argument(
@@ -66,55 +68,9 @@ def main():
     )
 
     parser.add_argument(
-        "--prefix",
-        default="disasters",
-        help="S3 prefix"
-    )
-
-    parser.add_argument(
-        "--bucket",
-        default="csdap-capellaspace-delivery",
-        help="S3 bucket"
-    )
-
-    parser.add_argument(
         "--output",
         default="/tmp/s3_temp",
         help="Output directory"
-    )
-
-    # COG options
-    parser.add_argument(
-        "-nodata",
-        type=float,
-        default=None,
-        help="No-data value for COG outputs"
-    )
-
-    parser.add_argument(
-        "-compression",
-        type=str,
-        default="ZSTD",
-        help="Compression type for COG"
-    )
-
-    parser.add_argument(
-        "-compression_level",
-        type=int,
-        default=22,
-        help="Compression level for COG"
-    )
-
-    parser.add_argument(
-        "-dst_crs",
-        type=str,
-        default="native",
-        help=(
-            "Target CRS for COG output. 'native' (default) preserves the "
-            "source UTM projection; pass 'EPSG:3857' (Web Mercator) for "
-            "optimal VEDA titiler-pgstac tiling (also required by "
-            "veda-data-airflow build_stac)."
-        ),
     )
 
     parser.add_argument(
@@ -133,15 +89,18 @@ def main():
 
     if args.list_dates:
         try:
-            scenes = report_capella_scenes(bucket=args.bucket, prefix=args.prefix)
+            scenes = report_capella_scenes(
+                bucket=CAPELLA_BUCKET,
+                prefix=CAPELLA_PREFIX
+            )
         except (ClientError, BotoCoreError) as e:
-            msg = explain_s3_read_failure(e, args.bucket, args.prefix)
-            print(msg or f"Failed to list s3://{args.bucket}/{args.prefix}: {e}",
+            msg = explain_s3_read_failure(e, CAPELLA_BUCKET, CAPELLA_PREFIX)
+            print(msg or f"Failed to list s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX}: {e}",
                   file=sys.stderr)
             sys.exit(2)
         print(
             f"{len(scenes)} available Capella scene(s) in "
-            f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
+            f"s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX} -- most recently added to S3 "
             f"first (top = closest to today). Copy a --date value to process:\n"
         )
         # Aligned table; scene folder LAST so the fixed-width columns stay
@@ -185,19 +144,23 @@ def main():
 
     # --date / --product are optional above so --list_dates can run without
     # them; enforce them here for the normal processing path.
-    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
+    missing = [n for n, v in (("--date", args.date),) if not v]
     if missing:
         parser.error("the following arguments are required: " + ", ".join(missing))
-
-    dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
+        
     metadata = load_metadata_json(args.metadata_json)
+
+    if metadata is None:
+        metadata = {}
+    
+    metadata["SOURCE"] = SOURCE
 
     print("Retrieving Capella resources...")
 
     tifs = retrieve_capella_resources(
         date=args.date,
-        bucket=args.bucket,
-        prefix=args.prefix
+        bucket=CAPELLA_BUCKET,
+        prefix=CAPELLA_PREFIX
     )
 
     # One group per GEO band = one genuine scene. Folders may hold several
@@ -228,17 +191,11 @@ def main():
             else os.path.join(args.output, f"scene_{i}")
         )
 
-        outfile = None
-        source_tif = None
-
-        if args.product == "sigma":
-
-            outfile, source_tif = sigmaCalib(
-                scene_tifs,
-                save_location=scene_out,
-                do_filt=args.apply_filter,
-                filter_size=args.filter_size
-            )
+        outfile, source_tif = sigmaCalib(
+            scene_tifs,
+            save_location=scene_out,
+            filter_size=args.filter_size
+        )
 
         if not outfile:
             continue
@@ -247,15 +204,24 @@ def main():
 
         cog_path = convert_to_cog(
             outfile,
-            nodata=args.nodata,
-            dst_crs=dst_crs_value,
-            compression=args.compression,
-            compression_level=args.compression_level,
+            nodata=NODATA,
+            dst_crs=DST_CRS,
+            compression=COMPRESSION,
+            compression_level=COMPRESSION_LEVEL,
             metadata=metadata,
         )
 
         print(f"COG created: {cog_path}")
         cog_paths.append(cog_path)
+
+        png_path = os.path.splitext(cog_path)[0] + ".png"
+
+        save_cog_png(
+            src=cog_path,
+            out_path=png_path,
+        )
+        
+        print(f"PNG created: {png_path}")
 
         # Delete the raw downloaded source raster now that a valid COG exists.
         # Gated on COG success (a failure/exception above skips cleanup so the

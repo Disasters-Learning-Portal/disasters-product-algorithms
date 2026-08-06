@@ -117,15 +117,26 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     print(f"[INFO] dB Min: ", np.min(dn_db))
 
     ret_list = []
-    outfile_amp = grd_in_file.replace(".tif", "_amp.tif")
-    outfile_dB = grd_in_file.replace(".tif", "_dB.tif")
-
+    dt = datetime.strptime(grd_in_file.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S")
+    
+    outfile_base = (
+        f"{save_location}/"
+        f"{dt.strftime('%Y%m')}_"
+        f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}_"
+        f"sigma0_"
+        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"_filtered{filter_size}"
+        ".tif"
+    )
+    
     if save_products in ["amp", "both"]:
+        outfile_amp = outfile_base.replace("sigma0", "sigma0-amp")
         dump_geotiff_float(outfile_amp, dn_amp, projref, in_geo)
         print(f"Generation of amplitude file completed, file saved to {outfile_amp}")
         ret_list.append(outfile_amp)
     
     if save_products in ["db", "both"]:
+        outfile_dB = outfile_base.replace("sigma0", "sigma0-dB")
         dump_geotiff_float(outfile_dB, dn_db, projref, in_geo)
         print(f"Generation of dB file completed, file saved to {outfile_dB}")
         ret_list.append(outfile_dB)

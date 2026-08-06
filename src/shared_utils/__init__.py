@@ -34,6 +34,7 @@ try:
         dump_geotiff_float,
         dump_geotiff_byte,
         dump_geotiff_rgb,
+        transform_geotifs_to_projection,
     )
 except (ImportError, ModuleNotFoundError):
     pass  # GDAL/osgeo not available
@@ -138,6 +139,7 @@ __all__ = [
     'dump_geotiff_float',
     'dump_geotiff_byte',
     'dump_geotiff_rgb',
+    'transform_geotifs_to_projection',
     # AWS-conversion modules (available when dependencies are installed)
     'convert_to_cog_s3',
     'set_nodata_value_src',

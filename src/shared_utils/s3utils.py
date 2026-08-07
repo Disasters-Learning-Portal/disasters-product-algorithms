@@ -150,6 +150,12 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
         dates = [datetime.strptime(x.split("_")[5], "%Y%m%d%H%M%S") for x in subdirs]
         dates.sort()
         return dates
+    elif "iceye" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        datestrings = set([x.split("/")[-1] for x in filtered_files if (x.split("/")[-1].endswith(".tif") and ("GRD" in x.split("/")[-1]))])
+        dates = [datetime.strptime(x.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S") for x in datestrings]
+        dates.sort()
+        return dates
     else:
         raise ValueError(f"The provided bucket '{bucket}' was not recognized as a valid vendor.")
 

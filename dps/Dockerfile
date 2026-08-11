@@ -90,11 +90,16 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # is broken. `conda run --name disasters_dps` is the exact invocation run.sh
 # uses, so this proves the runtime contract holds. --help exits 0 without doing
 # real work; the import line proves every sensor package + shared_utils resolves.
+# The last two lines cover the UPSTREAM blackmarble package (pip-installed from
+# github.com/NASA-IMPACT/veda-black-marble by dps/environment.yml, not vendored here):
+# the import proves the VCS install landed with its WRS2 package data, and the --help
+# proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
+# obstore) all resolved. This is the only build-time gate on that install.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
     && conda run --name disasters_dps python -c \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
     && conda run --name disasters_dps python -c "import blackmarble" \
-    && conda run --name disasters_dps python -m blackmarble.cli --help >/dev/null
+    && conda run --name disasters_dps blackmarble --help >/dev/null
 
 # MAAP's OGC runtime invokes the CWL baseCommand
 # (disasters-product-algorithms/dps/<sensor>/run.sh) from /app. Match that CWD.

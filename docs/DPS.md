@@ -129,11 +129,12 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   `limit` input is the OData `$top` page size, default 50). See `.clinerules.md`
   rule 34.
 - **Download-from-Earthdata/STAC/OSM (blackmarble):** **no file input** — run.sh
-  takes a WGS84 `bbox` + `date` and the vendored `blackmarble` pipeline downloads
-  VIIRS VNP46A2 (NASA Earthdata), Landsat (STAC), and OSM roads, fusing them into an
+  takes a WGS84 `bbox` + `date` and the `blackmarble` pipeline downloads VIIRS
+  VNP46A2 (NASA Earthdata), Landsat (STAC), and OSM roads, fusing them into an
   urban-focused COG. The NASA Earthdata token is read from **MAAP secrets** at run
-  time (default name `EARTHDATA_TOKEN`) — never a job input. This is a **vendored
-  package**, not a `process_*` sensor; see "Black Marble (VEDA nighttime lights)" below.
+  time (default name `EARTHDATA_TOKEN`) — never a job input. The pipeline is an
+  **upstream package** (`NASA-IMPACT/veda-black-marble`, pip-installed into the DPS
+  env), not a `process_*` sensor; see "Black Marble (VEDA nighttime lights)" below.
 
 ### Vendor read access
 
@@ -561,35 +562,73 @@ This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub U
 ## Black Marble (VEDA nighttime lights)
 
 `black-marble` (`dps/blackmarble/`, OGC descriptor `dps/ogc/blackmarble.yml`) is the
-one processing algorithm that is **not** a `process_*` sensor. It's the **VEDA Black
-Marble** pipeline — a **vendored, self-contained package** at `src/blackmarble/`
-(source: `github.com/HarshiniGirish/veda-black-marble`, itself a fork of
-`NASA-IMPACT/veda-black-marble`). Given a WGS84 `bbox` + `date` it downloads VIIRS
-VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and OSM roads, and
-fuses them into an urban-focused Cloud Optimized GeoTIFF (inferno-colormap RGB).
+one processing algorithm that is **not** a `process_*` sensor — and the one whose
+processing code **does not live in this repo at all**.
 
-What makes it deviate from the sensor pattern (all deliberate):
+The **VEDA Black Marble** pipeline is maintained upstream by NASA-IMPACT at
+<https://github.com/NASA-IMPACT/veda-black-marble>. Given a WGS84 `bbox` + `date` it
+downloads VIIRS VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and
+OSM roads, and fuses them into an urban-focused Cloud Optimized GeoTIFF
+(inferno-colormap RGB). Everything under `dps/blackmarble/` is a **thin wrapper**:
+validate the inputs → fetch the Earthdata token from a MAAP secret → run upstream's CLI
+unmodified → publish the output COG to S3 via the shared `_finalize.sh`.
 
-- **No console script.** It has **no `[project.scripts]` entry** and is invoked as
-  `python -m blackmarble.cli` (a typer app; a single-command typer app runs without a
-  subcommand). Why: the console-script `--help` smoke loop in CI would otherwise import
-  its whole stack. Keeping it script-less keeps that stack off every non-DPS surface.
-- **Dependencies isolated to `dps/environment.yml`.** Its heavy, divergent deps
-  (`earthaccess`, `osmnx`, `pystac-client`, `obstore`, `typer`, `duckdb`) live **only**
-  in the DPS worker env — **not** in `[project.dependencies]`, `dev-conda-deps.txt`, or
-  `image/environment.yml`. So the hub image, CI (`pip install .` stays lean —
-  installing the package ≠ importing it), and a laptop `pip install` never pull them.
-  The geo stack it shares (gdal/rasterio/geopandas/pyproj/numpy/scipy/matplotlib) is
-  already in `dps/environment.yml`. The `dps/Dockerfile` build-time smoke
-  (`import blackmarble` + `python -m blackmarble.cli --help`) is what proves those
-  isolated deps resolved.
-- **Writes its own COG** (`blackmarble/export/cog.py`) — it does **not** route through
-  `shared_utils.convert_to_cog`, so there's no `-dst_crs`/`-compression`/`-nodata`/
-  `--metadata-json` knob. `activation_event` is used only for the S3 output path
-  (`dps_output/<event>/`); the pipeline embeds its own GeoTIFF metadata.
-- **The WRS2 shapefile ships as package data.** `blackmarble/data/WRS2_descending/*`
-  (~18 MB, the Landsat path/row index) is loaded via a plain `Path(__file__)…` lookup,
-  so `pyproject.toml`'s `[tool.setuptools.package-data]` includes it in the wheel.
+### How it's installed
+
+`dps/environment.yml` pip-installs the package straight from its repo:
+
+```yaml
+  - pip:
+    - git+https://github.com/NASA-IMPACT/veda-black-marble@20e7d782a6c826d19db73e35d501a17a25609e56
+```
+
+- **Pinned to a commit SHA** because upstream has **no tagged release yet**. When
+  NASA-IMPACT cuts one, change this to `@vX.Y.Z` — or to a plain `blackmarble==X.Y.Z`
+  if it reaches PyPI/conda. That is the whole upgrade: one line.
+- **A VCS URL is required.** The bare name `blackmarble` on PyPI is an *unrelated*
+  World Bank package — never depend on it by name.
+- **Do not vendor the package back into this repo.** An earlier iteration copied it to
+  `src/blackmarble/` (~19 MB, 18 MB of which was the WRS2 shapefile) from a personal
+  fork. It was removed because Black Marble has its own repo and release path, and a
+  private copy would silently drift from upstream while making Disasters responsible for
+  maintaining it.
+
+### Version floors are load-bearing
+
+`pip` only reinstalls a dependency it considers **unsatisfied** — and if it decided
+conda's `rasterio`/`geopandas` were too old it would install PyPI wheels over them,
+breaking the GDAL dylib match that the whole stack depends on (see CLAUDE.md "Critical
+Constraints"). To prevent that, the conda deps in `dps/environment.yml` carry `>=` floors
+**mirroring upstream's declared minimums**: `rasterio>=1.4.3`, `geopandas>=1.1.1`,
+`shapely>=2.1.0`, `numpy>=2`, `scipy>=1.15.3`, `matplotlib-base>=3.10.3`, `boto3>=1.38`,
+`tqdm>=4.67.1`, `duckdb>=1.0.0`. Keep them in sync when bumping the pin.
+
+Verify after any bump:
+
+```bash
+conda list -n disasters_dps | grep -E 'rasterio|geopandas|gdal|numpy|shapely|scipy'
+```
+
+Every row must show channel **conda-forge**. A `pypi` row means a floor is too low and
+pip replaced a conda build — raise that floor.
+
+blackmarble's **pip-only** deps (`earthaccess`, `osmnx`, `pystac-client`, `typer`,
+`obstore`) are no longer hand-listed; pip resolves them from upstream's own metadata.
+The `dps/Dockerfile` build-time smoke (`import blackmarble` + `blackmarble --help`) is
+the only gate proving the VCS install and its deps resolved — including that the WRS2
+shapefile (`blackmarble/data/WRS2_descending/*`, loaded via a plain `Path(__file__)…`
+lookup) came along; upstream ships it via its `[tool.hatch.build] artifacts`.
+
+### Other ways it deviates from the sensor pattern
+
+- **Called through upstream's own console script**, `blackmarble` (a single-command typer
+  app — no subcommand), with the flags exactly as its README documents them.
+- **Writes its own COG** — it does **not** route through `shared_utils.convert_to_cog`,
+  so there's no `-dst_crs`/`-compression`/`-nodata`/`--metadata-json` knob.
+  `activation_event` is used only for the S3 output path (`dps_output/<event>/`); the
+  pipeline embeds its own GeoTIFF metadata.
+- `build-env.sh` still runs `pip install "${repo_root}"` even though no Black Marble code
+  lives here — `_finalize.sh` imports `shared_utils.staging_upload` to publish the COG.
 
 **Earthdata token via MAAP secrets** — exactly the Sentinel-2 credential mechanism.
 The NASA Earthdata token is **never a job input** (it would land in the job log). Store

@@ -30,7 +30,6 @@ The current hub stack these recommendations build on top of:
 | `maap-algorithms-jupyter-extension` | Algorithm Catalog / Register / My Builds tiles — *from the MAAP base* |
 | `maap-jupyter-server-extension` | server bridge (`MAAP_API_HOST` / `MAAP_PGT`) — *from the MAAP base* |
 | `stac_ipyleaflet` | STAC layer browser on an ipyleaflet map — pip-pinned in `environment.yml` |
-| `jupyterlab-bxplorer` | S3 data browser — pip-pinned in `environment.yml` |
 | `maap-py` | MAAP DPS Python client — *from the MAAP base* |
 
 > The MAAP-Plugins tiles + `maap-py` are **inherited from the MAAP `2i2c/pangeo` base image**, not
@@ -107,7 +106,8 @@ MAAP extensions were historically **JupyterLab-3-only**; confirm a JL4 wheel exi
 | Extension | Reason |
 |---|---|
 | `jupyterlab-tabular-data-editor` | Unmaintained; JL4 unconfirmed. The built-in `CSVViewer` already covers `available_<sensor>_dates.csv`. |
-| `jupyterlab-s3-browser` | Overlaps `jupyterlab-bxplorer` (already installed). |
+| `jupyterlab-bxplorer` | **Removed 2026-08-11.** Imports Bootstrap 5's dist CSS *unscoped* into Lab's global stylesheet, so Bootstrap's Reboot overrides `body{font-size}` app-wide and Lab's fixed-height chrome overflows into scrollbar stepper arrows everywhere (2i2c-org/infrastructure#8770). Do not re-add until upstream scopes it — [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md), `.clinerules.md` rule 39. |
+| `jupyterlab-s3-browser` | Unmaintained (IBM; last release 0.12.0, May 2022) and JL2/3-era — still builds on `jupyter-packaging ~=0.7.9`, JL4 unconfirmed. Lab's own file browser plus `s3fs`/`boto3` in a notebook covers the vendor-bucket browsing these workflows need. |
 | `xarray-leaflet` | Stale (~2023); `leafmap` supersedes it. |
 | `jupyterlab-slurm` / `jupyterlab-system-monitor` | JL3-era / archived. DPS isn't SLURM; `jupyter-resource-usage` (in base) covers monitoring. |
 | MAAP `umf` / `ipycmc` / `che-*` / `maap-jupyter-ide` | Eclipse-Che-only, require a Node build, or archived (JL2/3). |

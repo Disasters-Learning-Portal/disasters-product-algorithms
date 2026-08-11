@@ -28,6 +28,7 @@ dps/
 ├── environment.yml          # SHARED lean conda env (name: disasters_dps)
 ├── _finalize.sh             # SHARED output flow: output/ -> S3 -> delete COG (no PNGs)
 ├── register_algorithms.py   # legacy maap-py registration helper (see "Registering")
+├── delete_algorithm.ipynb   # undeploy a registered process (see "Deleting an algorithm")
 ├── README.md
 └── <name>/                  # one subfolder per algorithm
     ├── build-env.sh         # conda env update + pip install repo (boilerplate)
@@ -164,6 +165,17 @@ the MAAP Settings config (`maapApiUrl` / `maapToken`).
 
 `register_algorithms.py` uses maap-py's **legacy** schema and does **not** consume the
 flat OGC config — it's kept for reference only; prefer the GUI.
+
+## Deleting an algorithm
+
+The GUI registers but does **not** delete. Undeploy with
+[`delete_algorithm.ipynb`](delete_algorithm.ipynb) (kernel: `disasters_dps`), which
+lists the OGC processes, dry-runs the selection, then
+`DELETE /api/ogc/processes/<processID>`. You delete by the numeric **`processID`**, not
+by `algorithm_name`, and only the deployer can delete their own process (`403`
+otherwise). **Renaming an algorithm does not move it** — re-registering under a new
+`algorithm_name` leaves the old process registered and runnable, so delete it here.
+Details: [docs/DPS.md → Deleting (undeploying) an algorithm](../docs/DPS.md#deleting-undeploying-an-algorithm).
 
 `algorithm_version` in each manifest is the git ref DPS clones — `dev` tracks active
 development; pin a tag (e.g. `v0.10.0`) for reproducible production runs. Either way the

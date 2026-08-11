@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relax the MAAP extensions' ``.lm-Widget { overflow: scroll !important }`` to ``auto``.
+"""Scope and relax the MAAP extensions' ``.lm-Widget { overflow: scroll !important }``.
 
 WHY THIS EXISTS
 ---------------
@@ -34,24 +34,44 @@ own content scrollable -- they just applied it to every widget in the app instea
 scoping it to their own.
 
 Changing ``scroll`` to ``auto`` keeps a scrollbar exactly where content genuinely
-overflows -- MAAP's long forms scroll again -- while Lab's chrome, which does not
-overflow, stays quiet. It is what the rule should have said in the first place.
+overflows -- MAAP's long forms scroll again -- while chrome that does not overflow
+stays quiet. It is what the declaration should have said in the first place.
+
+WHY IT IS ALSO SCOPED
+---------------------
+``auto`` alone was not enough, and the reason is specific: Lumino's *layout* widgets
+(``DockPanel``, ``TabBar``, ``SplitPanel``, ``BoxPanel``, ``StackedPanel``, the menus)
+position their children **absolutely**, at computed pixel coordinates, and are sized to
+exactly the space available. Sub-pixel rounding routinely leaves a child a fraction of a
+pixel past the edge -- which ``overflow: hidden`` (Lab's own value) clips silently and
+``auto`` turns into a real scrollbar. On the main dock panel that produced a feedback
+loop: a horizontal scrollbar appeared, consumed ~15px of a ~30px-tall ``.lm-TabBar``,
+which then overflowed vertically too, and the tab bar's top half was clipped out of view.
+
+So the selector is narrowed to exclude those layout classes (``LUMINO_LAYOUT`` below).
+Excluded widgets simply fall back to JupyterLab's own ``overflow`` -- the rule is
+removed from the cascade for them, not overridden with a guessed value. Everything else,
+including the MAAP panels' own content widgets, still gets ``auto`` and still scrolls.
+Confirmed live on a hub pod 2026-08-11 by rewriting ``selectorText`` in the browser: the
+clipped tab bar came back to full height and Submit Jobs still scrolled.
 
 KNOWN RESIDUAL RISK
 -------------------
-This is still a global rule. Any Lab widget whose content *genuinely* overflows will
-now show a scrollbar where it previously clipped (JupyterLab uses ``overflow: hidden``
-deliberately in places). If arrows reappear anywhere, the real fix is to scope the rule
-to the MAAP panels instead of relaxing it globally -- the DPS panel's React root is
-``.submit-jobs-container``; the algorithms extension defines no root class, so scoping
-it needs its DOM inspected. See ``.clinerules.md`` rule 39.
+Content widgets are still matched globally, so a Lab widget whose content *genuinely*
+overflows can still show a scrollbar where it previously clipped. If arrows reappear
+somewhere, either add that widget's class to ``LUMINO_LAYOUT`` or scope the rule
+positively to the MAAP panels -- the DPS panel's React root is ``.submit-jobs-container``;
+the algorithms extension defines no root class, so scoping that one needs its DOM
+inspected. See ``.clinerules.md`` rule 39.
 
 WHAT IT DOES
 ------------
-Rewrites only the ``scroll`` keyword inside a ``.lm-Widget`` rule's ``overflow``
-declaration, leaving everything else in the bundle untouched. The CSS lives inside a JS
-string in a webpack chunk, so the escaped ``\\n`` form is handled alongside real
-newlines. Idempotent: once patched there is no ``scroll`` left to match.
+Narrows the ``.lm-Widget`` selector and rewrites the ``overflow`` keyword to ``auto``,
+leaving everything else in the bundle untouched. The CSS lives inside a JS string in a
+webpack chunk, so the escaped ``\\n`` form is handled alongside real newlines. Idempotent:
+the pattern requires a bare ``.lm-Widget {``, which a patched rule no longer has. The
+keyword alternation accepts ``auto`` as well as ``scroll`` so a bundle left over from the
+earlier keyword-only version of this script still gets scoped on a re-run.
 
 Not scoped to the two MAAP extensions on purpose -- the same cookiecutter leftover can
 appear in any extension, so this catches a future one too.
@@ -77,18 +97,42 @@ import os
 import re
 import sys
 
+# Lumino layout widgets: they position children absolutely and are sized to exactly the
+# space available, so sub-pixel rounding leaves a fraction-of-a-pixel overflow that
+# `auto` turns into a real scrollbar (see WHY IT IS ALSO SCOPED). Excluding them drops
+# the rule from the cascade for those elements, so Lab's own `overflow` applies again.
+LUMINO_LAYOUT = (
+    ".lm-DockPanel",
+    ".lm-TabBar",
+    ".lm-TabPanel",
+    ".lm-SplitPanel",
+    ".lm-BoxPanel",
+    ".lm-StackedPanel",
+    ".lm-MenuBar",
+    ".lm-Menu",
+    ".lm-ScrollBar",
+)
+SCOPE = "".join(f":not({cls})" for cls in LUMINO_LAYOUT)
+
 # `.lm-Widget {` then whitespace -- which inside a webpack JS string is the literal
-# two-character sequence \n -- then `overflow:` and the offending keyword. Captures
-# everything either side so the replacement swaps only `scroll` -> `auto`.
+# two-character sequence \n -- then `overflow:` and the offending keyword. Captures the
+# selector and the tail separately so the replacement can narrow one and rewrite the
+# other. `auto` is accepted alongside `scroll` so a bundle patched by the earlier
+# keyword-only version of this script still gets scoped.
 RULE_RE = re.compile(
-    r"(\.lm-Widget\s*\{(?:\\n|\s)*overflow\s*:\s*)scroll(\s*!important)"
+    r"(\.lm-Widget)(\s*\{(?:\\n|\s)*overflow\s*:\s*)(?:scroll|auto)(\s*!important)"
 )
 
-# Anything still matching this inside a .lm-Widget rule after patching means we missed
-# a variant and the UI bug is still live.
+# A bare (unscoped) `.lm-Widget` overflow rule surviving the pass means we missed a
+# variant and the UI bug is still live.
 LEFTOVER_RE = re.compile(
-    r"\.lm-Widget\s*\{(?:\\n|\s)*overflow\s*:\s*scroll\s*!important"
+    r"\.lm-Widget\s*\{(?:\\n|\s)*overflow\s*:\s*(?:scroll|auto)\s*!important"
 )
+
+
+def patch_rule(match: re.Match) -> str:
+    """`.lm-Widget { overflow: scroll !important` -> scoped selector + `auto`."""
+    return f"{match.group(1)}{SCOPE}{match.group(2)}auto{match.group(3)}"
 
 SCAN_EXTS = (".js", ".css")
 
@@ -131,7 +175,7 @@ def main() -> int:
         if ".lm-Widget" not in text or "!important" not in text:
             continue
 
-        new_text, n = RULE_RE.subn(r"\1auto\2", text)
+        new_text, n = RULE_RE.subn(patch_rule, text)
         if not n:
             continue
 
@@ -155,15 +199,15 @@ def main() -> int:
     if patched:
         print(f"fix_lm_widget_overflow: {verb} {len(patched)} file(s) under {root}")
         for rel, n in patched:
-            print(f"  - {rel}  ({n} occurrence(s))  overflow: scroll -> auto")
+            print(f"  - {rel}  ({n} occurrence(s))  scoped selector + overflow: auto")
     else:
         print(f"fix_lm_widget_overflow: nothing to do under {root}")
         print("  (already patched, or upstream removed the cookiecutter leftover)")
 
     if leftovers:
         print(
-            "fix_lm_widget_overflow: WARNING - a `.lm-Widget { overflow: scroll !important }` "
-            "variant survived patching in:",
+            "fix_lm_widget_overflow: WARNING - an unscoped `.lm-Widget { overflow: ... "
+            "!important }` variant survived patching in:",
             file=sys.stderr,
         )
         for rel in leftovers:

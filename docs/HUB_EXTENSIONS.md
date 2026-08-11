@@ -138,9 +138,16 @@ the MAAP base image (PR #48 dropped the pip pins), so `image/environment.yml` ca
 them, and disabling them would cost the Register Algorithm / Submit Jobs / My Builds /
 View My Jobs Launcher tiles. Instead `image/Dockerfile` runs
 [`image/scripts/fix_lm_widget_overflow.py`](../image/scripts/fix_lm_widget_overflow.py),
-which rewrites `scroll` → `auto`. It is idempotent, and deliberately not `--require`, so a
-future base image that ships the fix upstream turns it into a no-op rather than a build
-failure.
+which rewrites the rule to:
+
+```css
+.lm-Widget:not(.lm-DockPanel):not(.lm-TabBar):not(.lm-TabPanel):not(.lm-SplitPanel):not(.lm-BoxPanel):not(.lm-StackedPanel):not(.lm-MenuBar):not(.lm-Menu):not(.lm-ScrollBar) {
+  overflow: auto !important;
+}
+```
+
+It is idempotent, and deliberately not `--require`, so a future base image that ships the
+fix upstream turns it into a no-op rather than a build failure.
 
 **Why `auto` and not deletion.** The first version of the patch deleted the declaration
 outright. That killed the arrows but broke the MAAP panels — Lumino's base CSS is
@@ -148,13 +155,25 @@ outright. That killed the arrows but broke the MAAP panels — Lumino's base CSS
 impossible to scroll down to the Submit button. The extensions were relying on this rule to
 make their own content scrollable; their mistake was scoping it to every widget in the app
 rather than their own. `auto` paints a scrollbar exactly where content genuinely overflows,
-so MAAP's long forms scroll and Lab's chrome — which doesn't overflow — stays quiet.
+so MAAP's long forms scroll and chrome that doesn't overflow stays quiet.
 
-**Residual risk:** it is still a global rule. Any Lab widget whose content genuinely
-overflows will now show a scrollbar where it previously clipped. If arrows reappear
-anywhere, the proper fix is to scope the rule to the MAAP panels rather than relax it
-globally — the DPS panel's React root is `.submit-jobs-container`, but the algorithms
-extension defines no root class, so scoping it requires inspecting its DOM.
+**Why it is also scoped.** `auto` alone shipped a second, subtler regression: the main dock
+area's tab bar lost its top half behind a scrollbar. Lumino's *layout* widgets position
+their children absolutely and are sized to exactly the space available, so sub-pixel
+rounding routinely leaves a child a fraction of a pixel past the edge — which `hidden`
+clips silently and `auto` turns into a real scrollbar. On the dock panel that fed back on
+itself: a horizontal scrollbar appeared, ate ~15px of the ~30px-tall `.lm-TabBar`, which
+then overflowed vertically, hiding the tab row. Excluding the layout classes drops the rule
+from the cascade for those elements, so Lab's own `overflow` applies again — no guessed
+replacement value. Verified live on a hub pod by rewriting `selectorText` in the Chrome
+console: tab bar restored, Submit Jobs still scrolls.
+
+**Residual risk:** content widgets are still matched globally, so a Lab widget whose content
+genuinely overflows can still show a scrollbar where it previously clipped. If arrows
+reappear anywhere, either add that widget's class to `LUMINO_LAYOUT` in the script, or scope
+the rule positively to the MAAP panels — the DPS panel's React root is
+`.submit-jobs-container`, but the algorithms extension defines no root class, so scoping
+that one requires inspecting its DOM.
 
 Manual escape hatches, if you are on an unpatched image:
 

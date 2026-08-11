@@ -105,12 +105,14 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     print(f"[INFO] DN dtype    : {dn.dtype}")
     ds = None  # Close file
 
-    dn_calib = dn * calib_value
-    dn_filtered = lee_filter(dn_calib, size=filter_size)
-    dn_amp = np.power(dn_filtered, 2)
+    
+    dn_filtered = lee_filter(dn, size=filter_size)
+    dn_sqr = np.power(dn_filtered, 2)
+    dn_amp = dn_sqr * calib_value
 
     print(f"[INFO] Amplitude Max: ", np.max(dn_amp))
     print(f"[INFO] Amplitude Min: ", np.min(dn_amp))
+    
     
     dn_db = 10.0*np.log10(dn_amp)
     print(f"[INFO] dB Max: ", np.max(dn_db))

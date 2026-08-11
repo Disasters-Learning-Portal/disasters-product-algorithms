@@ -26,7 +26,7 @@ relative `output/` dir is uploaded to S3 by DPS.
 ```
 dps/
 ├── environment.yml          # SHARED lean conda env (name: disasters_dps)
-├── _finalize.sh             # SHARED output flow: PNG -> output/ -> S3 -> delete COG
+├── _finalize.sh             # SHARED output flow: output/ -> S3 -> delete COG (no PNGs)
 ├── register_algorithms.py   # legacy maap-py registration helper (see "Registering")
 ├── README.md
 └── <name>/                  # one subfolder per algorithm
@@ -42,10 +42,30 @@ concrete examples of the pattern — copy the closest one when adding a new algo
 
 One algorithm deliberately deviates: **`list_dates/`** (registered as `list-dates`)
 is a **discovery** tool, not a processing algorithm — it takes a `sensor` selector
-(capella|umbra|satellogic), multiplexes across the three `process_<sensor>
---list_dates` CLIs to print available vendor-bucket scene dates, and has **no
-`_finalize.sh` step** (no COG; only an `available_<sensor>_dates.csv` artifact).
-See `docs/DPS.md` "Scene-date discovery".
+(capella|umbra|satellogic) and runs its own `report_dates.py`, which calls each
+sensor's `report_<sensor>_scenes()` helper to print available vendor-bucket scene
+dates. Discovery lives ONLY here — the per-sensor `process_<sensor>` CLIs no longer
+carry a `--list_dates` flag. It has **no `_finalize.sh` step** (no COG; only an
+`available_<sensor>_dates.csv` artifact). See `docs/DPS.md` "Scene-date discovery".
+
+A second deviates in a different way: **`blackmarble/`** (registered as `black-marble`)
+wraps the **VEDA Black Marble** nighttime-lights pipeline, which is **not code in this
+repo**. It is maintained upstream by NASA-IMPACT at
+`github.com/NASA-IMPACT/veda-black-marble` and is **pip-installed into the DPS worker
+env** by a `git+https://…` entry in `dps/environment.yml` (pinned to a commit SHA until
+upstream tags a release). Everything under `dps/blackmarble/` is a thin wrapper that
+follows the normal run.sh contract and the shared `_finalize.sh` output flow, but it
+(a) is **bbox + date** driven (downloads VIIRS VNP46A2 from Earthdata, Landsat from a
+STAC catalog, and OSM roads — no vendor-bucket file input), (b) calls upstream's own
+**`blackmarble` console script** unmodified, and (c) writes its **own** COG (not via
+`shared_utils.convert_to_cog`). Its NASA Earthdata token comes from a **MAAP secret** at
+run time (default name `EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input.
+
+> **Don't re-vendor it.** An earlier iteration copied the package into `src/blackmarble/`
+> (~19 MB, from a personal fork). That was removed: Black Marble has its own repo and
+> release path, and a local copy would silently drift from upstream.
+
+See `docs/DPS.md` "Black Marble (VEDA nighttime lights)".
 
 ## The run.sh contract
 
@@ -61,18 +81,22 @@ Every `run.sh` has the same skeleton, whatever the CLI underneath:
    (`YYYYMM_Hazard_Location`) and require `source_label`; both must be real values.
 4. **Build the CLI arg list** and run it under `conda run --name disasters_dps
    process_<name> ...`, writing products into `${OUT_HOME}` (`~/drcs_outputs/<event>/`).
-5. **`source "${basedir}/../_finalize.sh"`** — the shared output flow: optional PNG
-   quicklook → copy to `output/` (DPS uploads this, so the COG is never lost) →
-   optional publish to `s3://nasa-disasters/drcs_activations_new/<event>/` → optional
-   COG delete. Toggled by the `save_png` / `enable_s3_upload` / `delete_cog` inputs.
-   The S3 destination is **locked per algorithm_version** (not a job input).
+5. **`source "${basedir}/../_finalize.sh"`** — the shared output flow: copy to
+   `output/` (DPS uploads this, so the COG is never lost) → publish to
+   `s3://nasa-disasters-staging/dps_output/<event>/` (always on, via short-lived MAAP
+   workspace credentials) → scratch-COG delete (always on). No operator toggles and
+   **no PNG quicklooks**: destination, publish, and scratch-delete are **locked per
+   algorithm_version** (the `enable_s3_upload` / `delete_cog` / `save_png` inputs were
+   all removed). See `docs/DPS.md` "All sensors → nasa-disasters-staging".
 
 Two input archetypes: a **file-input** algorithm takes a `File` granule
 (`--file_path_of_raw_data`, e.g. landsat/sentinel2); a **fetch** algorithm takes no
 file and its CLI pulls source rasters from a bucket keyed by `--date` etc. (e.g. the
-SAR sensors). A fetch algorithm needs the DPS-worker role to have read access to that
-bucket — set the optional `READ_ROLE_ARN` (+ `READ_ROLE_EXTERNAL_ID`) env to assume a
-read role when the ambient role lacks it.
+SAR sensors). A fetch algorithm needs the **DPS-worker role (`dps-verdi-role`) to have
+direct read access** to that bucket — vendor reads use the worker's ambient
+credentials (no role assumption). If the worker lacks read on a cross-account CSDA
+bucket, the fix is an IAM grant on that role, not a repo change. See `docs/DPS.md`
+"Vendor read access".
 
 ## Adding a new algorithm
 

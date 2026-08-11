@@ -20,6 +20,14 @@ from shared_utils.geotools import *
 from shared_utils.s3utils import *
 
 
+# Single source of truth for Capella's nodata sentinel: sigmaCalib writes it
+# into the border pixels and process_capella declares it on the COG. They must
+# agree or the border is unmaskable. -9999.0 (not 0) because the product is
+# float32 dB backscatter, where 0 dB is a legitimate value -- see CLAUDE.md
+# "Capella & Umbra SAR CLIs default -nodata to -9999.0".
+CAPELLA_NODATA = -9999.0
+
+
 def retrieve_capella_resources(
     date: Union[str, datetime],
     bucket: str = "csdap-capellaspace-delivery",
@@ -165,7 +173,6 @@ def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
 def sigmaCalib(
     s3_image_paths: list[str],
     save_location: str = "/tmp/s3_temp",
-    do_filt: bool = True,
     filter_size: int = 5,
 ) -> tuple[str, str]:
 
@@ -235,11 +242,12 @@ def sigmaCalib(
     # ----------------------------------------------------
     sigma_linear = scale_factor * dn
 
-    filt = ""
-
-    if do_filt:
-        sigma_linear = lee_filter(sigma_linear, size=filter_size)
-        filt = f"_filtered{filter_size}"
+    # Speckle filtering is ALWAYS applied -- there is no opt-out, only a kernel
+    # size. Same treatment as Umbra (.clinerules.md rule 31): it runs on the
+    # LINEAR backscatter, before the dB conversion, so the filter averages
+    # physical power rather than logarithms.
+    sigma_linear = lee_filter(sigma_linear, size=filter_size)
+    filt = f"_filtered{filter_size}"
 
     # Prevent log10(0)
     sigma_linear = np.clip(sigma_linear, 1e-10, None)
@@ -247,14 +255,21 @@ def sigmaCalib(
     # Convert to dB
     sigma_0 = 20.0 * np.log10(sigma_linear)
 
-    # Replace values below -150 dB with the smallest valid value above -150 dB
-    valid = sigma_0 > -150
-    
-    if np.any(valid):
-        min_valid = np.min(sigma_0[valid])
-        sigma_0[sigma_0 <= -150] = min_valid
+    # The vendor GEO border is 0, which the 1e-10 clip above turns into -200 dB.
+    # Write the declared nodata sentinel there so the border is actually
+    # maskable downstream. Two earlier approaches both produced a
+    # plausible-looking but NON-maskable value: clipping to a -60 dB floor, and
+    # substituting the smallest valid sample. Neither matched the nodata the COG
+    # declares, so consumers rendered the border as real backscatter and it
+    # dragged the display stretch down.
+    sigma_0[~np.isfinite(sigma_0) | (sigma_linear <= 1e-10)] = CAPELLA_NODATA
 
-    print(f"Sigma0 range: {np.nanmin(sigma_0)} -> {np.nanmax(sigma_0)}")
+    finite = sigma_0[sigma_0 != CAPELLA_NODATA]
+    if finite.size:
+        print(f"Sigma0 range: {np.nanmin(finite)} -> {np.nanmax(finite)} dB "
+              f"(nodata {CAPELLA_NODATA})")
+    else:
+        print(f"Sigma0: no valid pixels (all {CAPELLA_NODATA})")
 
     base = os.path.basename(in_file)
 

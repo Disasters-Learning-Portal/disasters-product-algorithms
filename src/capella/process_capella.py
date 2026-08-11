@@ -5,65 +5,48 @@ CLI processing for Capella SAR products
 """
 
 import argparse
-import csv
 import os
-import sys
-
-from botocore.exceptions import BotoCoreError, ClientError
 
 from capella.capella_v2 import (
+    CAPELLA_NODATA,
     retrieve_capella_resources,
     group_capella_scenes,
-    report_capella_scenes,
     sigmaCalib
 )
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
-from shared_utils.s3utils import explain_s3_read_failure
-from shared_utils.plotting import save_cog_png
+
+
+# Fixed processing parameters. Capella has exactly one calibration product and
+# one vendor bucket, and every activation wants the same COG encoding, so these
+# are constants rather than CLI flags -- the same treatment Satellogic got in
+# PR #45 and Umbra's filter in PR #44. Changing one is a code change with a
+# review, not a per-run argument. See .clinerules.md rule 37.
+CAPELLA_BUCKET = "csdap-capellaspace-delivery"
+CAPELLA_PREFIX = "disasters"
+SOURCE = "CSDA"
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 22
+DST_CRS = None  # native projection; no warp
 
 
 def main():
-    CAPELLA_BUCKET = "csdap-capellaspace-delivery"
-    CAPELLA_PREFIX = "disasters"
-    SOURCE = "CSDA"
-    
-    NODATA = -9999
-    COMPRESSION = "ZSTD"
-    COMPRESSION_LEVEL = 22
-    DST_CRS = None        # native projection
 
-    
     parser = argparse.ArgumentParser(
         description="Process Capella imagery"
     )
 
     parser.add_argument(
-        "--list_dates",
-        action="store_true",
-        help=(
-            "Report the Capella scenes available in the vendor bucket "
-            "(--bucket/--prefix), newest first by S3 delivery time, then exit "
-            "without processing. Use it to discover which --date values exist; "
-            "each printed date can be passed straight back as --date. Ignores "
-            "--date/--product."
-        ),
-    )
-
-    parser.add_argument(
         "--filter_size",
         type=int,
-        choices=[3, 5, 7],
         default=5,
-        help=(
-            "Lee speckle-filter window size. Filtering is always applied to "
-            "the backscatter (there is no opt-out); only the kernel is tunable."
-        ),
+        help="Lee filter window size"
     )
 
     parser.add_argument(
         "--date",
+        required=True,
         help="Target date (YYYYMMDDHHMMSS)"
     )
 
@@ -73,6 +56,7 @@ def main():
         help="Output directory"
     )
 
+    # COG options
     parser.add_argument(
         "--metadata-json",
         type=str,
@@ -87,73 +71,11 @@ def main():
 
     args = parser.parse_args()
 
-    if args.list_dates:
-        try:
-            scenes = report_capella_scenes(
-                bucket=CAPELLA_BUCKET,
-                prefix=CAPELLA_PREFIX
-            )
-        except (ClientError, BotoCoreError) as e:
-            msg = explain_s3_read_failure(e, CAPELLA_BUCKET, CAPELLA_PREFIX)
-            print(msg or f"Failed to list s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX}: {e}",
-                  file=sys.stderr)
-            sys.exit(2)
-        print(
-            f"{len(scenes)} available Capella scene(s) in "
-            f"s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX} -- most recently added to S3 "
-            f"first (top = closest to today). Copy a --date value to process:\n"
-        )
-        # Aligned table; scene folder LAST so the fixed-width columns stay
-        # aligned regardless of the (long) Capella scene name.
-        print(
-            f"  {'--date':<16}{'acquired (UTC)':<22}"
-            f"{'added to S3 (UTC)':<22}scene folder"
-        )
-        for s in scenes:
-            print(
-                f"  {s['date']:<16}"
-                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['scene']}"
-            )
-
-        # Also drop a sortable CSV artifact so the report survives outside the
-        # raw job log (on DPS it lands in output/ -> browsable via the Jobs
-        # panel's "Open in File Browser", rendered as a grid by JupyterLab).
-        os.makedirs(args.output, exist_ok=True)
-        csv_path = os.path.join(args.output, "available_capella_dates.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["date", "scene", "acquired_utc", "added_to_s3_utc"])
-            for s in scenes:
-                writer.writerow([
-                    s["date"],
-                    s["scene"],
-                    s["acquired"].strftime("%Y-%m-%d %H:%M:%S"),
-                    s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
-                ])
-        print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
-        if not scenes:
-            print(
-                f"\nNo scenes found at s3://{args.bucket}/{args.prefix} (read "
-                "access OK). Double-check the sensor/prefix, or the vendor may "
-                "not have delivered any scenes yet.",
-                file=sys.stderr,
-            )
-        return
-
-    # --date / --product are optional above so --list_dates can run without
-    # them; enforce them here for the normal processing path.
-    missing = [n for n, v in (("--date", args.date),) if not v]
-    if missing:
-        parser.error("the following arguments are required: " + ", ".join(missing))
-        
     metadata = load_metadata_json(args.metadata_json)
-
-    if metadata is None:
-        metadata = {}
-    
-    metadata["SOURCE"] = SOURCE
+    # Fill in the vendor as the default provenance, but never clobber a
+    # SOURCE the operator supplied via --metadata-json (DPS passes
+    # source_label through, and it is a required job input).
+    metadata.setdefault("SOURCE", SOURCE)
 
     print("Retrieving Capella resources...")
 
@@ -172,7 +94,7 @@ def main():
     if not scenes:
         raise FileNotFoundError(
             f"No Capella GEO band found for --date {args.date} "
-            f"in s3://{args.bucket}/{args.prefix}"
+            f"in s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX}"
         )
 
     print(f"Found {len(scenes)} Capella scene(s) for --date {args.date}")
@@ -191,6 +113,7 @@ def main():
             else os.path.join(args.output, f"scene_{i}")
         )
 
+        # Speckle filtering is always on; --filter_size only tunes the kernel.
         outfile, source_tif = sigmaCalib(
             scene_tifs,
             save_location=scene_out,
@@ -204,7 +127,7 @@ def main():
 
         cog_path = convert_to_cog(
             outfile,
-            nodata=NODATA,
+            nodata=CAPELLA_NODATA,
             dst_crs=DST_CRS,
             compression=COMPRESSION,
             compression_level=COMPRESSION_LEVEL,
@@ -213,15 +136,6 @@ def main():
 
         print(f"COG created: {cog_path}")
         cog_paths.append(cog_path)
-
-        png_path = os.path.splitext(cog_path)[0] + ".png"
-
-        save_cog_png(
-            src=cog_path,
-            out_path=png_path,
-        )
-        
-        print(f"PNG created: {png_path}")
 
         # Delete the raw downloaded source raster now that a valid COG exists.
         # Gated on COG success (a failure/exception above skips cleanup so the

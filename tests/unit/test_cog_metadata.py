@@ -244,3 +244,59 @@ class TestConvertToCogMetadata:
                 metadata=self.USER_METADATA,
                 quiet=True,
             )
+
+
+class TestInMemoryThreadSafety:
+    """The bytes->bytes path (create_cog_with_metadata + validate_cog_in_memory)
+    is fanned out across a thread pool by notebooks/bake_event_metadata.ipynb
+    (map_threaded, PROCESS_WORKERS=8). /vsimem is a *process-global* filesystem,
+    so constant vsimem paths race: concurrent bakes clobber each other's
+    input/output/validate buffers and torn reads surface as IndexError,
+    RuntimeError('unknown error occurred'), "Could not read /vsimem/...",
+    "geotransform changed", or bogus "IFD offset > 300" / "Invalid data type for
+    tag TileOffsets" cog_validate errors. This pins the per-call-unique paths.
+    """
+
+    @staticmethod
+    def _cog_bytes():
+        # A small valid COG as bytes (bytes-in triggers the in-memory /vsimem path).
+        import numpy as np
+        from rasterio.io import MemoryFile
+        from rasterio.transform import from_bounds
+        from rasterio.crs import CRS
+        data = np.random.RandomState(0).randint(0, 255, (3, 512, 512)).astype('uint8')
+        prof = dict(driver='GTiff', height=512, width=512, count=3, dtype='uint8',
+                    crs=CRS.from_epsg(4326),
+                    transform=from_bounds(-100, 30, -99, 31, 512, 512),
+                    tiled=True, blockxsize=256, blockysize=256, compress='zstd', nodata=0)
+        with MemoryFile() as mf:
+            with mf.open(**prof) as dst:
+                dst.write(data)
+            return mf.read()
+
+    def test_concurrent_bakes_do_not_corrupt_each_other(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from shared_utils.cog_metadata import (
+            create_cog_with_metadata, validate_cog_in_memory,
+        )
+        src = self._cog_bytes()
+        meta = {'ACTIVATION_EVENT': '202507_Flood_TX',
+                'SOURCE': 'TBD',
+                'PROCESSOR': 'NASA Disasters COG Processor v0.0.0-test'}
+
+        def bake(_i):
+            out = bytes(create_cog_with_metadata(
+                src, meta, output_path=None, preserve_compression=True,
+                target_crs=None, web_optimized=False,
+                blockxsize=256, blockysize=256, overview_level=1, quiet=True))
+            # Same constant "out.tif" name the notebook's _verify_bytes uses —
+            # the per-call uuid inside validate_cog_in_memory is what makes it safe.
+            is_valid, info = validate_cog_in_memory(out, "out.tif")
+            return is_valid, info.get('errors')
+
+        # 8 workers hammering the shared /vsimem namespace, 32 tasks.
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(bake, range(32)))
+
+        bad = [(v, e) for v, e in results if not v]
+        assert bad == [], f"{len(bad)}/{len(results)} concurrent bakes corrupted: {bad[:5]}"

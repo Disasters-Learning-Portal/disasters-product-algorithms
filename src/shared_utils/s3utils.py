@@ -11,46 +11,31 @@ def explain_s3_read_failure(exc, bucket: str, prefix: str) -> Optional[str]:
     """Translate a vendor-bucket read failure into ONE operator-facing line.
 
     Returns ``None`` when ``exc`` is not a recognized access/credential error
-    (so the caller can fall back to the raw string). Used by the ``--list_dates``
-    discovery path so a missing DPS-worker read role prints an actionable message
-    instead of a raw boto3 traceback.
+    (so the caller can fall back to the raw string). Used by the list-dates
+    discovery path (``dps/list_dates/report_dates.py``) so a missing DPS-worker
+    read role prints an actionable message instead of a raw boto3 traceback.
     """
     loc = f"s3://{bucket}/{prefix}"
     if isinstance(exc, NoCredentialsError):
         return (
             f"No AWS credentials available to read {loc}. On MAAP DPS the worker "
             "role must have read access to the vendor bucket; locally, configure "
-            "AWS credentials or set READ_ROLE_ARN (see docs/DPS.md)."
+            "AWS credentials (see docs/DPS.md)."
         )
     if isinstance(exc, ClientError):
         op = getattr(exc, "operation_name", "") or ""
         code = str(exc.response.get("Error", {}).get("Code", ""))
-        read_role = os.environ.get("READ_ROLE_ARN", "<unset>")
         if code in ("AccessDenied", "AccessDeniedException", "403"):
-            # Distinguish WHICH call was denied. When READ_ROLE_ARN is set,
-            # _read_session first calls sts:AssumeRole -- a denial there (the
-            # worker role may not assume it, or the target's trust policy doesn't
-            # list it) needs a DIFFERENT fix than an s3:ListBucket denial, yet both
-            # surface as AccessDenied. operation_name tells them apart, and echoing
-            # READ_ROLE_ARN shows whether the assume was even attempted.
-            if op == "AssumeRole":
-                return (
-                    f"Access denied on sts:AssumeRole of READ_ROLE_ARN={read_role}. "
-                    "The current identity is not allowed to assume that role -- add "
-                    "the DPS-worker role to the target role's trust policy (Action "
-                    "sts:AssumeRole, no ExternalId needed). See docs/DPS.md "
-                    "'Vendor read access'."
-                )
             return (
-                f"Access denied reading {loc} (operation {op or 's3'}, "
-                f"READ_ROLE_ARN={read_role}). The effective identity lacks "
-                "s3:ListBucket on this vendor bucket -- grant read access (or "
-                "set/fix READ_ROLE_ARN) and retry (see docs/DPS.md)."
+                f"Access denied reading {loc} (operation {op or 's3'}). The "
+                "effective identity lacks s3:ListBucket/GetObject on this vendor "
+                "bucket -- grant the worker role read access and retry (see "
+                "docs/DPS.md 'Vendor read access')."
             )
         if code in ("NoSuchBucket", "404"):
             return (
                 f"Bucket s3://{bucket} does not exist or is not visible to these "
-                "credentials -- check the sensor selection and READ_ROLE_ARN."
+                "credentials -- check the sensor selection."
             )
     return None
 
@@ -58,27 +43,12 @@ def explain_s3_read_failure(exc, bucket: str, prefix: str) -> Optional[str]:
 def _read_session(region: str = "us-west-2"):
     """boto3 Session for reading source/vendor S3 buckets.
 
-    If the ``READ_ROLE_ARN`` env var is set, assume that role first (optionally
-    with ``READ_ROLE_EXTERNAL_ID``) and return a session with the temporary
-    credentials -- this lets a DPS worker (or any caller) read a vendor bucket
-    via an assumable role it has permission to assume. When ``READ_ROLE_ARN`` is
-    unset, fall back to the default credential chain (the worker's ambient role
-    or ``AWS_*`` env vars) -- i.e. behaviour is unchanged unless you opt in.
+    Uses the default credential chain (the caller's ambient role or ``AWS_*``
+    env vars). On MAAP DPS the worker role must have read access to the vendor
+    bucket directly; on the hub the ambient identity already does. (There is no
+    role assumption here -- the old ``READ_ROLE_ARN`` sts:AssumeRole path was
+    removed 2026-07-31 because it broke vendor reads.)
     """
-    role_arn = os.environ.get("READ_ROLE_ARN")
-    if role_arn:
-        sts = boto3.client("sts")
-        kwargs = {"RoleArn": role_arn, "RoleSessionName": "disasters-vendor-read"}
-        ext = os.environ.get("READ_ROLE_EXTERNAL_ID")
-        if ext:
-            kwargs["ExternalId"] = ext
-        creds = sts.assume_role(**kwargs)["Credentials"]
-        return boto3.Session(
-            aws_access_key_id=creds["AccessKeyId"],
-            aws_secret_access_key=creds["SecretAccessKey"],
-            aws_session_token=creds["SessionToken"],
-            region_name=region,
-        )
     return boto3.Session(region_name=region)
 
 
@@ -178,6 +148,12 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
         filtered_files = [x for x in files if len(x.split("/")) > 2]
         subdirs = sorted(set([x.split("/")[1] for x in filtered_files]))
         dates = [datetime.strptime(x.split("_")[5], "%Y%m%d%H%M%S") for x in subdirs]
+        dates.sort()
+        return dates
+    elif "iceye" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        datestrings = set([x.split("/")[-1] for x in filtered_files if (x.split("/")[-1].endswith(".tif") and ("GRD" in x.split("/")[-1]))])
+        dates = [datetime.strptime(x.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S") for x in datestrings]
         dates.sort()
         return dates
     else:

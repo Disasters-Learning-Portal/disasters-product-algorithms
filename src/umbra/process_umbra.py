@@ -5,16 +5,11 @@ CLI processing for Umbra SAR products
 """
 
 import argparse
-import csv
 import os
-import sys
-
-from botocore.exceptions import BotoCoreError, ClientError
 
 from umbra.umbra_v2 import (
     retrieve_umbra_resources,
     group_umbra_scenes,
-    report_umbra_scenes,
     sigmaCalib,
     betaCalib,
     gammaCalib,
@@ -22,27 +17,15 @@ from umbra.umbra_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
-from shared_utils.s3utils import explain_s3_read_failure
 
 
 def main():
     parser = argparse.ArgumentParser(description="Process Umbra imagery")
 
     parser.add_argument(
-        "--list_dates",
-        action="store_true",
-        help=(
-            "Report the Umbra scenes available in the vendor bucket "
-            "(--bucket/--prefix), newest first by S3 delivery time, then exit "
-            "without processing. Use it to discover which --date values exist; "
-            "each printed date can be passed straight back as --date. Ignores "
-            "--date/--product."
-        ),
-    )
-
-    parser.add_argument(
         "--product",
         choices=["sigma", "beta", "gamma"],
+        required=True,
         help="Calibration product to generate"
     )
 
@@ -59,6 +42,7 @@ def main():
 
     parser.add_argument(
         "--date",
+        required=True,
         help="Target date (YYYY-MM-DD HH:MM:SS)"
     )
 
@@ -81,7 +65,7 @@ def main():
     )
 
     # COG options
-    parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
+    parser.add_argument('-nodata', type=float, default=-9999.0, help='No-data value for COG outputs (default -9999.0). SAR backscatter is float32 dB where 0 dB is a legitimate value, so nodata must never be 0.')
     parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
     parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
     parser.add_argument(
@@ -109,64 +93,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    if args.list_dates:
-        try:
-            scenes = report_umbra_scenes(bucket=args.bucket, prefix=args.prefix)
-        except (ClientError, BotoCoreError) as e:
-            msg = explain_s3_read_failure(e, args.bucket, args.prefix)
-            print(msg or f"Failed to list s3://{args.bucket}/{args.prefix}: {e}",
-                  file=sys.stderr)
-            sys.exit(2)
-        print(
-            f"{len(scenes)} available Umbra scene(s) in "
-            f"s3://{args.bucket}/{args.prefix} -- most recently added to S3 "
-            f"first (top = closest to today). Copy a --date value to process:\n"
-        )
-        # Aligned table; scene folder LAST so the fixed-width columns stay
-        # aligned regardless of the (long) Umbra scene name.
-        print(
-            f"  {'--date':<22}{'acquired (UTC)':<22}"
-            f"{'added to S3 (UTC)':<22}scene folder"
-        )
-        for s in scenes:
-            print(
-                f"  {s['date']:<22}"
-                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['scene']}"
-            )
-
-        # Also drop a sortable CSV artifact so the report survives outside the
-        # raw job log (on DPS it lands in output/ -> browsable via the Jobs
-        # panel's "Open in File Browser", rendered as a grid by JupyterLab).
-        os.makedirs(args.output, exist_ok=True)
-        csv_path = os.path.join(args.output, "available_umbra_dates.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["date", "scene", "acquired_utc", "added_to_s3_utc"])
-            for s in scenes:
-                writer.writerow([
-                    s["date"],
-                    s["scene"],
-                    s["acquired"].strftime("%Y-%m-%d %H:%M:%S"),
-                    s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
-                ])
-        print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
-        if not scenes:
-            print(
-                f"\nNo scenes found at s3://{args.bucket}/{args.prefix} (read "
-                "access OK). Double-check the sensor/prefix, or the vendor may "
-                "not have delivered any scenes yet.",
-                file=sys.stderr,
-            )
-        return
-
-    # --date / --product are optional above so --list_dates can run without
-    # them; enforce them here for the normal processing path.
-    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
-    if missing:
-        parser.error("the following arguments are required: " + ", ".join(missing))
 
     dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)

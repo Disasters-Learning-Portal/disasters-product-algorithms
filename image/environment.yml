@@ -30,6 +30,15 @@ dependencies:
   # `pip install tomlkit nbformat` step.
   - tomlkit
   - nbformat
+  # COG preview in the operator notebooks. The sensor workflows end with a
+  # leafmap map of the finished COG, served locally by localtileserver. These
+  # were previously `! pip install leafmap` / `! pip install localtileserver`
+  # cells inside capella_workflow.ipynb, which re-ran on every kernel start and
+  # installed into the running env rather than the image. Both are conda-forge
+  # packages, so they belong here (see the dependency table in CLAUDE.md:
+  # conda-only + needed in the hub image -> image/environment.yml).
+  - leafmap
+  - localtileserver
   # Add new conda-only packages here. Pre-consolidation, packages ON TOP of
   # Pangeo base were tracked in `hub-conda-deps.txt` at the algorithms repo
   # root + auto-synced into a managed block in this file via the

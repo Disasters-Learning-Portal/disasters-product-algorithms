@@ -115,31 +115,6 @@ inputs:
     doc: "Override the auto-detected no-data value; leave blank to auto-detect."
     type: string?
     default: ""
-  - name: enable_s3_upload
-    label: Publish to S3
-    doc: "Upload products to s3://nasa-disasters/drcs_activations_new/<activation_event>/ (locked destination; DPS also uploads output/ regardless)."
-    type: boolean?
-    default: false
-  - name: save_png
-    label: Save PNG quicklook
-    doc: Also write a .png quicklook next to each product COG.
-    type: boolean?
-    default: true
-  - name: png_min
-    label: PNG min (optional)
-    doc: "Manual lower bound for PNG scaling; blank = auto (2nd percentile, or 0 for uint8 RGB)."
-    type: string?
-    default: ""
-  - name: png_max
-    label: PNG max (optional)
-    doc: "Manual upper bound for PNG scaling; blank = auto (98th percentile, or 255 for uint8 RGB)."
-    type: string?
-    default: ""
-  - name: delete_cog
-    label: Delete COG from home after upload
-    doc: "Delete the COG from ~/drcs_outputs after it is copied to output/ and uploaded (PNG + output/ copy kept)."
-    type: boolean?
-    default: true
 
 outputs:
   - name: output

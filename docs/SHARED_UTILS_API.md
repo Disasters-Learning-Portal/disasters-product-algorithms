@@ -27,6 +27,7 @@ Complete reference for all functions in the `shared_utils` package.
   - [cog_validation](#cog_validation) - COG validation and integrity checks
 - [S3 Operations](#s3-operations)
   - [s3_operations](#s3_operations) - AWS S3 client and file operations
+  - [staging_upload](#staging_upload) - Publish DPS products to nasa-disasters-staging (MAAP creds)
   - [test_upload](#test_upload) - S3 upload permission testing
 - [Analysis & Verification](#analysis--verification)
   - [geotiff_analyzer](#geotiff_analyzer) - Single-file GeoTIFF analysis
@@ -228,6 +229,14 @@ create_cog_with_metadata(
 ```
 
 Automatically adds `PROCESSING_DATE` if not present in metadata dict.
+
+**Thread-safe (bytes path).** The in-memory (`bytes`) route builds the COG in GDAL
+`/vsimem` using **per-call `uuid`-suffixed paths**, so it is safe to fan out over a
+thread pool (e.g. `map_threaded`). Before 2026-07-30 it used constant vsimem paths,
+which raced under concurrency and produced spurious `IndexError` /
+`RuntimeError('unknown error occurred')` / `IFD offset > 300` / `Invalid data type for
+tag TileOffsets` errors. Pinned by
+`tests/unit/test_cog_metadata.py::TestInMemoryThreadSafety`.
 
 #### `load_metadata_json(path: Optional[str]) -> Optional[Dict[str, str]]`
 
@@ -442,6 +451,24 @@ Local basename for an S3 path, with a `.tif`-family extension forced to lowercas
 #### `download_s3_file(s3filepath, save_location='/tmp/s3_temp') -> str`
 
 Download an `s3://…` object to `save_location`, returning the local path. The local filename is normalized via `local_tif_basename` (so a `.TIF` source lands as `.tif` locally), while the object is fetched by its real key. Used by the capella/umbra/satellogic pipelines.
+
+---
+
+### staging_upload
+
+Publish a DPS job's product COGs/PNGs to a MAAP **org bucket** (`nasa-disasters-staging`) using short-lived credentials from `maap.aws.workspace_bucket_credentials()`. The DPS worker's own role (`dps-verdi-role`) can't write that bucket, so an ambient `upload_file_to_s3` would `AccessDenied`. `maap-py` is imported **lazily inside** the credential call, so importing this module never requires maap-py (it's a DPS-only dep) — only a live DPS job invokes it. Used by `dps/_finalize.sh` step 3 for every sensor. See `docs/DPS.md` "All sensors → nasa-disasters-staging" and `.clinerules.md` rule 36.
+
+#### `upload_dir_to_staging(out_home, target_bucket, dest_prefix) -> int`
+
+Request workspace credentials, confirm `target_bucket` is granted `read_write` in `resp["authorized_s3_paths"]` (else raise, listing what *was* authorized), then upload every `**/*.tif`+`**/*.png` under `out_home` to `s3://target_bucket/<granted_prefix>/<dest_prefix>/<relpath>` — keyed by the `out_home`-relative path (collision-safe, same rule as `_finalize.sh`). Returns the number of files uploaded. Callers pass `dest_prefix = "dps_output/<activation_event>"`.
+
+#### `resolve_authorized_path(resp, target_bucket) -> str`
+
+Pure helper: return the granted `read_write` prefix for `target_bucket` from a `workspace_bucket_credentials()` response (may be `""`); **fails loud** on a missing/read-only grant or an unexpected response shape. Unit-tested without maap-py.
+
+#### `iter_upload_keys(out_home, base_prefix) -> Iterator[Tuple[str, str]]`
+
+Pure helper: yield `(local_path, s3_key)` for each product COG/PNG under `out_home`, where `s3_key = base_prefix + relpath(local_path, out_home)`. Only `*.tif`/`*.png` are included.
 
 ---
 

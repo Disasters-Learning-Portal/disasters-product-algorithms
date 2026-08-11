@@ -12,6 +12,27 @@ ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
 
+# === Strip the MAAP extensions' `.lm-Widget { overflow: scroll !important }` ===
+# maap-dps-jupyter-extension and maap_algorithms_jupyter_extension both ship
+# leftover placeholder CSS from the JupyterLab extension cookiecutter that sets
+# `overflow: scroll !important` on `.lm-Widget` -- Lumino's base class, present
+# on EVERY widget. `scroll` (not `auto`) paints a scrollbar even with nothing to
+# scroll, and `!important` beats Lab's own per-widget overflow, so all of Lab's
+# few-px-tall chrome renders as bare scrollbar stepper arrows: the "chevron
+# icons everywhere" bug (2i2c-org/infrastructure#8770).
+#
+# These come from the MAAP base image, so environment.yml can't remove them, and
+# disabling the extensions would cost the Register Algorithm / Submit Jobs GUI
+# tiles. Deleting the dead declaration keeps both. Runs AFTER Layer 1 in case a
+# conda env update reinstates the files. Deliberately NOT --require: if a future
+# base image ships the fix upstream, this becomes a no-op instead of a build
+# failure. Idempotent. See .clinerules.md rule 39.
+COPY --chown=${NB_USER}:${NB_USER} image/scripts/strip_lm_widget_overflow.py \
+     /tmp/strip_lm_widget_overflow.py
+RUN /srv/conda/envs/notebook/bin/python /tmp/strip_lm_widget_overflow.py \
+      --root /srv/conda/envs/notebook/share/jupyter/labextensions \
+    && rm /tmp/strip_lm_widget_overflow.py
+
 # === JupyterLab Help-menu customization ===
 # Bake the "Disasters Resources" submenu into Help (Report a Bug -> GitHub
 # Issues, Community Forum -> GitHub Discussions, Email Support -> mailto).

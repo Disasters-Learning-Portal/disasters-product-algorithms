@@ -99,7 +99,7 @@ jobs:
     environment: ${{ inputs.register_to_maap && 'maap-registration' || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Stamp algorithm_version into the OGC config
         # Overwrite the config's algorithm_version with the dispatch input so the

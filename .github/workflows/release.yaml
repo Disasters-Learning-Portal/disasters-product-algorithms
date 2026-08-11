@@ -148,7 +148,7 @@ jobs:
           echo "::notice title=PAT authenticated::Workflow will push to main as @${USER}."
 
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0

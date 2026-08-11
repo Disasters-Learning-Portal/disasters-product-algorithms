@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout deploy-algorithm (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Check out the TARGET so we merge dev INTO it and push it back. A
           # merge needs real history of both branches -> fetch-depth: 0.

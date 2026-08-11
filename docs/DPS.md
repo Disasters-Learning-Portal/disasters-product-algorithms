@@ -14,6 +14,7 @@ dps/
 ├── _validate.sh             # shared fail-fast input validators, sourced by every run.sh
 ├── _finalize.sh             # shared output handling, sourced by every run.sh
 ├── register_algorithms.py   # maap-py registration helper (legacy schema; see below)
+├── delete_algorithm.ipynb   # undeploy a process via the OGC API (see "Deleting")
 ├── README.md
 └── <sensor>/                # landsat, sentinel2, capella, umbra, satellogic
     ├── build-env.sh         # conda env update + pip install repo (+ scm guard)
@@ -577,6 +578,60 @@ time. The whole mechanism:
 
 Prereq: repo secret **`MAAP_PGT`** (only used when `register_to_maap` is checked).
 This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub UI.
+
+## Deleting (undeploying) an algorithm
+
+**The Register Algorithm GUI can register but not delete.** Undeploying is a
+`DELETE` against the OGC processes API. The ready-made notebook is
+[`dps/delete_algorithm.ipynb`](../dps/delete_algorithm.ipynb) — list → filter →
+dry-run → delete → verify. Run it on the MAAP hub / ADE with the **`disasters_dps`**
+kernel (the env `build-env.sh` creates, which pins `maap-py`).
+
+```python
+import requests
+from maap.maap import MAAP
+
+# NOTE the /api suffix — this is NOT the extensions' `maapApiUrl` (which takes none)
+BASE = "https://api.maap-project.org/api/ogc/processes"
+headers = MAAP()._get_api_header()
+
+procs = requests.get(BASE, headers=headers).json()["processes"]
+for p in procs:                       # find the processID — you cannot delete by name
+    print(p["processID"], f'{p["id"]}:{p["version"]}', p["deployedBy"])
+
+r = requests.delete(f"{BASE}/34", headers=headers)
+print(r.status_code, r.text)          # 200 {"detail": "Deleted process"}
+```
+
+The parts that bite:
+
+- **You delete by `processID`** — an int MAAP assigns at registration — **not by
+  `algorithm_name`**. Always list first; a name in the URL just returns `404`.
+- **Response codes:** `200` undeployed · `403` you are not the deployer · `404` no
+  such `processID`.
+- **Only the deployer can delete their own process.** A `403` on something you
+  believe is yours usually means the token belongs to a different MAAP account than
+  the one that registered it (registered from the ADE, deleting from the Disasters
+  hub, or vice versa) — check the `deployedBy` field.
+- **`processID` is per name+version.** Deleting `foo:dev` leaves `foo:v1.2.0` alone.
+- **The base URL has an `/api` suffix here** (`.../api/ogc/processes`), unlike the
+  `maapApiUrl` JupyterLab setting, which must have **none** (the extensions append
+  it themselves). Getting this backwards returns HTML → `Unexpected token '<'`.
+- **Delete removes the registration only.** Running jobs are not cancelled, job
+  history stays, outputs already in `nasa-disasters-staging/dps_output/<event>/`
+  stay, and the built container image stays. Re-registering the same name afterwards
+  gets a **new** `processID`.
+- Confirm the result in the **Submit Jobs → Process dropdown** — same "is it really
+  deployed" check as registration.
+
+**Why this comes up: a rename is not a move.** Changing `algorithm_name` in
+`dps/<sensor>/algorithm_config.yaml` / `dps/ogc/<sensor>.yml` and re-registering
+creates a **second** process — the old name is left registered and still runs the
+code its container was built with. That is exactly what the `<sensor>-ogc-test` →
+`disasters-<sensor>-process` consolidation produces, so each rename leaves up to two
+stale entries (the GUI-registered bare name, e.g. `umbra`, and the Action-registered
+`umbra-ogc-test`) to clean up here. The old GUI-registered `sentinel-2` was deleted
+this way on 2026-08-11.
 
 ## Black Marble (VEDA nighttime lights)
 

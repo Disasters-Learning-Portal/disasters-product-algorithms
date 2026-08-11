@@ -111,3 +111,63 @@ def test_iter_upload_keys_empty_base_is_relpath(tmp_path):
     (out_home / "only.tif").write_text("t")
     pairs = list(iter_upload_keys(str(out_home), ""))
     assert pairs == [(str(out_home / "only.tif"), "only.tif")]
+
+
+def _s2_tree(tmp_path):
+    """A Sentinel-2 output tree with the scratch files an operator run leaves behind."""
+    out_home = tmp_path / "output"
+    for rel in (
+        "20260117/waterExtent/S2B_MSIL2A_waterExtent_NSTD_1_T17RLN_x.tif",
+        "20260117/waterExtent/B8_merged.tif",
+        "20260117/trueColor/S2B_MSIL2A_trueColor_T17RLN_x.tif",
+        "20260117/trueColor/S2B_MSIL2A_trueColor_T17RLN_merged_x.tif",
+        "20260117/trueColor/scratch.tmp.tif",
+    ):
+        p = out_home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("t")
+    return out_home
+
+
+def test_iter_upload_keys_include_none_publishes_everything(tmp_path):
+    """Default stays None so every run.sh is unaffected -- a DPS OUT_HOME is all products."""
+    out_home = _s2_tree(tmp_path)
+    keys = {k for _, k in iter_upload_keys(str(out_home), "p")}
+    assert len(keys) == 5
+    assert any(k.endswith("B8_merged.tif") for k in keys)
+    assert any(k.endswith("scratch.tmp.tif") for k in keys)
+
+
+def test_iter_upload_keys_include_skips_scratch_but_keeps_water_extent(tmp_path):
+    """The notebook predicate: waterExtent must publish; intermediates must not.
+
+    waterExtent is the regression this guards -- the old PRODUCT_FOLDERS lookup
+    keyed it as "WE" and matched "_WE", which never occurs in "_waterExtent",
+    so every water-extent COG was silently skipped.
+    """
+    out_home = _s2_tree(tmp_path)
+
+    def is_product(path):
+        name = os.path.basename(path)
+        return not name.endswith(".tmp.tif") and name != "B8_merged.tif"
+
+    keys = {k for _, k in iter_upload_keys(str(out_home), "p", include=is_product)}
+
+    assert any("waterExtent" in k for k in keys), "waterExtent must be published"
+    assert not any(k.endswith("B8_merged.tif") for k in keys)
+    assert not any(k.endswith(".tmp.tif") for k in keys)
+    assert len(keys) == 3
+
+
+def test_iter_upload_keys_include_merge_only(tmp_path):
+    """With ENABLE_MERGE the per-tile inputs are plain rasters, not COGs -- skip them."""
+    out_home = _s2_tree(tmp_path)
+
+    def merged_products(path):
+        name = os.path.basename(path)
+        if name.endswith(".tmp.tif") or name == "B8_merged.tif":
+            return False
+        return "merged" in name
+
+    keys = {k for _, k in iter_upload_keys(str(out_home), "p", include=merged_products)}
+    assert keys == {"p/20260117/trueColor/S2B_MSIL2A_trueColor_T17RLN_merged_x.tif"}

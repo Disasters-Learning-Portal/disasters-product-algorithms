@@ -450,6 +450,45 @@ unchecked = safe dry-run). Via `dockerfile-path: dps/Dockerfile` the action
 validates the CWL (injecting that image), and — if checked — registers it to the
 prod OGC processes API. `run-name` shows which algorithm/version is registering.
 
+Note the Action reads **`dps/ogc/<name>.yml`** — *not* `dps/<sensor>/algorithm_config.yaml`.
+Editing only the latter changes nothing about what this path registers.
+
+### ⚠️ Register ONE algorithm at a time (a queued second run is silently cancelled)
+
+`register-dps.yml` and `sync-deploy-algorithm.yml` share
+`concurrency.group: sync-dev-to-deploy-algorithm` with `cancel-in-progress: false`,
+so they never overlap. The trap: GitHub keeps at most **one pending run per group**,
+and whatever queues *next* **evicts the run already waiting**. Two registrations
+dispatched back-to-back — or one dispatched while a merge into `dev` is imminent —
+means the earlier queued one dies. Observed 2026-08-11:
+
+| time | event |
+|---|---|
+| 17:35:20 | `blackmarble` dispatched → parks at the approval gate, holding the group |
+| 17:35:29 | `umbra` dispatched → queues as the single *pending* run |
+| 17:35:36 | PR #91 merged into `dev` |
+| 17:35:39 | `Sync dev → deploy-algorithm` created → takes the pending slot, **cancels `umbra`** |
+
+The workflow header warns about the *opposite* hazard (a sync push making the
+register's CWL push non-fast-forward). Eviction is the one that actually bites.
+**Dispatch → wait for `completed` → dispatch the next.**
+
+**A cancelled run does not fail `gh run watch --exit-status`** — it exits **0**, so a
+watcher reports success for a registration that never happened. Confirm with
+`gh run view <id> --json conclusion` (want `success`, not `cancelled`), and confirm
+the registration itself from the `{"title": "<name>", …, "status": "accepted"}` JSON
+the deploy step prints.
+
+### `deploy-algorithm` stays one file ahead of `dev` — don't merge it back
+
+Every register run commits the generated
+`cwl_workflows/process_<repo>_<branch>.cwl` to the branch it ran on. That filename is
+**branch-derived** and its content is **overwritten on every run**, so it is a build
+artifact that belongs only on `deploy-algorithm` — `git ls-tree origin/dev` has no
+`cwl_workflows/` at all, deliberately. A `deploy-algorithm → dev` PR therefore
+contributes nothing but that artifact; close it. (PR #90 was opened and closed for
+exactly this.) Land real changes on `dev` and let the sync carry them the other way.
+
 **The `dps/ogc/<name>.yml` configs** mirror `dps/<sensor>/algorithm_config.yaml`
 but mark inputs **`type: X?`** (OGC-optional → `minOccurs:0`), carry **no
 container field** (the Action supplies the built image), and use an **absolute

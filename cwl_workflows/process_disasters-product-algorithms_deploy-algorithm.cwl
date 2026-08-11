@@ -1,83 +1,66 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: satellogic-ogc-test
-  doc: 'Generate a Satellogic disaster-response product (true color, color IR, NDVI,
-    NDWI, or EVI) from CSDA vendor L1B/L1D rasters and write a Cloud Optimized GeoTIFF.
-    OGC build: every input optional in the schema; run.sh enforces the real requirements
-    (date, source, non-placeholder activation_event, level).'
-  id: satellogic-ogc-test
+  label: black-marble-ogc-test
+  doc: 'VEDA Black Marble nighttime-lights pipeline: for a WGS84 bbox + date, download
+    VIIRS VNP46A2 (Earthdata), Landsat (STAC), and OSM roads, then fuse into an urban-focused
+    Cloud Optimized GeoTIFF. OGC test build: every input is optional in the schema
+    so the Submit form never blocks; run.sh enforces the real requirements (valid
+    bbox/date, non-placeholder activation_event, readable Earthdata secret). The Earthdata
+    token comes from MAAP secrets, never the job inputs.'
+  id: black-marble-ogc-test
   inputs:
-    date:
-      doc: Target acquisition datetime 'YYYY-MM-DD HH:MM:SS'. REQUIRED for a real
-        run. Discover valid dates with the list-dates algorithm (sensor=satellogic,
-        level=<L1D|L1B>).
-      label: Target datetime
+    bbox:
+      doc: min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81.
+        Latitude span must be >= 0.05 deg. Pre-filled with a known-good San Francisco
+        test box; change it for a real activation.
+      label: Bounding box (WGS84)
       type: string?
-      default: ''
-    product:
-      doc: 'One of: truecolor, colorir, ndvi, ndwi, evi.'
-      label: Product
-      type: string?
-      default: truecolor
-    level:
-      doc: 'Satellogic processing level: L1D or L1B.'
-      label: Processing level
-      type: string?
-      default: L1D
-    bucket:
-      doc: CSDA vendor bucket the rasters are read from. The CLI hardcodes this; changing
-        it has no effect (documented for the AWS read-access requirement).
-      label: Vendor S3 bucket (informational)
-      type: string?
-      default: csda-data-vendor-satellogic
-    prefix:
-      doc: Key prefix under the vendor bucket. The CLI hardcodes this; changing it
-        has no effect.
-      label: Vendor S3 prefix (informational)
-      type: string?
-      default: disasters
-    use_mask:
-      doc: Apply the cloud mask (index/water products only).
-      label: Apply cloud mask
-      type: boolean?
-      default: false
-    visualize:
-      doc: Apply normalization + gamma correction for RGB products.
-      label: Visualize (RGB only)
-      type: boolean?
-      default: false
-    gamma:
-      doc: Gamma correction for RGB products (only used when visualize is true).
-      label: Gamma correction
-      type: float?
-      default: 0.7
-    dst_crs:
-      doc: 'Target CRS: native (default) | EPSG:3857 | EPSG:4326.'
-      label: Target CRS
-      type: string?
-      default: native
+      default: -122.55,37.69,-122.32,37.81
     activation_event:
-      doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
-        is REJECTED at run time.
+      doc: Activation event, e.g. 202511_Flood_TX -- used for the S3 output path (dps_output/<event>/).
+        Pre-filled with a test value so a bare Submit runs; set a REAL event for a
+        real activation (the placeholder YYYYMM_Hazard_Location is rejected at run
+        time).
       label: Activation event
       type: string?
-      default: YYYYMM_Hazard_Location
-    source_label:
-      doc: Data origin, e.g. USGS, NASA, NOAA, Satellogic. REQUIRED for a real run.
-      label: Source
+      default: 202601_KyleWx_US
+    date:
+      doc: Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date.
+        Pre-filled with a known-good test date.
+      label: Target date
       type: string?
-      default: ''
-    compression_level:
-      doc: ZSTD level 1-22 (22 = max, default).
-      label: COG compression level
-      type: int?
-      default: 22
-    nodata:
-      doc: Override the auto-detected no-data value; leave blank to auto-detect.
-      label: No-data value (optional)
+      default: '2023-06-15'
+    config:
+      doc: 'Processing preset: fast (quick smoke, minimal enhancements) | default
+        | high_quality. Default fast.'
+      label: Quality preset
       type: string?
-      default: ''
+      default: fast
+    osm_source:
+      doc: 'OpenStreetMap road backend: overpass (Overpass API via OSMnx) | layercake
+        (OSM-US parquet, faster on large/dense areas, experimental). Default overpass.'
+      label: OSM road source
+      type: string?
+      default: overpass
+    wgs84:
+      doc: Also write an EPSG:4326 (WGS84) COG next to the native output (for web
+        mapping).
+      label: Also export EPSG:4326
+      type: boolean?
+      default: false
+    basename:
+      doc: Output COG filename stem -> <basename>.tif (letters, digits, . _ - only).
+      label: Output filename stem
+      type: string?
+      default: black_marble_output
+    earthdata_secret_name:
+      doc: NAME of the MAAP secret holding your NASA Earthdata token (not the token
+        value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN',
+        '<token>').
+      label: Earthdata secret name
+      type: string?
+      default: EARTHDATA_TOKEN
   outputs:
     output:
       type: Directory
@@ -86,19 +69,14 @@ $graph:
     process:
       run: '#main'
       in:
-        date: date
-        product: product
-        level: level
-        bucket: bucket
-        prefix: prefix
-        use_mask: use_mask
-        visualize: visualize
-        gamma: gamma
-        dst_crs: dst_crs
+        bbox: bbox
         activation_event: activation_event
-        source_label: source_label
-        compression_level: compression_level
-        nodata: nodata
+        date: date
+        config: config
+        osm_source: osm_source
+        wgs84: wgs84
+        basename: basename
+        earthdata_secret_name: earthdata_secret_name
       out:
       - outputs_result
 - class: CommandLineTool
@@ -109,89 +87,59 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 32
+      ramMin: 16
       coresMin: 4
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/satellogic/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/blackmarble/run.sh
   inputs:
-    date:
+    bbox:
       type: string?
       inputBinding:
         position: 1
-        prefix: --date
-      default: ''
-    product:
-      type: string?
-      inputBinding:
-        position: 2
-        prefix: --product
-      default: truecolor
-    level:
-      type: string?
-      inputBinding:
-        position: 3
-        prefix: --level
-      default: L1D
-    bucket:
-      type: string?
-      inputBinding:
-        position: 4
-        prefix: --bucket
-      default: csda-data-vendor-satellogic
-    prefix:
-      type: string?
-      inputBinding:
-        position: 5
-        prefix: --prefix
-      default: disasters
-    use_mask:
-      type: boolean?
-      inputBinding:
-        position: 6
-        prefix: --use_mask
-      default: false
-    visualize:
-      type: boolean?
-      inputBinding:
-        position: 7
-        prefix: --visualize
-      default: false
-    gamma:
-      type: float?
-      inputBinding:
-        position: 8
-        prefix: --gamma
-      default: 0.7
-    dst_crs:
-      type: string?
-      inputBinding:
-        position: 9
-        prefix: --dst_crs
-      default: native
+        prefix: --bbox
+      default: -122.55,37.69,-122.32,37.81
     activation_event:
       type: string?
       inputBinding:
-        position: 10
+        position: 2
         prefix: --activation_event
-      default: YYYYMM_Hazard_Location
-    source_label:
+      default: 202601_KyleWx_US
+    date:
       type: string?
       inputBinding:
-        position: 11
-        prefix: --source_label
-      default: ''
-    compression_level:
-      type: int?
-      inputBinding:
-        position: 12
-        prefix: --compression_level
-      default: 22
-    nodata:
+        position: 3
+        prefix: --date
+      default: '2023-06-15'
+    config:
       type: string?
       inputBinding:
-        position: 13
-        prefix: --nodata
-      default: ''
+        position: 4
+        prefix: --config
+      default: fast
+    osm_source:
+      type: string?
+      inputBinding:
+        position: 5
+        prefix: --osm_source
+      default: overpass
+    wgs84:
+      type: boolean?
+      inputBinding:
+        position: 6
+        prefix: --wgs84
+      default: false
+    basename:
+      type: string?
+      inputBinding:
+        position: 7
+        prefix: --basename
+      default: black_marble_output
+    earthdata_secret_name:
+      type: string?
+      inputBinding:
+        position: 8
+        prefix: --earthdata_secret_name
+      default: EARTHDATA_TOKEN
   outputs:
     outputs_result:
       outputBinding:
@@ -205,14 +153,15 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: c282e9a90b3f2ee047062e9039632ea57012e74f
-s:dateCreated: 2026-08-03
+s:commitHash: 25a06258c8cc4f7d74c94da0960ec653f6d9007e
+s:dateCreated: 2026-08-11
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration \u2014 all inputs optional; image built in-workflow\
+s:releaseNotes: "OGC registration test \u2014 download-from-Earthdata/STAC/OSM (token\
+  \ via MAAP secrets, not job inputs); all inputs optional; image built in-workflow\
   \ from dps/Dockerfile."
-s:keywords: satellogic, cog, disasters, flood, fire, ndvi, ndwi, evi
+s:keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
 $namespaces:
   s: https://schema.org/
 $schemas:

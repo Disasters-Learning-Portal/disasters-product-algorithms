@@ -1,66 +1,92 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: black-marble-ogc-test
-  doc: 'VEDA Black Marble nighttime-lights pipeline: for a WGS84 bbox + date, download
-    VIIRS VNP46A2 (Earthdata), Landsat (STAC), and OSM roads, then fuse into an urban-focused
-    Cloud Optimized GeoTIFF. OGC test build: every input is optional in the schema
-    so the Submit form never blocks; run.sh enforces the real requirements (valid
-    bbox/date, non-placeholder activation_event, readable Earthdata secret). The Earthdata
-    token comes from MAAP secrets, never the job inputs.'
-  id: black-marble-ogc-test
+  label: disasters-sentinel2-process
+  doc: 'Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+    MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
+    products (true color, SWIR, NDVI, water extent, etc.). OGC test build: every input
+    is optional in the schema so the Submit form never blocks; run.sh enforces the
+    real requirements (tile, non-placeholder activation_event, readable Copernicus
+    secrets). Credentials come from MAAP secrets, never the job inputs.'
+  id: disasters-sentinel2-process
   inputs:
-    bbox:
-      doc: min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81.
-        Latitude span must be >= 0.05 deg. Pre-filled with a known-good San Francisco
-        test box; change it for a real activation.
-      label: Bounding box (WGS84)
+    tile:
+      doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for
+        several, no quotes: T17RLN T17RLM). Pre-filled with a known-good test tile;
+        change it for a real activation.'
+      label: MGRS tile(s)
       type: string?
-      default: -122.55,37.69,-122.32,37.81
+      default: T17RLN T17RLM
     activation_event:
-      doc: Activation event, e.g. 202511_Flood_TX -- used for the S3 output path (dps_output/<event>/).
-        Pre-filled with a test value so a bare Submit runs; set a REAL event for a
-        real activation (the placeholder YYYYMM_Hazard_Location is rejected at run
-        time).
+      doc: Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so
+        a bare Submit runs; set a REAL event for a real activation (the placeholder
+        YYYYMM_Hazard_Location is rejected at run time).
       label: Activation event
       type: string?
       default: 202601_KyleWx_US
-    date:
-      doc: Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date.
-        Pre-filled with a known-good test date.
-      label: Target date
+    download_date:
+      doc: 'Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated).
+        Blank = the CLI''s recent-scenes default (~past 10 days). Pre-filled with
+        a known-good test date.'
+      label: Download date (optional)
       type: string?
-      default: '2023-06-15'
-    config:
-      doc: 'Processing preset: fast (quick smoke, minimal enhancements) | default
-        | high_quality. Default fast.'
-      label: Quality preset
+      default: '20251231'
+    level:
+      doc: 'Sentinel-2 processing level to download: 2 = L2A (surface reflectance),
+        1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected
+        production.'
+      label: Processing level
       type: string?
-      default: fast
-    osm_source:
-      doc: 'OpenStreetMap road backend: overpass (Overpass API via OSMnx) | layercake
-        (OSM-US parquet, faster on large/dense areas, experimental). Default overpass.'
-      label: OSM road source
+      default: '1'
+    limit:
+      doc: Maximum number of Copernicus search results to download for the tile/date.
+      label: Search result limit
+      type: int?
+      default: 50
+    products:
+      doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or
+        'all'.
+      label: Products
       type: string?
-      default: overpass
-    wgs84:
-      doc: Also write an EPSG:4326 (WGS84) COG next to the native output (for web
-        mapping).
-      label: Also export EPSG:4326
+      default: true swir
+    source_label:
+      doc: Data origin, e.g. Copernicus, ESA.
+      label: Source
+      type: string?
+      default: Copernicus
+    dst_crs:
+      doc: 'Target CRS: native (default, no warp, preserves source projection) | EPSG:3857
+        | EPSG:4326.'
+      label: Target CRS
+      type: string?
+      default: native
+    merge:
+      doc: Mosaic scenes by date and product (-merge).
+      label: Merge by date/product
+      type: boolean?
+      default: true
+    mask:
+      doc: Generate and apply a cloud mask (-mask, L2A only).
+      label: Cloud mask
       type: boolean?
       default: false
-    basename:
-      doc: Output COG filename stem -> <basename>.tif (letters, digits, . _ - only).
-      label: Output filename stem
+    we_nstd:
+      doc: Space-separated std-dev thresholds for water extent (no quotes), e.g. 1
+        1.5.
+      label: Water-extent std devs (optional)
       type: string?
-      default: black_marble_output
-    earthdata_secret_name:
-      doc: NAME of the MAAP secret holding your NASA Earthdata token (not the token
-        value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN',
-        '<token>').
-      label: Earthdata secret name
+      default: ''
+    compression_level:
+      doc: ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. Default
+        1 for a fast test; raise (e.g. 22 = max) for smaller production COGs.
+      label: COG compression level
+      type: int?
+      default: 1
+    nodata:
+      doc: No-data value for the output COGs (Sentinel-2 default 0).
+      label: No-data value
       type: string?
-      default: EARTHDATA_TOKEN
+      default: '0'
   outputs:
     output:
       type: Directory
@@ -69,14 +95,19 @@ $graph:
     process:
       run: '#main'
       in:
-        bbox: bbox
+        tile: tile
         activation_event: activation_event
-        date: date
-        config: config
-        osm_source: osm_source
-        wgs84: wgs84
-        basename: basename
-        earthdata_secret_name: earthdata_secret_name
+        download_date: download_date
+        level: level
+        limit: limit
+        products: products
+        source_label: source_label
+        dst_crs: dst_crs
+        merge: merge
+        mask: mask
+        we_nstd: we_nstd
+        compression_level: compression_level
+        nodata: nodata
       out:
       - outputs_result
 - class: CommandLineTool
@@ -87,59 +118,89 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 16
-      coresMin: 4
+      ramMin: 64
+      coresMin: 8
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/blackmarble/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/sentinel2/run.sh
   inputs:
-    bbox:
+    tile:
       type: string?
       inputBinding:
         position: 1
-        prefix: --bbox
-      default: -122.55,37.69,-122.32,37.81
+        prefix: --tile
+      default: T17RLN T17RLM
     activation_event:
       type: string?
       inputBinding:
         position: 2
         prefix: --activation_event
       default: 202601_KyleWx_US
-    date:
+    download_date:
       type: string?
       inputBinding:
         position: 3
-        prefix: --date
-      default: '2023-06-15'
-    config:
+        prefix: --download_date
+      default: '20251231'
+    level:
       type: string?
       inputBinding:
         position: 4
-        prefix: --config
-      default: fast
-    osm_source:
-      type: string?
+        prefix: --level
+      default: '1'
+    limit:
+      type: int?
       inputBinding:
         position: 5
-        prefix: --osm_source
-      default: overpass
-    wgs84:
-      type: boolean?
+        prefix: --limit
+      default: 50
+    products:
+      type: string?
       inputBinding:
         position: 6
-        prefix: --wgs84
-      default: false
-    basename:
+        prefix: --products
+      default: true swir
+    source_label:
       type: string?
       inputBinding:
         position: 7
-        prefix: --basename
-      default: black_marble_output
-    earthdata_secret_name:
+        prefix: --source_label
+      default: Copernicus
+    dst_crs:
       type: string?
       inputBinding:
         position: 8
-        prefix: --earthdata_secret_name
-      default: EARTHDATA_TOKEN
+        prefix: --dst_crs
+      default: native
+    merge:
+      type: boolean?
+      inputBinding:
+        position: 9
+        prefix: --merge
+      default: true
+    mask:
+      type: boolean?
+      inputBinding:
+        position: 10
+        prefix: --mask
+      default: false
+    we_nstd:
+      type: string?
+      inputBinding:
+        position: 11
+        prefix: --we_nstd
+      default: ''
+    compression_level:
+      type: int?
+      inputBinding:
+        position: 12
+        prefix: --compression_level
+      default: 1
+    nodata:
+      type: string?
+      inputBinding:
+        position: 13
+        prefix: --nodata
+      default: '0'
   outputs:
     outputs_result:
       outputBinding:
@@ -153,15 +214,15 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 25a06258c8cc4f7d74c94da0960ec653f6d9007e
+s:commitHash: 38560bebdc7a9adc165622a4e8372beeb9f5379a
 s:dateCreated: 2026-08-11
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 download-from-Earthdata/STAC/OSM (token\
-  \ via MAAP secrets, not job inputs); all inputs optional; image built in-workflow\
-  \ from dps/Dockerfile."
-s:keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
+s:releaseNotes: "OGC registration test \u2014 download-from-Copernicus (creds via\
+  \ MAAP secrets, not job inputs); all inputs optional; image built in-workflow from\
+  \ dps/Dockerfile."
+s:keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent, copernicus
 $namespaces:
   s: https://schema.org/
 $schemas:

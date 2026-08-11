@@ -360,10 +360,10 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | Check | Rule | Applies to |
 |---|---|---|
 | `validate_activation_event` | reject placeholder; require `YYYYMM_Hazard_Location` (`^[0-9]{4}(0[1-9]\|1[0-2])_[^_]+_.+$`) | all |
-| `require_nonempty source_label` | non-empty | all except Satellogic¹ |
-| `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹ |
-| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹ |
-| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all |
+| `require_nonempty source_label` | non-empty | all except Satellogic¹, Sentinel-2³ |
+| `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹, Sentinel-2³ |
+| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹, Sentinel-2³ |
+| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all (Sentinel-2: `we_nstd` only³) |
 | `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
 | `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
 | `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
@@ -380,7 +380,8 @@ CLI, so bash does not re-check it. Assertions live in
 - `activation_event` default is the placeholder **`YYYYMM_Hazard_Location`**, which
   run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
 - `source_label` is **required** (no default; the form marks it `*`) — **except
-  Satellogic**, which hardcodes `csda` and dropped the input (PR #45).
+  Satellogic**, which hardcodes `csda` and dropped the input (PR #45), and
+  **Sentinel-2**, which hardcodes `Copernicus` (see ³).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
   (EPSG:3857 is NOT required for VEDA `build_stac`.)
 - **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/22
@@ -396,6 +397,24 @@ CLI, so bash does not re-check it. Assertions live in
   apply any display stretch downstream at the visualization layer (VEDA/leafmap). Both **Capella & Umbra** default
   `-nodata` to **-9999.0** (float32 dB backscatter — 0 dB is a legitimate value, so
   nodata is never 0); leave the DPS `nodata` input blank to use it.
+- **³ Sentinel-2 (2026-08-11)** hardcodes `source_label=Copernicus` (a
+  download-from-CDSE job has no other origin), `dst_crs=native`, ZSTD
+  `compression_level=9`, and `limit=50`; all four inputs were removed, so their
+  validators no longer run for it. `limit` is `download_sentinel2`'s OData `$top`
+  — a **per-tile page size, not a total cap**, and the loop doesn't follow
+  `@odata.nextLink` — so 50 is a ceiling no realistic tile+date query reaches, and
+  exposing it only invited operators to "fix" a low scene count with the wrong
+  knob (the real cause is the ~5-day revisit or a wrong `level`). **`nodata` was removed WITHOUT a replacement constant** — the
+  CLI's `-nodata` applies ONE value to EVERY product, but S2 output is mixed-dtype:
+  uint8 color composites (fill `0`) alongside float32 indices, where
+  `dump_geotiff_float` writes **`-9999.0`** and `0` is a legitimate NDVI/NDWI value.
+  The old `nodata` input defaulted to `0`, which mis-declared nodata on every index
+  product. Omitting `-nodata` lets `cog_utils.set_nodata_value` auto-detect per
+  dtype (uint8 → `0`, float → `-9999.0`) and get both right. **Do not reintroduce a
+  blanket `-nodata` on Sentinel-2.** `we_nstd` survives as an input (a real
+  water-extent algorithm knob) and now defaults to `1` rather than blank — a blank
+  string is falsy and trips the Submit Job form's *"Valid value required"* check on
+  the GUI-registered path.
 
 ### Not yet hardened (documented follow-ups)
 

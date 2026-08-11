@@ -28,10 +28,14 @@
 # never appears in the job parameters or log. Store them once from a MAAP notebook:
 #   maap.secrets.add_secret("COP_USER", ...); maap.secrets.add_secret("COP_PASS", ...)
 #
-# algorithm_name is intentionally distinct ("sentinel-2-ogc-test") so registering
-# this does NOT overwrite the existing GUI-registered "sentinel-2" process.
+# algorithm_name: UNLIKE the other OGC configs, sentinel2 does NOT use a
+# "<sensor>-ogc-test" name. The old GUI-registered "sentinel-2" process was
+# DELETED (2026-08-11), so there is nothing to coexist with — this OGC config is
+# now the single canonical registration, named "disasters-sentinel2-process".
+# dps/sentinel2/algorithm_config.yaml (the GUI path) carries the SAME name on
+# purpose: whichever path you register from, it targets the one process.
 # =============================================================================
-algorithm_name: sentinel-2-ogc-test
+algorithm_name: disasters-sentinel2-process
 algorithm_version: dev
 algorithm_description: >-
   Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by

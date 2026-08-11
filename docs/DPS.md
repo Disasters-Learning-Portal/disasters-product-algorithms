@@ -1,7 +1,7 @@
 # Running on MAAP DPS
 
-All five sensor pipelines (landsat-8-9, sentinel-2, capella, umbra, satellogic)
-are registerable as algorithms on the MAAP
+All five sensor pipelines (landsat-8-9, capella, umbra, satellogic, and
+disasters-sentinel2-process) are registerable as algorithms on the MAAP
 [Data Processing System (DPS)](https://docs.maap-project.org/en/latest/technical_tutorials/dps_tutorial/dps_tutorial_demo.html).
 The plumbing lives in [`dps/`](../dps/). This page is the source of truth for the
 **non-obvious** parts; the per-sensor files are self-documenting otherwise.
@@ -456,6 +456,13 @@ in-image `run_command`** (`/app/disasters-product-algorithms/dps/<sensor>/run.sh
 Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registered
 `capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
 list_dates, landsat, sentinel2**.
+
+**Exception — `sentinel2` is `disasters-sentinel2-process`, not `sentinel2-ogc-test`.**
+The old GUI-registered `sentinel-2` process was deleted (2026-08-11), so there is
+nothing left to coexist with and the `-ogc-test` suffix bought nothing. Both
+`dps/ogc/sentinel2.yml` and `dps/sentinel2/algorithm_config.yaml` now carry the
+same canonical name, so either registration path targets the one process (the
+GUI path still can't express optional inputs — prefer the Action).
 
 **`landsat` is the one file-input OGC config** — its granule `file_path_of_raw_data`
 is a **required** `File` (no `?`, `minOccurs:1`); nothing can run without a granule,

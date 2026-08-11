@@ -40,7 +40,7 @@ algorithm_version: dev
 algorithm_description: >-
   Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
   MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
-  products (true color, SWIR, NDVI, water extent, etc.). OGC test build: every
+  products (true color, SWIR, NDVI, water extent, etc.). Every
   input is optional in the schema so the Submit form never blocks; run.sh enforces
   the real requirements (tile, non-placeholder activation_event, readable
   Copernicus secrets). Credentials come from MAAP secrets, never the job inputs.

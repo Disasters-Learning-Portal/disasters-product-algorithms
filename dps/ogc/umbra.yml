@@ -6,13 +6,19 @@
 # the Action builds the image from dps/Dockerfile (dockerfile-path) and injects
 # it, so run_command is an ABSOLUTE path inside that image.
 # =============================================================================
-algorithm_name: umbra-ogc-test
+# algorithm_name: like sentinel2/blackmarble, umbra does NOT use a
+# "<sensor>-ogc-test" name — this is the canonical registration, and
+# dps/umbra/algorithm_config.yaml (the GUI path) carries the SAME name on
+# purpose. NOTE: a rename registers a NEW process; the older "umbra-ogc-test"
+# and GUI-registered "umbra" are NOT renamed and must be deleted in MAAP by hand.
+algorithm_name: disasters-umbra-process
 algorithm_version: dev
 algorithm_description: >-
   Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response
-  products (sigma/beta/gamma/rcs calibration, optional Lee filter). Fetches the
-  source GEC raster from the CSDA Umbra vendor S3 bucket keyed by date. OGC build:
-  every input optional in the schema; run.sh enforces the real requirements.
+  products (sigma/beta/gamma calibration, always-on Lee speckle filter with a
+  selectable 3/5/7 window). Fetches the source GEC raster from the CSDA Umbra
+  vendor S3 bucket keyed by date. Every input is optional in the schema so the
+  Submit form never blocks; run.sh enforces the real requirements.
 keywords: umbra, sar, cog, disasters, flood, calibration
 code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
 citation: NASA Disasters Program

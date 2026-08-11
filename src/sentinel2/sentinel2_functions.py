@@ -508,13 +508,13 @@ def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   # calculate NDWI
   print('\t* Calculating NDWI')
   ndwi = np.zeros((rows,cols))
-  ndwi[:] = 999
+  ndwi[:] = -9999.0
   valid = np.where((g > 0) & (nir > 0))
   ndwi[valid] = (g[valid] - nir[valid]) / (g[valid] + nir[valid])
   
   # write NDWI image to file
   print('\t* Generating NDWI geotiff')
-  result = dump_geotiff_float(outname, ndwi, projref, in_geo)
+  result = dump_geotiff_float(outname, ndwi, projref, in_geo, nodata=-9999.0)
 
   # apply cloud mask
   if mask is not None:
@@ -558,13 +558,13 @@ def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
   # calculate mNDWI
   print('\t* Calculating MNDWI')
   mndwi = np.zeros((rows,cols))
-  mndwi[:] = 999
+  mndwi[:] = -9999.0
   valid = np.where((g > 0) & (swir >0))
   mndwi[valid] = (g[valid] - swir[valid])/(g[valid] + swir[valid])
 
   # write mNDWI image to file
   print('\t* Generating MNDWI geotiff')
-  result = dump_geotiff_float(outname, mndwi, projref, in_geo)
+  result = dump_geotiff_float(outname, mndwi, projref, in_geo, nodata=-9999.0)
 
   # apply cloud mask
   if mask is not None:
@@ -608,13 +608,13 @@ def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
   # calculate NDVI
   print('\t* Calculating NDVI')
   ndvi = np.zeros((rows,cols))
-  ndvi[:] = 999
+  ndvi[:] = -9999.0
   valid = np.where((r > 0) & (nir > 0))
   ndvi[valid] = (nir[valid]-r[valid])/(nir[valid]+r[valid])
   
   # write NDVI image to file
   print('\t* Generating NDVI geotiff')
-  result = dump_geotiff_float(outname, ndvi, projref, in_geo)
+  result = dump_geotiff_float(outname, ndvi, projref, in_geo, nodata=-9999.0)
 
   # apply cloud mask
   if mask is not None:
@@ -653,13 +653,13 @@ def gen_nbr(safe, outname, level, mask=None):
   # calculate NBR
   print('\t* Calculating NBR')
   nbr = np.zeros((rows,cols))
-  nbr[:] = 999
+  nbr[:] = -9999.0
   valid = np.where((nir > 0) & (swir > 0))
   nbr[valid] = (nir[valid] - swir[valid]) / (nir[valid] + swir[valid])
 
   # write NBR image to file
   print('\t* Generating NBR geotiff')
-  result = dump_geotiff_float(outname, nbr, projref, in_geo)
+  result = dump_geotiff_float(outname, nbr, projref, in_geo, nodata=-9999.0)
 
   # apply cloud mask
   if mask is not None:

@@ -761,7 +761,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
   ndvi = np.clip(ndvi, -1.0, 1.0)
-  ndvi[nodatapix] = 999
+  ndvi[nodatapix] = -9999.0
 
 
   # Write a Raw GeoTIFF--No Color Table
@@ -774,6 +774,9 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndvi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
   
 
@@ -848,7 +851,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
   ndwi = np.clip(ndwi, -1.0, 1.0)
-  ndwi[nodatapix] = 999
+  ndwi[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NDWI geotiff")
@@ -860,6 +863,9 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndwi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -932,7 +938,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
   mndwi = np.clip(mndwi, -1.0, 1.0)
-  mndwi[nodatapix] = 999
+  mndwi[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating a mNDWI geotiff ")
@@ -944,6 +950,9 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(mndwi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -1037,7 +1046,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
   evi = np.clip(evi, -1.0, 1.0)
-  evi[nodatapix] = 999
+  evi[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating EVI geotiff")
@@ -1049,6 +1058,9 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(evi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -1119,7 +1131,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
   nbr = np.clip(nbr, -1.0, 1.0)
-  nbr[nodatapix] = 999
+  nbr[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NBR geotiff")
@@ -1131,6 +1143,9 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(nbr)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 

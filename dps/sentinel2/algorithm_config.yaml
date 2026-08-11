@@ -1,4 +1,4 @@
-algorithm_name: sentinel-2
+algorithm_name: disasters-sentinel2-process
 # git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
 # (e.g. v0.10.0) for reproducible production runs.
 algorithm_version: dev

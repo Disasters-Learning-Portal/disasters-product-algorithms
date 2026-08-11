@@ -105,15 +105,19 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     print(f"[INFO] DN dtype    : {dn.dtype}")
     ds = None  # Close file
 
-    
+    # Speckle-filter the raw DN, then calibrate ONCE: sigma0 = calib_value * DN^2.
+    # The factor applies to the squared DN. Applying it before the square (the
+    # previous `np.power(dn * calib_value, 2)`) squared the factor too, inflating
+    # sigma0 by calib_value -- a constant +37.7 dB for this product's factor of
+    # ~5850.44. Mirrors capella_v2.sigmaCalib, which filters raw DN and calibrates
+    # once as 20*log10(scale_factor * dn).
     dn_filtered = lee_filter(dn, size=filter_size)
     dn_sqr = np.power(dn_filtered, 2)
     dn_amp = dn_sqr * calib_value
 
     print(f"[INFO] Amplitude Max: ", np.max(dn_amp))
     print(f"[INFO] Amplitude Min: ", np.min(dn_amp))
-    
-    
+
     dn_db = 10.0*np.log10(dn_amp)
     print(f"[INFO] dB Max: ", np.max(dn_db))
     print(f"[INFO] dB Min: ", np.min(dn_db))

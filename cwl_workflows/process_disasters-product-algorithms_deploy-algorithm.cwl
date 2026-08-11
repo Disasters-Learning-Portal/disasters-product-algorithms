@@ -1,72 +1,68 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: disasters-umbra-process
-  doc: Process Umbra SAR scenes into Cloud Optimized GeoTIFF disaster-response products
-    (sigma/beta/gamma calibration, always-on Lee speckle filter with a selectable
-    3/5/7 window). Fetches the source GEC raster from the CSDA Umbra vendor S3 bucket
-    keyed by date. Every input is optional in the schema so the Submit form never
-    blocks; run.sh enforces the real requirements.
-  id: disasters-umbra-process
+  label: disasters-sentinel2-process
+  doc: Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
+    MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
+    products (true color, SWIR, NDVI, water extent, etc.). Every input is optional
+    in the schema so the Submit form never blocks; run.sh enforces the real requirements
+    (tile, non-placeholder activation_event, readable Copernicus secrets). Credentials
+    come from MAAP secrets, never the job inputs.
+  id: disasters-sentinel2-process
   inputs:
-    date:
-      doc: Target acquisition date 'YYYY-MM-DD HH:MM:SS'. REQUIRED for a real run
-        (run.sh rejects an empty date). Discover valid dates with the list-dates algorithm
-        (sensor=umbra).
-      label: Target date
+    tile:
+      doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for
+        several, no quotes: T17RLN T17RLM). Pre-filled with a known-good test tile;
+        change it for a real activation.'
+      label: MGRS tile(s)
       type: string?
-      default: ''
-    product:
-      doc: 'Calibration product to generate: sigma, beta, gamma, or rcs.'
-      label: Calibration product
-      type: string?
-      default: sigma
-    bucket:
-      doc: CSDA Umbra vendor S3 bucket (DPS worker needs read access).
-      label: Vendor S3 bucket
-      type: string?
-      default: csda-data-vendor-umbra
-    prefix:
-      doc: Key prefix within the vendor bucket to search for scenes.
-      label: S3 prefix
-      type: string?
-      default: disasters
-    apply_filter:
-      doc: Apply a Lee speckle filter to the product.
-      label: Apply Lee filter
-      type: boolean?
-      default: false
-    filter_size:
-      doc: Lee filter window size (only used when apply_filter is true).
-      label: Lee filter window size
-      type: int?
-      default: 5
-    dst_crs:
-      doc: 'Target CRS: native (default) | EPSG:3857 | EPSG:4326.'
-      label: Target CRS
-      type: string?
-      default: native
+      default: T17RLN T17RLM
     activation_event:
-      doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
-        is REJECTED at run time.
+      doc: Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so
+        a bare Submit runs; set a REAL event for a real activation (the placeholder
+        YYYYMM_Hazard_Location is rejected at run time).
       label: Activation event
       type: string?
-      default: YYYYMM_Hazard_Location
-    source_label:
-      doc: Data origin, e.g. USGS, NASA, NOAA, Umbra. REQUIRED for a real run.
-      label: Source
+      default: 202601_KyleWx_US
+    download_date:
+      doc: 'Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated).
+        Blank = the CLI''s recent-scenes default (~past 10 days). Pre-filled with
+        a known-good test date.'
+      label: Download date (optional)
       type: string?
-      default: ''
-    compression_level:
-      doc: ZSTD level 1-22 (22 = max, default).
-      label: COG compression level
-      type: int?
-      default: 22
-    nodata:
-      doc: Override the auto-detected no-data value; leave blank to auto-detect.
-      label: No-data value (optional)
+      default: '20251231'
+    level:
+      doc: 'Sentinel-2 processing level to download: 2 = L2A (surface reflectance),
+        1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected
+        production.'
+      label: Processing level
       type: string?
-      default: ''
+      default: '1'
+    products:
+      doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or
+        'all'.
+      label: Products
+      type: string?
+      default: true swir
+    we_nstd:
+      doc: Only used when 'we' is in products; ignored otherwise. One or more NIR
+        std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5
+        2. One water-extent COG is produced per value (filename carries NSTD_<value>).
+        Higher = higher NIR threshold = MORE pixels classified as water. Decimals
+        use a dot (1.5, not 1,5). Default 1.
+      label: Water-extent std devs
+      type: string?
+      default: '1'
+    merge:
+      doc: Mosaic scenes by date and product (-merge).
+      label: Merge by date/product
+      type: boolean?
+      default: true
+    mask:
+      doc: Generate and apply a cloud mask (-mask, L2A only).
+      label: Cloud mask
+      type: boolean?
+      default: false
   outputs:
     output:
       type: Directory
@@ -75,17 +71,14 @@ $graph:
     process:
       run: '#main'
       in:
-        date: date
-        product: product
-        bucket: bucket
-        prefix: prefix
-        apply_filter: apply_filter
-        filter_size: filter_size
-        dst_crs: dst_crs
+        tile: tile
         activation_event: activation_event
-        source_label: source_label
-        compression_level: compression_level
-        nodata: nodata
+        download_date: download_date
+        level: level
+        products: products
+        we_nstd: we_nstd
+        merge: merge
+        mask: mask
       out:
       - outputs_result
 - class: CommandLineTool
@@ -96,77 +89,59 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 32
-      coresMin: 4
+      ramMin: 64
+      coresMin: 8
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/umbra/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/sentinel2/run.sh
   inputs:
-    date:
+    tile:
       type: string?
       inputBinding:
         position: 1
-        prefix: --date
-      default: ''
-    product:
-      type: string?
-      inputBinding:
-        position: 2
-        prefix: --product
-      default: sigma
-    bucket:
-      type: string?
-      inputBinding:
-        position: 3
-        prefix: --bucket
-      default: csda-data-vendor-umbra
-    prefix:
-      type: string?
-      inputBinding:
-        position: 4
-        prefix: --prefix
-      default: disasters
-    apply_filter:
-      type: boolean?
-      inputBinding:
-        position: 5
-        prefix: --apply_filter
-      default: false
-    filter_size:
-      type: int?
-      inputBinding:
-        position: 6
-        prefix: --filter_size
-      default: 5
-    dst_crs:
-      type: string?
-      inputBinding:
-        position: 7
-        prefix: --dst_crs
-      default: native
+        prefix: --tile
+      default: T17RLN T17RLM
     activation_event:
       type: string?
       inputBinding:
-        position: 8
+        position: 2
         prefix: --activation_event
-      default: YYYYMM_Hazard_Location
-    source_label:
+      default: 202601_KyleWx_US
+    download_date:
       type: string?
       inputBinding:
-        position: 9
-        prefix: --source_label
-      default: ''
-    compression_level:
-      type: int?
-      inputBinding:
-        position: 10
-        prefix: --compression_level
-      default: 22
-    nodata:
+        position: 3
+        prefix: --download_date
+      default: '20251231'
+    level:
       type: string?
       inputBinding:
-        position: 11
-        prefix: --nodata
-      default: ''
+        position: 4
+        prefix: --level
+      default: '1'
+    products:
+      type: string?
+      inputBinding:
+        position: 5
+        prefix: --products
+      default: true swir
+    we_nstd:
+      type: string?
+      inputBinding:
+        position: 6
+        prefix: --we_nstd
+      default: '1'
+    merge:
+      type: boolean?
+      inputBinding:
+        position: 7
+        prefix: --merge
+      default: true
+    mask:
+      type: boolean?
+      inputBinding:
+        position: 8
+        prefix: --mask
+      default: false
   outputs:
     outputs_result:
       outputBinding:
@@ -180,14 +155,15 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 76d3c6899012c5805707e6bbef294b5676455354
+s:commitHash: 1931cc60971a079114ba1cf355ff58a62229ff94
 s:dateCreated: 2026-08-11
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration \u2014 all inputs optional; image built in-workflow\
-  \ from dps/Dockerfile."
-s:keywords: umbra, sar, cog, disasters, flood, calibration
+s:releaseNotes: "OGC registration test \u2014 download-from-Copernicus (creds via\
+  \ MAAP secrets, not job inputs); all inputs optional; image built in-workflow from\
+  \ dps/Dockerfile."
+s:keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent, copernicus
 $namespaces:
   s: https://schema.org/
 $schemas:

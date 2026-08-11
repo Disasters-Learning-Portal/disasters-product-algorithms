@@ -106,11 +106,63 @@ MAAP extensions were historically **JupyterLab-3-only**; confirm a JL4 wheel exi
 | Extension | Reason |
 |---|---|
 | `jupyterlab-tabular-data-editor` | Unmaintained; JL4 unconfirmed. The built-in `CSVViewer` already covers `available_<sensor>_dates.csv`. |
-| `jupyterlab-bxplorer` | **Removed 2026-08-11.** Imports Bootstrap 5's dist CSS *unscoped* into Lab's global stylesheet, so Bootstrap's Reboot overrides `body{font-size}` app-wide and Lab's fixed-height chrome overflows into scrollbar stepper arrows everywhere (2i2c-org/infrastructure#8770). Do not re-add until upstream scopes it — [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md), `.clinerules.md` rule 39. |
+| `jupyterlab-bxplorer` | **Removed 2026-08-11 (PR #94).** Imports Bootstrap 5's dist CSS *unscoped* into Lab's global stylesheet, so Bootstrap's Reboot competes with Lab's own `body{font-size}` app-wide. A real defect — but **not** the cause of the "chevrons everywhere" bug (that's the MAAP extensions; see the note below this table). Do not re-add until upstream scopes it — [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md), `.clinerules.md` rule 39. |
 | `jupyterlab-s3-browser` | Unmaintained (IBM; last release 0.12.0, May 2022) and JL2/3-era — still builds on `jupyter-packaging ~=0.7.9`, JL4 unconfirmed. Lab's own file browser plus `s3fs`/`boto3` in a notebook covers the vendor-bucket browsing these workflows need. |
 | `xarray-leaflet` | Stale (~2023); `leafmap` supersedes it. |
 | `jupyterlab-slurm` / `jupyterlab-system-monitor` | JL3-era / archived. DPS isn't SLURM; `jupyter-resource-usage` (in base) covers monitoring. |
 | MAAP `umf` / `ipycmc` / `che-*` / `maap-jupyter-ide` | Eclipse-Che-only, require a Node build, or archived (JL2/3). |
+
+### Known-broken: the MAAP DPS + Algorithms extensions force scrollbars app-wide
+
+`maap-dps-jupyter-extension` and `maap_algorithms_jupyter_extension` both ship a rule
+ending `overflow: scroll !important`. `scroll` (unlike `auto`) shows a scrollbar even when
+there is nothing to scroll, and `!important` beats Lab's own `overflow: hidden` — so every
+few-px-tall piece of Lab chrome paints a scrollbar with no room for a track or thumb, i.e.
+**nothing but the two stepper arrows**. That is the "chevron icons everywhere" bug,
+[2i2c-org/infrastructure#8770](https://github.com/2i2c-org/infrastructure/issues/8770).
+Chrome-only, because Firefox and macOS overlay scrollbars have no stepper arrows.
+
+The rule is **leftover placeholder CSS from the JupyterLab extension cookiecutter**,
+byte-identical in both extensions (same template header, same webpack chunk `728`), and
+unrelated to anything either extension does:
+
+```css
+/* See the JupyterLab Developer Guide for useful CSS Patterns: … */
+.lm-Widget {
+  overflow: scroll !important;
+}
+```
+
+**This is fixed in the image — operators need to do nothing.** These extensions come from
+the MAAP base image (PR #48 dropped the pip pins), so `image/environment.yml` can't remove
+them, and disabling them would cost the Register Algorithm / Submit Jobs / My Builds /
+View My Jobs Launcher tiles. Instead `image/Dockerfile` runs
+[`image/scripts/strip_lm_widget_overflow.py`](../image/scripts/strip_lm_widget_overflow.py),
+which deletes just that declaration and leaves the extensions fully functional. It is
+idempotent, and deliberately not `--require`, so a future base image that ships the fix
+upstream turns it into a no-op rather than a build failure.
+
+Manual escape hatches, if you are on an unpatched image:
+
+```bash
+# preferred - same patch, applied in place, then hard refresh
+python image/scripts/strip_lm_widget_overflow.py
+
+# blunt alternative: costs the MAAP Launcher tiles, reversible with `enable`
+jupyter labextension disable maap-dps-jupyter-extension maap_algorithms_jupyter_extension
+```
+
+Note the chunk filename embeds a content hash that does **not** change when we patch it, so
+a browser holding a cached copy needs a hard refresh (Ctrl/Cmd+Shift+R). Fresh pods are
+unaffected. No fixed upstream release exists — PyPI's latest are
+`maap-dps-jupyter-extension` 2.0.1 and `maap-algorithms-jupyter-extension` 1.0.1, the same
+versions named in the bug report, so this patch stays until MAAP ships a fix.
+Full detail: `.clinerules.md` rule 39.
+
+**Auditing a new extension:** run `python tools/audit_labextension_css.py` on the pod — it
+scans every installed labextension, base-image ones included, for globally-scoped CSS and
+exits non-zero on a hit. For browser-side state (zoom, computed `body` typography, which
+stylesheets carry global rules), paste `tools/lab_ui_diagnostic.js` into the Chrome console.
 
 ---
 

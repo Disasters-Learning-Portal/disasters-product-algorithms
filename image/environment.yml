@@ -62,10 +62,13 @@ dependencies:
     # so it is injected into document.head at Lab startup on every page load.
     # Bootstrap's Reboot then wins the cascade on bare `*` and `body` selectors
     # -- `body{font-size:1rem;line-height:1.5}` overrides Lab's 13px
-    # --jp-ui-font-size1 -- so every fixed-height piece of Lab chrome overflows
-    # and Chrome paints scrollbar stepper arrows all over the UI (2i2c-org/
-    # infrastructure#8770, "chevron icons everywhere"). Full rationale:
-    # .clinerules.md rule 39.
+    # --jp-ui-font-size1 -- restyling the whole application.
+    # NOTE: this is NOT the cause of the "chevron icons everywhere" bug
+    # (2i2c-org/infrastructure#8770). That one is the MAAP DPS/Algorithms
+    # extensions' `overflow: scroll !important`, and they are inherited from
+    # the MAAP base image, so they cannot be removed from this file -- see
+    # docs/HUB_EXTENSIONS.md. The bxplorer removal stands on its own merits.
+    # Full rationale: .clinerules.md rule 39.
     # maap-py + the MAAP DPS JupyterLab extensions are NO LONGER pinned here.
     # The MAAP base image (mas.maap-project.org/root/maap-workspaces/2i2c/pangeo)
     # already ships maap-py (`from maap.maap import MAAP` works out of the box)

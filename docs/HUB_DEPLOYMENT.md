@@ -314,6 +314,50 @@ Non-obvious rules when editing it:
 Ref: JupyterLab
 [Interface Customization](https://jupyterlab.readthedocs.io/en/latest/user/interface_customization.html).
 
+## Debugging: the whole Lab UI looks broken (arrows everywhere, clipped chrome)
+
+Distinct failure class from the missing-CLI one above — this is **CSS**, not packaging,
+and it is the reason `jupyterlab-bxplorer` was dropped from `image/environment.yml`
+on 2026-08-11.
+
+A JupyterLab extension's stylesheet is injected into `document.head` **unscoped**.
+If it carries a CSS framework's global reset (Bootstrap Reboot, Tailwind preflight,
+`normalize.css`), its bare `body{}` / `*{}` rules compete with JupyterLab's own at
+*equal specificity* — and last-injected wins. Overriding Lab's 13px
+`--jp-ui-font-size1` with a framework's 16px default overflows every fixed-height
+piece of Lab chrome; those containers are `overflow: auto`, so Chrome paints
+scrollbars with no room for a track or thumb and **only the stepper arrows render**
+— on the menu bar, every toolbar button, the breadcrumb, the tab bar. Reported as
+[2i2c-org/infrastructure#8770](https://github.com/2i2c-org/infrastructure/issues/8770).
+
+Three things make this hard to catch:
+
+- **Chrome-only.** Firefox and macOS overlay scrollbars have no stepper arrows.
+- **Intermittent.** Lab core CSS and federated-extension CSS are *both* injected as
+  runtime `<style>` tags, so which one wins depends on arrival order — which varies
+  with cache state. One clean page load is **not** proof; hard-reload several times.
+- **Invisible to CI.** `cli-smoke` and `check_sensor_consistency.py` never load a
+  browser.
+
+Triage, in order:
+
+```bash
+# 1. In DevTools on the affected tab — the whole diagnosis in one line:
+#      "16px" => a framework reset won (broken);  "13px" => Lab won (fine)
+getComputedStyle(document.body).fontSize
+
+# 2. In the built image — which extension ships the reset?
+docker run --rm <image> bash -lc \
+  'grep -rl -- "--bs-body-font-family" /srv/conda/envs/notebook/share/jupyter/labextensions/'
+```
+
+Run check 2 after **any** hub-image extension change; it must return nothing. Treat any
+new extension bundling Bootstrap / Tailwind / `normalize.css` as suspect, and prefer
+one that scopes its styles (`@scope`, a build-time class prefix, MUI's
+`ScopedCssBaseline`). Full rationale: `.clinerules.md` rule 39. The finished-but-
+**unposted** upstream reports, plus a script that re-checks a future release straight
+from the PyPI wheel, are in [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md).
+
 ## Design history (short)
 
 The hub-image build mechanism has gone through three iterations:

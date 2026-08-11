@@ -53,7 +53,19 @@ dependencies:
   - pip:
     - git+https://github.com/MAAP-Project/stac_ipyleaflet.git@0.3.6
     - jupyter-sshd-proxy
-    - jupyterlab-bxplorer
+    # jupyterlab-bxplorer (S3 data browser) was REMOVED 2026-08-11 and must not
+    # be re-added until upstream scopes its CSS. It imports Bootstrap 5's full
+    # dist stylesheet UNSCOPED into JupyterLab's global stylesheet
+    # (style/index.css `@import '../node_modules/bootstrap/dist/css/bootstrap.min.css'`
+    # plus the same import in src/components/DownloadComponent.tsx), and the
+    # bundle is pulled into the extension's initial load graph via remoteEntry,
+    # so it is injected into document.head at Lab startup on every page load.
+    # Bootstrap's Reboot then wins the cascade on bare `*` and `body` selectors
+    # -- `body{font-size:1rem;line-height:1.5}` overrides Lab's 13px
+    # --jp-ui-font-size1 -- so every fixed-height piece of Lab chrome overflows
+    # and Chrome paints scrollbar stepper arrows all over the UI (2i2c-org/
+    # infrastructure#8770, "chevron icons everywhere"). Full rationale:
+    # .clinerules.md rule 39.
     # maap-py + the MAAP DPS JupyterLab extensions are NO LONGER pinned here.
     # The MAAP base image (mas.maap-project.org/root/maap-workspaces/2i2c/pangeo)
     # already ships maap-py (`from maap.maap import MAAP` works out of the box)

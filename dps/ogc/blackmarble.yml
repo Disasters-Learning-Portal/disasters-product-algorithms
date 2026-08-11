@@ -22,7 +22,8 @@
 #
 # Black Marble is DOWNLOAD-then-process (like Sentinel-2): run.sh downloads VIIRS
 # VNP46A2 (Earthdata), Landsat (STAC), and OSM roads for the bbox + date, then runs
-# the vendored pipeline as `python -m blackmarble.cli`. The Earthdata token is NOT
+# the upstream `blackmarble` CLI (NASA-IMPACT/veda-black-marble, pip-installed into
+# the DPS env by dps/environment.yml -- not vendored here). The Earthdata token is NOT
 # an input — run.sh pulls it from MAAP's encrypted secret store at run time
 # (maap.secrets.get_secret, default name EARTHDATA_TOKEN), so it never appears in the
 # job parameters or log. Store it once from a MAAP notebook:

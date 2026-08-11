@@ -20,6 +20,14 @@ from shared_utils.geotools import *
 from shared_utils.s3utils import *
 
 
+# Single source of truth for Capella's nodata sentinel: sigmaCalib writes it
+# into the border pixels and process_capella declares it on the COG. They must
+# agree or the border is unmaskable. -9999.0 (not 0) because the product is
+# float32 dB backscatter, where 0 dB is a legitimate value -- see CLAUDE.md
+# "Capella & Umbra SAR CLIs default -nodata to -9999.0".
+CAPELLA_NODATA = -9999.0
+
+
 def retrieve_capella_resources(
     date: Union[str, datetime],
     bucket: str = "csdap-capellaspace-delivery",
@@ -127,27 +135,45 @@ def report_capella_scenes(
 
 
 def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
+    """NaN-aware Lee speckle filter (window ``size`` x ``size``).
 
-    img_mean = uniform_filter(img, (size, size))
+    Mirrors ``satellogic_v2.apply_lee_filter``: invalid (non-finite) pixels are
+    ignored rather than counted as zero, so a nodata border doesn't bleed into
+    the filtered interior. Applied to the linear backscatter before the dB
+    conversion in the calibration functions below.
+    """
+    valid = np.isfinite(img)
+    if not valid.any():
+        return img
 
-    img_sqr_mean = uniform_filter(img**2, (size, size))
+    v = valid.astype(np.float64)
+    filled = np.where(valid, img, 0.0).astype(np.float64)
 
-    img_variance = img_sqr_mean - img_mean**2
+    # uniform_filter returns the window MEAN; dividing the filled mean by the
+    # valid-fraction recovers the mean over valid pixels only (window size
+    # cancels), so invalid neighbours are ignored rather than counted as zero.
+    frac = uniform_filter(v, size, mode="constant")
+    safe = frac > 0
 
-    overall_variance = variance(img)
+    local_mean = np.zeros_like(filled)
+    local_mean[safe] = uniform_filter(filled, size, mode="constant")[safe] / frac[safe]
 
-    img_weights = img_variance / (img_variance + overall_variance)
+    local_sqr = np.zeros_like(filled)
+    local_sqr[safe] = uniform_filter(filled ** 2, size, mode="constant")[safe] / frac[safe]
 
-    img_output = img_mean + img_weights * (img - img_mean)
+    local_var = np.clip(local_sqr - local_mean ** 2, 0.0, None)
+    overall_var = img[valid].var()
 
-    return img_output
+    weights = local_var / (local_var + overall_var + 1e-12)
+    out = local_mean + weights * (filled - local_mean)
+
+    return np.where(valid, out, np.nan)
 
 
 def sigmaCalib(
     s3_image_paths: list[str],
     save_location: str = "/tmp/s3_temp",
-    do_filt : bool = True,
-    filter_size : int = 5
+    filter_size: int = 5,
 ) -> tuple[str, str]:
 
     if save_location.endswith("/"):
@@ -188,7 +214,7 @@ def sigmaCalib(
 
     dn = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
 
-    print("DN range: " f"{np.min(dn)} -> {np.max(dn)}")
+    print(f"DN range: {np.min(dn)} -> {np.max(dn)}")
 
     image_desc_str = ds.GetMetadataItem("TIFFTAG_IMAGEDESCRIPTION")
 
@@ -202,7 +228,7 @@ def sigmaCalib(
 
             scale_factor = metadata_dict["collect"]["image"]["scale_factor"]
 
-            print("Scale factor: " f"{scale_factor}")
+            print(f"Scale factor: {scale_factor}")
 
         except KeyError as e:
 
@@ -211,23 +237,46 @@ def sigmaCalib(
     if scale_factor is None:
         raise RuntimeError("scale_factor could not be parsed")
 
-    filt = ""
-    if do_filt:
-        dn = lee_filter(dn, size = filter_size)
-        filt = f"_filtered{filter_size}"
+    # ----------------------------------------------------
+    # Convert to linear sigma first
+    # ----------------------------------------------------
+    sigma_linear = scale_factor * dn
 
-    sigma_0 = 20.0 * np.log10(scale_factor * dn)
+    # Speckle filtering is ALWAYS applied -- there is no opt-out, only a kernel
+    # size. Same treatment as Umbra (.clinerules.md rule 31): it runs on the
+    # LINEAR backscatter, before the dB conversion, so the filter averages
+    # physical power rather than logarithms.
+    sigma_linear = lee_filter(sigma_linear, size=filter_size)
+    filt = f"_filtered{filter_size}"
 
-    sigma_0 = np.clip(sigma_0, -60.0, np.nanmax(sigma_0))
+    # Prevent log10(0)
+    sigma_linear = np.clip(sigma_linear, 1e-10, None)
 
-    print("Sigma0 range: " f"{np.nanmin(sigma_0)} -> {np.nanmax(sigma_0)}")
+    # Convert to dB
+    sigma_0 = 20.0 * np.log10(sigma_linear)
+
+    # The vendor GEO border is 0, which the 1e-10 clip above turns into -200 dB.
+    # Write the declared nodata sentinel there so the border is actually
+    # maskable downstream. Two earlier approaches both produced a
+    # plausible-looking but NON-maskable value: clipping to a -60 dB floor, and
+    # substituting the smallest valid sample. Neither matched the nodata the COG
+    # declares, so consumers rendered the border as real backscatter and it
+    # dragged the display stretch down.
+    sigma_0[~np.isfinite(sigma_0) | (sigma_linear <= 1e-10)] = CAPELLA_NODATA
+
+    finite = sigma_0[sigma_0 != CAPELLA_NODATA]
+    if finite.size:
+        print(f"Sigma0 range: {np.nanmin(finite)} -> {np.nanmax(finite)} dB "
+              f"(nodata {CAPELLA_NODATA})")
+    else:
+        print(f"Sigma0: no valid pixels (all {CAPELLA_NODATA})")
 
     base = os.path.basename(in_file)
 
     parts = base.replace(".tif", "").split("_")
 
-    satellite = parts[1]          # C18
-    start_time = parts[5]         # 20260418193305
+    satellite = parts[1]
+    start_time = parts[5]
 
     dt = datetime.strptime(start_time, "%Y%m%d%H%M%S")
 
@@ -245,6 +294,4 @@ def sigmaCalib(
 
     print(f"Generation completed, file saved to {outfile}")
 
-    # Return the sigma0 product plus the raw downloaded source raster so the
-    # caller can delete the (large) original once a valid COG exists.
     return outfile, in_file

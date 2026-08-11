@@ -8,6 +8,7 @@ import argparse
 import os
 
 from capella.capella_v2 import (
+    CAPELLA_NODATA,
     retrieve_capella_resources,
     group_capella_scenes,
     sigmaCalib
@@ -17,23 +18,23 @@ from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
 
 
+# Fixed processing parameters. Capella has exactly one calibration product and
+# one vendor bucket, and every activation wants the same COG encoding, so these
+# are constants rather than CLI flags -- the same treatment Satellogic got in
+# PR #45 and Umbra's filter in PR #44. Changing one is a code change with a
+# review, not a per-run argument. See .clinerules.md rule 37.
+CAPELLA_BUCKET = "csdap-capellaspace-delivery"
+CAPELLA_PREFIX = "disasters"
+SOURCE = "CSDA"
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 22
+DST_CRS = None  # native projection; no warp
+
+
 def main():
 
     parser = argparse.ArgumentParser(
         description="Process Capella imagery"
-    )
-
-    parser.add_argument(
-        "--product",
-        choices=["sigma"],
-        required=True,
-        help="Calibration product to generate"
-    )
-
-    parser.add_argument(
-        "--apply_filter",
-        action="store_true",
-        help="Apply Lee filtering"
     )
 
     parser.add_argument(
@@ -50,58 +51,12 @@ def main():
     )
 
     parser.add_argument(
-        "--prefix",
-        default="disasters",
-        help="S3 prefix"
-    )
-
-    parser.add_argument(
-        "--bucket",
-        default="csdap-capellaspace-delivery",
-        help="S3 bucket"
-    )
-
-    parser.add_argument(
         "--output",
         default="/tmp/s3_temp",
         help="Output directory"
     )
 
     # COG options
-    parser.add_argument(
-        "-nodata",
-        type=float,
-        default=-9999.0,
-        help="No-data value for COG outputs (default -9999.0). SAR backscatter is "
-             "float32 dB where 0 dB is a legitimate value, so nodata must never be 0."
-    )
-
-    parser.add_argument(
-        "-compression",
-        type=str,
-        default="ZSTD",
-        help="Compression type for COG"
-    )
-
-    parser.add_argument(
-        "-compression_level",
-        type=int,
-        default=22,
-        help="Compression level for COG"
-    )
-
-    parser.add_argument(
-        "-dst_crs",
-        type=str,
-        default="native",
-        help=(
-            "Target CRS for COG output. 'native' (default) preserves the "
-            "source UTM projection; pass 'EPSG:3857' (Web Mercator) for "
-            "optimal VEDA titiler-pgstac tiling (also required by "
-            "veda-data-airflow build_stac)."
-        ),
-    )
-
     parser.add_argument(
         "--metadata-json",
         type=str,
@@ -116,15 +71,18 @@ def main():
 
     args = parser.parse_args()
 
-    dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)
+    # Fill in the vendor as the default provenance, but never clobber a
+    # SOURCE the operator supplied via --metadata-json (DPS passes
+    # source_label through, and it is a required job input).
+    metadata.setdefault("SOURCE", SOURCE)
 
     print("Retrieving Capella resources...")
 
     tifs = retrieve_capella_resources(
         date=args.date,
-        bucket=args.bucket,
-        prefix=args.prefix
+        bucket=CAPELLA_BUCKET,
+        prefix=CAPELLA_PREFIX
     )
 
     # One group per GEO band = one genuine scene. Folders may hold several
@@ -136,7 +94,7 @@ def main():
     if not scenes:
         raise FileNotFoundError(
             f"No Capella GEO band found for --date {args.date} "
-            f"in s3://{args.bucket}/{args.prefix}"
+            f"in s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX}"
         )
 
     print(f"Found {len(scenes)} Capella scene(s) for --date {args.date}")
@@ -155,17 +113,12 @@ def main():
             else os.path.join(args.output, f"scene_{i}")
         )
 
-        outfile = None
-        source_tif = None
-
-        if args.product == "sigma":
-
-            outfile, source_tif = sigmaCalib(
-                scene_tifs,
-                save_location=scene_out,
-                do_filt=args.apply_filter,
-                filter_size=args.filter_size
-            )
+        # Speckle filtering is always on; --filter_size only tunes the kernel.
+        outfile, source_tif = sigmaCalib(
+            scene_tifs,
+            save_location=scene_out,
+            filter_size=args.filter_size
+        )
 
         if not outfile:
             continue
@@ -174,10 +127,10 @@ def main():
 
         cog_path = convert_to_cog(
             outfile,
-            nodata=args.nodata,
-            dst_crs=dst_crs_value,
-            compression=args.compression,
-            compression_level=args.compression_level,
+            nodata=CAPELLA_NODATA,
+            dst_crs=DST_CRS,
+            compression=COMPRESSION,
+            compression_level=COMPRESSION_LEVEL,
             metadata=metadata,
         )
 

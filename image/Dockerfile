@@ -12,7 +12,7 @@ ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
 
-# === Strip the MAAP extensions' `.lm-Widget { overflow: scroll !important }` ===
+# === Relax the MAAP extensions' `.lm-Widget { overflow: scroll !important }` ===
 # maap-dps-jupyter-extension and maap_algorithms_jupyter_extension both ship
 # leftover placeholder CSS from the JupyterLab extension cookiecutter that sets
 # `overflow: scroll !important` on `.lm-Widget` -- Lumino's base class, present
@@ -21,17 +21,25 @@ RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.y
 # few-px-tall chrome renders as bare scrollbar stepper arrows: the "chevron
 # icons everywhere" bug (2i2c-org/infrastructure#8770).
 #
+# The script rewrites `scroll` -> `auto`; it does NOT delete the declaration.
+# An earlier version deleted it and broke the MAAP panels: Lumino's base is
+# `overflow: hidden`, and the Submit Jobs form is taller than its panel, so it
+# became impossible to scroll to the Submit button. The extensions were relying
+# on this rule for their own scrolling -- they just scoped it to every widget in
+# the app instead of their own. `auto` keeps a scrollbar exactly where content
+# genuinely overflows, so their forms scroll and Lab's chrome stays quiet.
+#
 # These come from the MAAP base image, so environment.yml can't remove them, and
 # disabling the extensions would cost the Register Algorithm / Submit Jobs GUI
-# tiles. Deleting the dead declaration keeps both. Runs AFTER Layer 1 in case a
-# conda env update reinstates the files. Deliberately NOT --require: if a future
-# base image ships the fix upstream, this becomes a no-op instead of a build
-# failure. Idempotent. See .clinerules.md rule 39.
-COPY --chown=${NB_USER}:${NB_USER} image/scripts/strip_lm_widget_overflow.py \
-     /tmp/strip_lm_widget_overflow.py
-RUN /srv/conda/envs/notebook/bin/python /tmp/strip_lm_widget_overflow.py \
+# tiles. Runs AFTER Layer 1 in case a conda env update reinstates the files.
+# Deliberately NOT --require: if a future base image ships the fix upstream,
+# this becomes a no-op instead of a build failure. Idempotent.
+# See .clinerules.md rule 39.
+COPY --chown=${NB_USER}:${NB_USER} image/scripts/fix_lm_widget_overflow.py \
+     /tmp/fix_lm_widget_overflow.py
+RUN /srv/conda/envs/notebook/bin/python /tmp/fix_lm_widget_overflow.py \
       --root /srv/conda/envs/notebook/share/jupyter/labextensions \
-    && rm /tmp/strip_lm_widget_overflow.py
+    && rm /tmp/fix_lm_widget_overflow.py
 
 # === JupyterLab Help-menu customization ===
 # Bake the "Disasters Resources" submenu into Help (Report a Bug -> GitHub

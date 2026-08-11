@@ -454,9 +454,9 @@ prod OGC processes API. `run-name` shows which algorithm/version is registering.
 but mark inputs **`type: X?`** (OGC-optional → `minOccurs:0`), carry **no
 container field** (the Action supplies the built image), and use an **absolute
 in-image `run_command`** (`/app/disasters-product-algorithms/dps/<sensor>/run.sh`).
-Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registered
-`capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
-list_dates, landsat, sentinel2**.
+Registered names are `<sensor>-ogc-test` (except the three below), so they coexist
+with the GUI-registered `capella`/`landsat-8-9`/etc. The dropdown covers **capella,
+umbra, satellogic, list_dates, landsat, sentinel2**.
 
 **Exceptions — three algorithms use `disasters-<name>-process`, not `<name>-ogc-test`**
 (2026-08-11). For each, `dps/ogc/<name>.yml` and `dps/<name>/algorithm_config.yaml`
@@ -475,7 +475,8 @@ predecessors (GUI-registered `black-marble` / `umbra`, and OGC-registered
 `black-marble-ogc-test` / `umbra-ogc-test`) are **still live** unless someone
 deletes them in MAAP. They point at the same `run.sh`, so a job submitted against
 either still runs — delete them so operators can't pick a stale entry out of the
-Process dropdown.
+Process dropdown. How: [Deleting (undeploying) an
+algorithm](#deleting-undeploying-an-algorithm) / `dps/delete_algorithm.ipynb`.
 
 **`landsat` is the one file-input OGC config** — its granule `file_path_of_raw_data`
 is a **required** `File` (no `?`, `minOccurs:1`); nothing can run without a granule,

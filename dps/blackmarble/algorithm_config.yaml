@@ -31,7 +31,7 @@ citation: NASA Disasters Program
 keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
 # Inputs: flat list, each {name, label, doc, type, default}. Booleans arrive as a
 # true/false control; primitives as --name <value>. run.sh maps these onto
-# `python -m blackmarble.cli`. The Earthdata token is NOT an input -- run.sh pulls
+# the upstream `blackmarble` CLI. The Earthdata token is NOT an input -- run.sh pulls
 # it from MAAP secrets by the name in earthdata_secret_name at run time (store it
 # once with maap.secrets.add_secret; see docs/DPS.md).
 inputs:

@@ -49,18 +49,23 @@ carry a `--list_dates` flag. It has **no `_finalize.sh` step** (no COG; only an
 `available_<sensor>_dates.csv` artifact). See `docs/DPS.md` "Scene-date discovery".
 
 A second deviates in a different way: **`blackmarble/`** (registered as `black-marble`)
-is the **VEDA Black Marble** nighttime-lights pipeline — a **vendored, self-contained
-package** at `src/blackmarble/` (source: `github.com/HarshiniGirish/veda-black-marble`),
-not a `process_*` sensor. Its `run.sh` still follows the run.sh contract and the shared
-`_finalize.sh` output flow, but it (a) is **bbox + date** driven (downloads VIIRS
-VNP46A2 from Earthdata, Landsat from a STAC catalog, and OSM roads — no vendor-bucket
-file input), (b) is invoked as **`python -m blackmarble.cli`** (it has **no
-`[project.scripts]` console script** on purpose), (c) writes its **own** COG (not via
-`shared_utils.convert_to_cog`), and (d) carries a **heavy dependency stack isolated to
-`dps/environment.yml`** — deliberately kept out of the hub image, CI, and base install.
-Its NASA Earthdata token comes from a **MAAP secret** at run time (default name
-`EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input. See `docs/DPS.md`
-"Black Marble (VEDA nighttime lights)".
+wraps the **VEDA Black Marble** nighttime-lights pipeline, which is **not code in this
+repo**. It is maintained upstream by NASA-IMPACT at
+`github.com/NASA-IMPACT/veda-black-marble` and is **pip-installed into the DPS worker
+env** by a `git+https://…` entry in `dps/environment.yml` (pinned to a commit SHA until
+upstream tags a release). Everything under `dps/blackmarble/` is a thin wrapper that
+follows the normal run.sh contract and the shared `_finalize.sh` output flow, but it
+(a) is **bbox + date** driven (downloads VIIRS VNP46A2 from Earthdata, Landsat from a
+STAC catalog, and OSM roads — no vendor-bucket file input), (b) calls upstream's own
+**`blackmarble` console script** unmodified, and (c) writes its **own** COG (not via
+`shared_utils.convert_to_cog`). Its NASA Earthdata token comes from a **MAAP secret** at
+run time (default name `EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input.
+
+> **Don't re-vendor it.** An earlier iteration copied the package into `src/blackmarble/`
+> (~19 MB, from a personal fork). That was removed: Black Marble has its own repo and
+> release path, and a local copy would silently drift from upstream.
+
+See `docs/DPS.md` "Black Marble (VEDA nighttime lights)".
 
 ## The run.sh contract
 

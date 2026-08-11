@@ -31,23 +31,36 @@ dependencies:
   # match whatever `gdal`/`libgdal-core` conda resolves (plugin ABI is pinned to
   # the core GDAL build, so do NOT hard-pin a version here).
   - libgdal-jp2openjpeg
-  - rasterio
+  # VERSION FLOORS: the >= floors below are NOT our requirements -- they mirror the
+  # floors declared by the upstream `blackmarble` package (pip-installed at the bottom
+  # of this file). pip only reinstalls a dependency it considers UNSATISFIED, so pinning
+  # the floors here guarantees conda's builds already satisfy blackmarble and pip never
+  # swaps a conda geo package for a PyPI wheel -- which would break the GDAL/rasterio
+  # dylib match (CLAUDE.md "Critical Constraints": the geo stack MUST come from conda).
+  # If `conda list -n disasters_dps` ever shows one of these on the `pypi` channel,
+  # raise its floor here. Keep in sync with veda-black-marble's pyproject.toml.
+  - rasterio>=1.4.3
   - rio-cogeo
-  - geopandas
+  - geopandas>=1.1.1
+  # shapely is pulled in transitively by geopandas, but blackmarble declares its own
+  # floor -- pin it explicitly so pip can't decide the transitive build is too old.
+  - shapely>=2.1.0
   - pyproj
   # --- Numerical / image processing ---
-  - numpy
-  - scipy
+  - numpy>=2
+  - scipy>=1.15.3
   - pillow
   - lxml
-  # matplotlib-base (headless, no Qt) for the save_png quicklook step in run.sh
-  - matplotlib-base
+  # matplotlib-base (headless, no Qt) for the save_png quicklook step in run.sh, and for
+  # blackmarble's plotting (matplotlib-base carries `matplotlib` dist metadata, so it
+  # satisfies blackmarble's matplotlib>=3.10.3 without dragging in Qt).
+  - matplotlib-base>=3.10.3
   # --- HTTP / AWS ---
   - requests
-  - boto3
+  - boto3>=1.38
   - botocore
   # --- Progress / utilities ---
-  - tqdm
+  - tqdm>=4.67.1
   - psutil
   - fsspec
   - s3fs
@@ -58,15 +71,11 @@ dependencies:
   # ("sh: 7z: not found") -> "NO SCENES MATCHED". Same pin as the hub image
   # (image/environment.yml).
   - p7zip==16.02
-  # --- VEDA Black Marble (dps/blackmarble/run.sh runs `python -m blackmarble.cli`) ---
-  # blackmarble is a VENDORED package (src/blackmarble/) with a heavy, divergent
-  # dependency stack that is DELIBERATELY isolated to this DPS worker env -- it is
-  # NOT in [project.dependencies], dev-conda-deps.txt, or image/environment.yml, so
-  # the hub image / CI / base install never carry it. The geo stack blackmarble needs
-  # (gdal, rasterio, geopandas, pyproj, numpy, scipy, matplotlib-base) is already
-  # above; only these extras are new. duckdb is conda (only used by the layercake OSM
-  # backend); the rest are pip (mirrors the upstream fork's environment.yml split).
-  - duckdb
+  # --- VEDA Black Marble (dps/blackmarble/run.sh runs the `blackmarble` CLI) ---
+  # duckdb backs blackmarble's `--osm-source layercake` road download. From conda (not
+  # pip) so it links against the same runtime as the rest of the stack; the floor
+  # mirrors blackmarble's own declared minimum.
+  - duckdb>=1.0.0
   # --- pip (build-env.sh uses it to install the repo) ---
   - pip
   - pip:
@@ -81,12 +90,17 @@ dependencies:
     # `from maap.maap import MAAP` + `MAAP().secrets.get_secret()` are unchanged in
     # 5.1.0 (verified against the 5.1.0 source), so _get_secret.py needs no change.
     - maap-py==5.1.0
-    # VEDA Black Marble pip-only deps (pip, not conda, mirrors the upstream fork's
-    # environment.yml). These are the ONLY blackmarble deps not already satisfied by
-    # the conda geo stack above; kept here (DPS worker env) so they never reach the
-    # hub image / CI / base install. pinned to the fork's floors.
-    - earthaccess>=0.16.0
-    - osmnx>=2.0.2
-    - pystac-client>=0.9.0
-    - typer>=0.15.3
-    - obstore>=0.8.2
+    # VEDA Black Marble -- the UPSTREAM package, installed straight from its own repo.
+    # It is deliberately NOT vendored into this repo and NOT in [project.dependencies] /
+    # dev-conda-deps.txt / image/environment.yml: Black Marble is maintained by
+    # NASA-IMPACT, and keeping a local copy would put Disasters on the hook for it.
+    # Installing it here scopes it (and its pip-only deps -- earthaccess, osmnx,
+    # pystac-client, typer, obstore, which pip resolves automatically) to the DPS worker,
+    # so the hub image / CI / base install never carry them.
+    #
+    # Pinned to a COMMIT SHA because upstream has no tagged release yet. Once NASA-IMPACT
+    # cuts one, switch to `@vX.Y.Z` (or a plain `blackmarble==X.Y.Z` if it reaches
+    # PyPI/conda) -- a one-line change.
+    # A VCS URL is required, NOT a bare `blackmarble` name: that name on PyPI belongs to
+    # an unrelated World Bank package.
+    - git+https://github.com/NASA-IMPACT/veda-black-marble@20e7d782a6c826d19db73e35d501a17a25609e56

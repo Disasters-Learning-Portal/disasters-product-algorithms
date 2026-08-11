@@ -5,11 +5,15 @@ set -euo pipefail
 # Black Marble is a DOWNLOAD-then-process pipeline (like Sentinel-2, unlike the
 # file-input sensors): given a WGS84 bbox + date it downloads VIIRS VNP46A2
 # nighttime lights (Earthdata), Landsat scenes (STAC), and OSM roads, then fuses
-# them into an urban-focused Cloud Optimized GeoTIFF. It is a VENDORED, self-
-# contained package (src/blackmarble/) invoked as `python -m blackmarble.cli`;
-# it does NOT go through process_* / shared_utils.convert_to_cog -- it writes its
-# own COG. Its heavy deps live ONLY in dps/environment.yml (isolated to this DPS
-# worker; never the hub image / CI / base install).
+# them into an urban-focused Cloud Optimized GeoTIFF.
+#
+# The pipeline is NOT part of this repo. It is the upstream, NASA-IMPACT-maintained
+# package `blackmarble` (github.com/NASA-IMPACT/veda-black-marble), pip-installed into
+# the DPS worker env by dps/environment.yml and called here through its own
+# `blackmarble` console script, UNMODIFIED. This job is a thin wrapper: validate the
+# inputs -> fetch the Earthdata token -> run the upstream CLI -> publish the output to
+# S3. It does NOT go through process_* / shared_utils.convert_to_cog -- blackmarble
+# writes its own COG.
 #
 # Earthdata auth: the token is NEVER a job input (it would appear in the DPS job
 # log). run.sh pulls it from MAAP's encrypted secret store at run time
@@ -123,9 +127,9 @@ echo "  wgs84=${WGS84}"
 echo "  output=${OUTFILE}"
 echo "  earthdata_secret_name=${EARTHDATA_SECRET_NAME}"
 
-# Invoked as a module (no console script -- keeps blackmarble's heavy deps off every
-# non-DPS surface). `python -m blackmarble.cli` runs the same typer app the upstream
-# `blackmarble` command does.
+# Upstream's own console script (`blackmarble = blackmarble.cli:app`), called as-is with
+# the flags exactly as its README documents them -- a single command, no subcommand.
+# Keep this in step with upstream's CLI when bumping the pin in dps/environment.yml.
 bm_args=(
   --bbox "${BBOX}"
   --date "${DATE}"
@@ -137,7 +141,7 @@ bm_args=(
 )
 [[ "${WGS84}" == "true" ]] && bm_args+=( --wgs84 )
 
-conda run --live-stream --name disasters_dps python -m blackmarble.cli "${bm_args[@]}"
+conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
 
 # Fail fast if the pipeline produced no COG (rather than silently "succeeding").
 shopt -s nullglob

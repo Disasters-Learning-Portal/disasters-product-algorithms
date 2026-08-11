@@ -316,47 +316,66 @@ Ref: JupyterLab
 
 ## Debugging: the whole Lab UI looks broken (arrows everywhere, clipped chrome)
 
-Distinct failure class from the missing-CLI one above — this is **CSS**, not packaging,
-and it is the reason `jupyterlab-bxplorer` was dropped from `image/environment.yml`
-on 2026-08-11.
+Distinct failure class from the missing-CLI one above — this is **CSS**, not packaging.
+Symptom: small chevron/arrow pairs over the entire UI (menu bar, *every* toolbar button,
+breadcrumb, `Name | Modified` header, tab bar), menu bar clipped, while Launcher tiles
+render at normal size. **Those arrows are scrollbar stepper buttons, not icons.**
+Reported as [2i2c-org/infrastructure#8770](https://github.com/2i2c-org/infrastructure/issues/8770).
 
-A JupyterLab extension's stylesheet is injected into `document.head` **unscoped**.
-If it carries a CSS framework's global reset (Bootstrap Reboot, Tailwind preflight,
-`normalize.css`), its bare `body{}` / `*{}` rules compete with JupyterLab's own at
-*equal specificity* — and last-injected wins. Overriding Lab's 13px
-`--jp-ui-font-size1` with a framework's 16px default overflows every fixed-height
-piece of Lab chrome; those containers are `overflow: auto`, so Chrome paints
-scrollbars with no room for a track or thumb and **only the stepper arrows render**
-— on the menu bar, every toolbar button, the breadcrumb, the tab bar. Reported as
-[2i2c-org/infrastructure#8770](https://github.com/2i2c-org/infrastructure/issues/8770).
-
-Three things make this hard to catch:
-
-- **Chrome-only.** Firefox and macOS overlay scrollbars have no stepper arrows.
-- **Intermittent.** Lab core CSS and federated-extension CSS are *both* injected as
-  runtime `<style>` tags, so which one wins depends on arrival order — which varies
-  with cache state. One clean page load is **not** proof; hard-reload several times.
-- **Invisible to CI.** `cli-smoke` and `check_sensor_consistency.py` never load a
-  browser.
-
-Triage, in order:
+**Step 0 — are you even running the image you think you are?** A fix merged to `dev`
+rebuilds only `…-dev:latest`; the hub's `klesinger/disasters-jupyterhub-docker-image:latest`
+is built from **`main`**. Concluding "the fix didn't work" while the pod runs the old
+prod image has already cost one debugging cycle (rule 40). Check on the pod:
 
 ```bash
-# 1. In DevTools on the affected tab — the whole diagnosis in one line:
-#      "16px" => a framework reset won (broken);  "13px" => Lab won (fine)
-getComputedStyle(document.body).fontSize
-
-# 2. In the built image — which extension ships the reset?
-docker run --rm <image> bash -lc \
-  'grep -rl -- "--bs-body-font-family" /srv/conda/envs/notebook/share/jupyter/labextensions/'
+jupyter labextension list            # is the thing you removed still there?
+pip show <package-you-removed>
 ```
 
-Run check 2 after **any** hub-image extension change; it must return nothing. Treat any
-new extension bundling Bootstrap / Tailwind / `normalize.css` as suspect, and prefer
-one that scopes its styles (`@scope`, a build-time class prefix, MUI's
-`ScopedCssBaseline`). Full rationale: `.clinerules.md` rule 39. The finished-but-
-**unposted** upstream reports, plus a script that re-checks a future release straight
-from the PyPI wheel, are in [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md).
+**Known cause — patched in the image since 2026-08-11.** `maap-dps-jupyter-extension` and
+`maap_algorithms_jupyter_extension` both ship `.lm-Widget { overflow: scroll !important; }`
+— leftover placeholder CSS from the JupyterLab extension cookiecutter. `.lm-Widget` is
+Lumino's base class, on *every* widget; `scroll` (unlike `auto`) paints a scrollbar even
+with nothing to scroll, and `!important` beats Lab's own per-widget `overflow`. Lab's
+few-px-tall chrome then has no room for a track or thumb, so only the two stepper buttons
+render. Nothing is rescaled, which is why the Launcher looks fine.
+
+`image/Dockerfile` now runs
+[`image/scripts/strip_lm_widget_overflow.py`](../image/scripts/strip_lm_widget_overflow.py)
+to delete that one declaration, keeping the MAAP Launcher tiles working. On an unpatched
+image, run the same script in place and hard-refresh, or fall back to
+`jupyter labextension disable maap-dps-jupyter-extension maap_algorithms_jupyter_extension`
+(costs the tiles; reversible with `enable`). See [HUB_EXTENSIONS.md](HUB_EXTENSIONS.md) and
+`.clinerules.md` rule 39.
+
+**The general class.** A federated extension's stylesheet is injected into `document.head`
+**unscoped**, so any bare `*` / `html` / `body` rule — or a framework reset like Bootstrap
+Reboot, Tailwind preflight, `normalize.css` — restyles the whole application.
+`jupyterlab-bxplorer` was removed in PR #94 for exactly this (unscoped Bootstrap 5); that
+was a real defect, though **not** the cause of #8770.
+
+Why it is hard to catch: **Chrome-only** (Firefox and macOS overlay scrollbars have no
+stepper arrows); **intermittent per user**, so one clean load is not proof — hard-reload
+several times; and **invisible to CI**, since `cli-smoke` and `check_sensor_consistency.py`
+never load a browser.
+
+Triage tooling (both in `tools/`):
+
+```bash
+# On the pod — scans EVERY installed labextension, base-image ones included,
+# for globally-scoped CSS. Exits non-zero on a hit, so it works as a check.
+python tools/audit_labextension_css.py
+python tools/audit_labextension_css.py --json > /tmp/css_audit.json
+
+# In the Chrome console — paste tools/lab_ui_diagnostic.js. Downloads a JSON
+# capture: browser zoom, computed <body> typography vs --jp-*, every stylesheet
+# carrying a global rule, and per-element overflow state for each bit of chrome.
+```
+
+Run the audit after **any** hub-image extension change. Prefer extensions that scope their
+styles (`@scope`, a build-time class prefix, MUI's `ScopedCssBaseline`). The unposted
+upstream reports, plus a script that re-checks a future bxplorer release straight from the
+PyPI wheel, are in [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md).
 
 ## Design history (short)
 

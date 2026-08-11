@@ -1,5 +1,22 @@
 # `jupyterlab-bxplorer` Bootstrap CSS leak — diagnosis + unposted report drafts
 
+> ## ⚠ CORRECTION (2026-08-11) — read before using either draft
+>
+> **This is NOT the cause of 2i2c-org/infrastructure#8770** ("chevron icons everywhere").
+> That bug is `maap-dps-jupyter-extension` + `maap_algorithms_jupyter_extension`, which ship
+> `overflow: scroll !important` — `scroll` rather than `auto` forces a scrollbar onto elements
+> with nothing to scroll, so Lab's few-px-tall chrome paints only the stepper arrows. The
+> working fix was documented in that issue's comments on 2026-07-20 (`jupyter labextension
+> uninstall …`); an early WebFetch of the issue reported "no comments are present" when there
+> were six, and this file was written on that false premise.
+>
+> **What survives:** the Bootstrap finding below is real and verified from the wheel, and
+> removing bxplorer (PR #94) stands on its own merits. Only the *attribution* was wrong.
+>
+> **Before posting:** Draft A is still accurate — it never mentions #8770 as caused by
+> bxplorer, so it can go as-is. **Draft B asserts the wrong root cause and must be rewritten
+> or dropped.** See `.clinerules.md` rule 39.
+
 **Status: NOT POSTED.** Both drafts below are held deliberately. Nothing has been filed with
 Navteca and nothing has been added to the 2i2c issue. Post only on an explicit decision to do so.
 

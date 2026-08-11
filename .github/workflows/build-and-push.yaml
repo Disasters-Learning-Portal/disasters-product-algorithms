@@ -24,7 +24,7 @@ jobs:
     name: Build & push klesinger/disasters-jupyterhub-docker-image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # setuptools-scm reads tags via `git describe`; default checkout
           # is a shallow clone with no tag history.

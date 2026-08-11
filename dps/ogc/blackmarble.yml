@@ -29,15 +29,20 @@
 # job parameters or log. Store it once from a MAAP notebook:
 #   MAAP().secrets.add_secret("EARTHDATA_TOKEN", "<your-earthdata-token>")
 #
-# algorithm_name is intentionally distinct ("black-marble-ogc-test") so registering
-# this does NOT overwrite the existing GUI-registered "black-marble" process.
+# algorithm_name: like sentinel2, blackmarble does NOT use a "<sensor>-ogc-test"
+# name. This OGC config is the canonical registration, named
+# "disasters-blackmarble-process"; dps/blackmarble/algorithm_config.yaml (the GUI
+# path) carries the SAME name on purpose, so whichever path you register from
+# targets the one process. NOTE: the earlier "black-marble-ogc-test" and
+# GUI-registered "black-marble" processes are NOT renamed by this — a rename
+# registers a NEW process, so delete the old ones in MAAP by hand.
 # =============================================================================
-algorithm_name: black-marble-ogc-test
+algorithm_name: disasters-blackmarble-process
 algorithm_version: dev
 algorithm_description: >-
   VEDA Black Marble nighttime-lights pipeline: for a WGS84 bbox + date, download
   VIIRS VNP46A2 (Earthdata), Landsat (STAC), and OSM roads, then fuse into an
-  urban-focused Cloud Optimized GeoTIFF. OGC test build: every input is optional in
+  urban-focused Cloud Optimized GeoTIFF. Every input is optional in
   the schema so the Submit form never blocks; run.sh enforces the real requirements
   (valid bbox/date, non-placeholder activation_event, readable Earthdata secret).
   The Earthdata token comes from MAAP secrets, never the job inputs.

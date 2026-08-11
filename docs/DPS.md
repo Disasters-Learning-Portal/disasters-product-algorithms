@@ -457,12 +457,24 @@ Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registere
 `capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
 list_dates, landsat, sentinel2**.
 
-**Exception — `sentinel2` is `disasters-sentinel2-process`, not `sentinel2-ogc-test`.**
-The old GUI-registered `sentinel-2` process was deleted (2026-08-11), so there is
-nothing left to coexist with and the `-ogc-test` suffix bought nothing. Both
-`dps/ogc/sentinel2.yml` and `dps/sentinel2/algorithm_config.yaml` now carry the
-same canonical name, so either registration path targets the one process (the
-GUI path still can't express optional inputs — prefer the Action).
+**Exceptions — three algorithms use `disasters-<name>-process`, not `<name>-ogc-test`**
+(2026-08-11). For each, `dps/ogc/<name>.yml` and `dps/<name>/algorithm_config.yaml`
+carry the **same** canonical name, so either registration path targets the one
+process (the GUI path still can't express optional inputs — prefer the Action):
+
+| configs | registered as |
+|---|---|
+| `dps/ogc/sentinel2.yml` + `dps/sentinel2/algorithm_config.yaml` | `disasters-sentinel2-process` |
+| `dps/ogc/blackmarble.yml` + `dps/blackmarble/algorithm_config.yaml` | `disasters-blackmarble-process` |
+| `dps/ogc/umbra.yml` + `dps/umbra/algorithm_config.yaml` | `disasters-umbra-process` |
+
+⚠️ **A rename registers a NEW process; it does not rename the old one.** The old
+`sentinel-2` was deleted by hand before its rename, but Black Marble's and Umbra's
+predecessors (GUI-registered `black-marble` / `umbra`, and OGC-registered
+`black-marble-ogc-test` / `umbra-ogc-test`) are **still live** unless someone
+deletes them in MAAP. They point at the same `run.sh`, so a job submitted against
+either still runs — delete them so operators can't pick a stale entry out of the
+Process dropdown.
 
 **`landsat` is the one file-input OGC config** — its granule `file_path_of_raw_data`
 is a **required** `File` (no `?`, `minOccurs:1`); nothing can run without a granule,
@@ -568,9 +580,10 @@ This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub U
 
 ## Black Marble (VEDA nighttime lights)
 
-`black-marble` (`dps/blackmarble/`, OGC descriptor `dps/ogc/blackmarble.yml`) is the
-one processing algorithm that is **not** a `process_*` sensor — and the one whose
-processing code **does not live in this repo at all**.
+`disasters-blackmarble-process` (`dps/blackmarble/`, OGC descriptor
+`dps/ogc/blackmarble.yml`) is the one processing algorithm that is **not** a
+`process_*` sensor — and the one whose processing code **does not live in this repo
+at all**.
 
 The **VEDA Black Marble** pipeline is maintained upstream by NASA-IMPACT at
 <https://github.com/NASA-IMPACT/veda-black-marble>. Given a WGS84 `bbox` + `date` it

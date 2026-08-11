@@ -137,16 +137,30 @@ unrelated to anything either extension does:
 the MAAP base image (PR #48 dropped the pip pins), so `image/environment.yml` can't remove
 them, and disabling them would cost the Register Algorithm / Submit Jobs / My Builds /
 View My Jobs Launcher tiles. Instead `image/Dockerfile` runs
-[`image/scripts/strip_lm_widget_overflow.py`](../image/scripts/strip_lm_widget_overflow.py),
-which deletes just that declaration and leaves the extensions fully functional. It is
-idempotent, and deliberately not `--require`, so a future base image that ships the fix
-upstream turns it into a no-op rather than a build failure.
+[`image/scripts/fix_lm_widget_overflow.py`](../image/scripts/fix_lm_widget_overflow.py),
+which rewrites `scroll` → `auto`. It is idempotent, and deliberately not `--require`, so a
+future base image that ships the fix upstream turns it into a no-op rather than a build
+failure.
+
+**Why `auto` and not deletion.** The first version of the patch deleted the declaration
+outright. That killed the arrows but broke the MAAP panels — Lumino's base CSS is
+`overflow: hidden`, and the Submit Jobs form is taller than its panel, so it became
+impossible to scroll down to the Submit button. The extensions were relying on this rule to
+make their own content scrollable; their mistake was scoping it to every widget in the app
+rather than their own. `auto` paints a scrollbar exactly where content genuinely overflows,
+so MAAP's long forms scroll and Lab's chrome — which doesn't overflow — stays quiet.
+
+**Residual risk:** it is still a global rule. Any Lab widget whose content genuinely
+overflows will now show a scrollbar where it previously clipped. If arrows reappear
+anywhere, the proper fix is to scope the rule to the MAAP panels rather than relax it
+globally — the DPS panel's React root is `.submit-jobs-container`, but the algorithms
+extension defines no root class, so scoping it requires inspecting its DOM.
 
 Manual escape hatches, if you are on an unpatched image:
 
 ```bash
 # preferred - same patch, applied in place, then hard refresh
-python image/scripts/strip_lm_widget_overflow.py
+python image/scripts/fix_lm_widget_overflow.py
 
 # blunt alternative: costs the MAAP Launcher tiles, reversible with `enable`
 jupyter labextension disable maap-dps-jupyter-extension maap_algorithms_jupyter_extension

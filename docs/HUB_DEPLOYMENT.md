@@ -341,8 +341,8 @@ few-px-tall chrome then has no room for a track or thumb, so only the two steppe
 render. Nothing is rescaled, which is why the Launcher looks fine.
 
 `image/Dockerfile` now runs
-[`image/scripts/strip_lm_widget_overflow.py`](../image/scripts/strip_lm_widget_overflow.py)
-to delete that one declaration, keeping the MAAP Launcher tiles working. On an unpatched
+[`image/scripts/fix_lm_widget_overflow.py`](../image/scripts/fix_lm_widget_overflow.py)
+to rewrite `scroll` -> `auto`, keeping the MAAP Launcher tiles working. It must NOT delete the declaration: the MAAP panels rely on it for their own scrolling (Lumino's base is `overflow: hidden`, and the Submit Jobs form is taller than its panel), and an earlier delete-it patch made that form impossible to scroll. `auto` shows a scrollbar only on real overflow, so their forms scroll and Lab's chrome stays quiet. On an unpatched
 image, run the same script in place and hard-refresh, or fall back to
 `jupyter labextension disable maap-dps-jupyter-extension maap_algorithms_jupyter_extension`
 (costs the tiles; reversible with `enable`). See [HUB_EXTENSIONS.md](HUB_EXTENSIONS.md) and

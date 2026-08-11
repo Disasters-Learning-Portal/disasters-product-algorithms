@@ -8,6 +8,15 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATE="${here}/../../dps/_validate.sh"
 
+# Also source it HERE (not just inside the ok/no/eq subshells) so pure transforms
+# like normalize_token can be used in command substitution when BUILDING a case's
+# arguments -- that is how run.sh composes them, e.g.
+#   validate_in_set products "$(normalize_token "$t" lower)" "$SET"
+# _validate.sh is nothing but function definitions (no top-level side effects), and
+# every validator still runs inside a subshell below, so its `exit 1` can't kill
+# this harness.
+source "$VALIDATE"
+
 pass=0; fail=0
 
 # ok DESC CALL... -- the call (in a subshell) must succeed.
@@ -85,6 +94,35 @@ eq "norm ' L1b '->L1B"      L1B         normalize_token " L1b " upper
 eq "norm default L1D"       L1D         normalize_token "L1D" upper
 eq "norm satellogic keep"   satellogic  normalize_token "  SateLLogic " lower
 eq "norm unknown untouched" sentinel2   normalize_token " Sentinel2 " lower
+
+# --- optical products: case-folded membership -------------------------------
+# run.sh (landsat + sentinel2) calls validate_in_set on the CASE-FOLDED token:
+#   for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" "$SET"
+# The CLIs are case-INSENSITIVE (`p.lower() not in product_variants`), but
+# validate_in_set is an exact compare -- so without the fold, `colorIR` (the exact
+# token every algorithm_config/ogc doc string advertises) was rejected before the
+# CLI ever ran. These cases pin the composition, not just validate_in_set alone.
+S2_PRODUCTS="all true tc truecolor nat natural naturalcolor colorir cir colorinfrared swir shortwaveir shortwaveinfrared ndwi mndwi ndvi nbr we waterextent"
+LS_PRODUCTS="all true tc truecolor pan panchromatic nat natural naturalcolor nc colorir colorinfrared cir mndwi ndvi evi ndwi nbr we waterextent"
+
+ok "s2 colorIR folded"   validate_in_set products "$(normalize_token colorIR lower)"     "$S2_PRODUCTS"
+ok "s2 colorir bare"     validate_in_set products "$(normalize_token colorir lower)"     "$S2_PRODUCTS"
+ok "s2 COLORIR folded"   validate_in_set products "$(normalize_token COLORIR lower)"     "$S2_PRODUCTS"
+ok "s2 SWIR folded"      validate_in_set products "$(normalize_token SWIR lower)"        "$S2_PRODUCTS"
+ok "s2 NDVI folded"      validate_in_set products "$(normalize_token NDVI lower)"        "$S2_PRODUCTS"
+ok "s2 waterExtent fold" validate_in_set products "$(normalize_token waterExtent lower)" "$S2_PRODUCTS"
+ok "s2 true"             validate_in_set products "$(normalize_token true lower)"        "$S2_PRODUCTS"
+ok "s2 all"              validate_in_set products "$(normalize_token all lower)"         "$S2_PRODUCTS"
+no "s2 typo colorIRR"    validate_in_set products "$(normalize_token colorIRR lower)"    "$S2_PRODUCTS"
+no "s2 pan not in s2"    validate_in_set products "$(normalize_token pan lower)"         "$S2_PRODUCTS"
+no "s2 empty"            validate_in_set products "$(normalize_token '' lower)"          "$S2_PRODUCTS"
+
+ok "ls colorIR folded"   validate_in_set products "$(normalize_token colorIR lower)"     "$LS_PRODUCTS"
+ok "ls PAN folded"       validate_in_set products "$(normalize_token PAN lower)"         "$LS_PRODUCTS"
+ok "ls EVI folded"       validate_in_set products "$(normalize_token EVI lower)"         "$LS_PRODUCTS"
+ok "ls waterExtent fold" validate_in_set products "$(normalize_token waterExtent lower)" "$LS_PRODUCTS"
+no "ls swir not in ls"   validate_in_set products "$(normalize_token swir lower)"        "$LS_PRODUCTS"
+no "ls typo"             validate_in_set products "$(normalize_token evii lower)"        "$LS_PRODUCTS"
 
 # --- date regexes -----------------------------------------------------------
 ok "capella date"        validate_regex date 20231107120000 '^[0-9]{14}$' ts

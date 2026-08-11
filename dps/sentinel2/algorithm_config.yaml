@@ -34,6 +34,14 @@ keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent
 # credentials are NOT inputs here and NOT secret-name inputs either -- run.sh pulls
 # them from MAAP secrets by the fixed names COP_USER / COP_PASS at run time (store
 # them once with maap.secrets.add_secret; see docs/DPS.md).
+#
+# source_label / dst_crs / compression_level / limit / nodata are HARDCODED in
+# run.sh and are deliberately NOT inputs (matching Capella/Satellogic): the source
+# is always Copernicus for a download-from-CDSE job, output stays in the native UTM
+# zone, ZSTD level is fixed at 9, the CDSE search $top is fixed at 50, and nodata is
+# left to the CLI's per-dtype auto-detect (uint8 composites -> 0, float indices ->
+# -9999.0, which is what the index generators actually write). To change any of
+# them, publish a new algorithm_version with the constants in run.sh changed.
 inputs:
   - name: tile
     label: MGRS tile(s)
@@ -55,26 +63,16 @@ inputs:
     doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance), 1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected production."
     type: string
     default: "1"
-  - name: limit
-    label: Search result limit
-    doc: "Maximum number of Copernicus search results to download for the tile/date."
-    type: int
-    default: 50
   - name: products
     label: Products
     doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'.
     type: string
     default: "true swir"
-  - name: source_label
-    label: Source
-    doc: "Data origin (required), e.g. Copernicus, ESA."
+  - name: we_nstd
+    label: Water-extent std devs
+    doc: "Only used when 'we' is in products; ignored otherwise. One or more NIR std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5 2. One water-extent COG is produced per value (filename carries NSTD_<value>). Higher = higher NIR threshold = MORE pixels classified as water. Decimals use a dot (1.5, not 1,5). Default 1."
     type: string
-    default: "Copernicus"
-  - name: dst_crs
-    label: Target CRS
-    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
-    type: string
-    default: "native"
+    default: "1"
   - name: merge
     label: Merge by date/product
     doc: Mosaic scenes by date and product (-merge).
@@ -85,21 +83,6 @@ inputs:
     doc: Generate and apply a cloud mask (-mask, L2A only).
     type: boolean
     default: false
-  - name: we_nstd
-    label: Water-extent std devs (optional)
-    doc: 'Space-separated std-dev thresholds for water extent (no quotes), e.g. 1 1.5.'
-    type: string
-    default: ""
-  - name: compression_level
-    label: COG compression level
-    doc: "ZSTD level 1-22. Lower = faster but larger files; higher = slower but smaller. Default 1 for a fast test; raise (~12 balanced, 22 max) for smaller production COGs."
-    type: int
-    default: 1
-  - name: nodata
-    label: No-data value
-    doc: "No-data value for the output COGs (Sentinel-2 default 0)."
-    type: string
-    default: "0"
 outputs:
   - name: output
     type: Directory

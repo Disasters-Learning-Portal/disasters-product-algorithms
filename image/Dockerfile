@@ -12,7 +12,7 @@ ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
 
-# === Relax the MAAP extensions' `.lm-Widget { overflow: scroll !important }` ===
+# === Scope + relax MAAP's `.lm-Widget { overflow: scroll !important }` ===
 # maap-dps-jupyter-extension and maap_algorithms_jupyter_extension both ship
 # leftover placeholder CSS from the JupyterLab extension cookiecutter that sets
 # `overflow: scroll !important` on `.lm-Widget` -- Lumino's base class, present
@@ -21,13 +21,20 @@ RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.y
 # few-px-tall chrome renders as bare scrollbar stepper arrows: the "chevron
 # icons everywhere" bug (2i2c-org/infrastructure#8770).
 #
-# The script rewrites `scroll` -> `auto`; it does NOT delete the declaration.
-# An earlier version deleted it and broke the MAAP panels: Lumino's base is
-# `overflow: hidden`, and the Submit Jobs form is taller than its panel, so it
-# became impossible to scroll to the Submit button. The extensions were relying
-# on this rule for their own scrolling -- they just scoped it to every widget in
-# the app instead of their own. `auto` keeps a scrollbar exactly where content
-# genuinely overflows, so their forms scroll and Lab's chrome stays quiet.
+# The script rewrites `scroll` -> `auto` AND narrows the selector to exclude
+# Lumino's layout widgets; it does NOT delete the declaration. Both halves are
+# load-bearing:
+#   - NOT deleted: an earlier version deleted it and broke the MAAP panels.
+#     Lumino's base is `overflow: hidden` and the Submit Jobs form is taller
+#     than its panel, so it became impossible to scroll to the Submit button.
+#     The extensions rely on this rule for their own scrolling -- they just
+#     scoped it to every widget in the app instead of their own.
+#   - Scoped: `auto` alone still broke the main dock area. DockPanel/TabBar/
+#     SplitPanel/... position children absolutely and are sized to exactly the
+#     space available, so sub-pixel rounding leaves a fractional overflow that
+#     `hidden` clips silently and `auto` turns into a real scrollbar -- which
+#     ate ~15px of the ~30px tab bar and clipped the tab row out of view.
+#     Excluding them restores Lab's own overflow for those elements only.
 #
 # These come from the MAAP base image, so environment.yml can't remove them, and
 # disabling the extensions would cost the Register Algorithm / Submit Jobs GUI

@@ -50,7 +50,11 @@ def get_geo(f, band=1):
   projref = ds.GetProjectionRef()
   return img, in_geo, projref
 
-def dump_geotiff_float(filename, arr, projref, in_geo):
+def dump_geotiff_float(filename, arr, projref, in_geo, nodata=None):
+  # nodata defaults to None = write no nodata tag, which is what the SAR
+  # callers (capella/umbra/iceye) rely on: their output is dB backscatter
+  # where every finite value is legitimate, and they declare nodata at the
+  # CLI instead. Pass a value only for products that reserve a fill.
   format = 'GTiff'
   rows, cols = np.shape(arr)
   driver = gdal.GetDriverByName(format)
@@ -61,6 +65,8 @@ def dump_geotiff_float(filename, arr, projref, in_geo):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(arr)
+  if nodata is not None:
+    out_ds.GetRasterBand(1).SetNoDataValue(float(nodata))
   out_ds = None
   return filename
 

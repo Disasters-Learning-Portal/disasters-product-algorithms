@@ -8,17 +8,16 @@ set -euo pipefail
 # step. The only artifact is available_<sensor>_dates.csv, written into output/
 # (which DPS uploads) alongside the report printed to the job log.
 #
-# NO file input: the underlying process_<sensor> --list_dates path LISTS the CSDA
-# vendor bucket at run time (DPS-worker read access required -- the same access
-# the per-sensor processing algorithms already rely on).
+# NO file input: report_dates.py LISTS the CSDA vendor bucket at run time
+# (DPS-worker read access required -- the same access the per-sensor processing
+# algorithms already rely on). Discovery lives ONLY here now: the per-sensor
+# process_<sensor> CLIs no longer carry a --list_dates flag.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
 # shared input validators (fail fast, before conda)
 source "${basedir}/../_validate.sh"
-# assume disasters-prod for CSDA vendor-bucket reads (sets READ_ROLE_ARN)
-source "${basedir}/../_env.sh"
 
 # --- defaults (MIRROR algorithm_config.yaml so an input left at its form default
 # round-trips correctly whether or not MAAP re-emits the flag) ---
@@ -55,25 +54,21 @@ elif [[ -n "${LEVEL_SET}" ]]; then
 fi
 
 # --- dispatch: list available vendor scene dates for the chosen sensor and exit.
-# Each CLI prints an aligned report (most recently added to S3 first) and writes
-# output/available_<sensor>_dates.csv when passed --output output. ---
+# report_dates.py prints an aligned report (most recently added to S3 first) and
+# writes output/available_<sensor>_dates.csv. ---
 echo "Listing available ${SENSOR} scene dates (most recently added to S3 first)..."
 echo "The report also lands in output/available_${SENSOR}_dates.csv (open it from the Jobs panel: Outputs -> Open in File Browser)."
 
 case "${SENSOR}" in
-  capella)
-    conda run --live-stream --name disasters_dps process_capella \
-      --list_dates --output output
-    ;;
-  umbra)
-    conda run --live-stream --name disasters_dps process_umbra \
-      --list_dates --output output
+  capella|umbra)
+    conda run --live-stream --name disasters_dps python \
+      "${basedir}/report_dates.py" --sensor "${SENSOR}" --output output
     ;;
   satellogic)
     # Satellogic discovery is LEVEL-SCOPED; --level was already validated up
-    # front. Forward the normalized value (bucket/prefix are hardcoded in that
-    # CLI, so nothing else is passed).
-    conda run --live-stream --name disasters_dps process_satellogic \
-      --list_dates --level "${LEVEL}" --output output
+    # front. Forward the normalized value (bucket/prefix are hardcoded in
+    # report_dates.py, so nothing else is passed).
+    conda run --live-stream --name disasters_dps python \
+      "${basedir}/report_dates.py" --sensor satellogic --level "${LEVEL}" --output output
     ;;
 esac

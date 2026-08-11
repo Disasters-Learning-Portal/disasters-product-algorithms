@@ -7,18 +7,16 @@ set -euo pipefail
 # NO file input: process_capella FETCHES source rasters from the CSDA Capella
 # vendor bucket at run time (DPS-worker read access required, confirmed available).
 #
-# Output flow: products are written to ~/drcs_outputs/<event>/, optionally given
-# a PNG quicklook, copied to output/ (which DPS uploads -- the safety net),
-# optionally published to s3://nasa-disasters, then the COGs are deleted from
-# ~/drcs_outputs (default) to free space (PNGs + the output/ copy are kept).
+# Output flow: products are written to ~/drcs_outputs/<event>/, copied to output/
+# (which DPS uploads -- the safety net), published to s3://nasa-disasters-staging
+# (via MAAP workspace credentials), then the COGs are deleted from ~/drcs_outputs
+# to free space (the output/ copy is kept). No PNG quicklooks are produced.
 
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
 # shared input validators (fail fast, before conda/fetch)
 source "${basedir}/../_validate.sh"
-# assume disasters-prod for CSDA vendor-bucket reads (sets READ_ROLE_ARN)
-source "${basedir}/../_env.sh"
 
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left
 # at its form default round-trips correctly whether or not MAAP re-emits the
@@ -34,15 +32,19 @@ ACTIVATION_EVENT="YYYYMM_Hazard_Location"
 SOURCE_LABEL=""
 COMPRESSION_LEVEL="22"
 NODATA=""
-ENABLE_S3_UPLOAD="false"
-# S3 destination is LOCKED for this version: not exposed as a job input and not
-# parsed from flags, so operators cannot change it. To target a different
-# bucket/prefix, publish a new algorithm_version with these two values changed.
-S3_BUCKET="nasa-disasters"
-S3_DEST_BASE="drcs_activations_new"
-SAVE_PNG="true"
-PNG_MIN=""
-PNG_MAX=""
+# Publishing is ALWAYS ON and the S3 destination is LOCKED for this version --
+# neither is a job input nor parsed from a flag. Capella publishes to the MAAP
+# staging bucket nasa-disasters-staging (prefix dps_output/<event>/) using short-
+# lived MAAP workspace credentials -- the DPS worker's own role can't write there;
+# see shared_utils/staging_upload.py + dps/_finalize.sh step 3a. To target a
+# different bucket/prefix, publish a new algorithm_version with these constants changed.
+ENABLE_S3_UPLOAD="true"
+STAGING_UPLOAD="true"
+STAGING_BUCKET="nasa-disasters-staging"
+STAGING_DEST_BASE="dps_output"
+# DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
+# COG in ~/drcs_outputs is always removed to free worker disk -- the product already
+# lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
 DELETE_COG="true"
 
 # --- parse named flags ---
@@ -58,12 +60,7 @@ while [[ $# -gt 0 ]]; do
     --source_label)      SOURCE_LABEL="$2"; shift 2;;
     --compression_level) COMPRESSION_LEVEL="$2"; shift 2;;
     --nodata)            NODATA="$2"; shift 2;;
-    --png_min)           PNG_MIN="$2"; shift 2;;
-    --png_max)           PNG_MAX="$2"; shift 2;;
     --apply_filter)      if [[ "${2:-}" =~ ^(true|false)$ ]]; then APPLY_FILTER="$2"; shift 2; else APPLY_FILTER="true"; shift; fi ;;
-    --enable_s3_upload)  if [[ "${2:-}" =~ ^(true|false)$ ]]; then ENABLE_S3_UPLOAD="$2"; shift 2; else ENABLE_S3_UPLOAD="true"; shift; fi ;;
-    --save_png)          if [[ "${2:-}" =~ ^(true|false)$ ]]; then SAVE_PNG="$2"; shift 2; else SAVE_PNG="true"; shift; fi ;;
-    --delete_cog)        if [[ "${2:-}" =~ ^(true|false)$ ]]; then DELETE_COG="$2"; shift 2; else DELETE_COG="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -78,8 +75,6 @@ validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # --product ('sigma') is already enforced by argparse choices= in the CLI.
 [[ "${APPLY_FILTER}" == "true" ]] && validate_int_range filter_size "${FILTER_SIZE}" 1 101
 [[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
-[[ -n "${PNG_MIN}" ]] && validate_number png_min "${PNG_MIN}"
-[[ -n "${PNG_MAX}" ]] && validate_number png_max "${PNG_MAX}"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"

@@ -9,10 +9,11 @@ Pins two things the DPS in-job date-discovery UX depends on:
    level** (`_{level}_` in the folder name), keeps the newest `LastModified` per
    scene, skips subdirs without a parseable acquisition date, and sorts
    most-recently-delivered first.
-2. `process_satellogic --list_dates` prints the aligned table (with a `scene
-   folder` column) AND writes the sortable `available_satellogic_dates.csv`
-   artifact into `--output` (on DPS that dir is uploaded and browsable from the
-   Jobs panel).
+2. The list-dates DPS tool (`dps/list_dates/report_dates.py`, `--sensor
+   satellogic --level L1D`) prints the aligned table (with a `scene folder`
+   column) AND writes the sortable `available_satellogic_dates.csv` artifact into
+   `--output` (on DPS that dir is uploaded and browsable from the Jobs panel).
+   The per-sensor `process_satellogic` CLI no longer carries a `--list_dates` flag.
 """
 
 import csv
@@ -24,7 +25,7 @@ import pytest
 pytest.importorskip("osgeo.gdal")
 pytest.importorskip("rasterio")
 
-from satellogic import satellogic_v2, process_satellogic
+from satellogic import satellogic_v2
 
 
 def _dt(y, mo, d, h, mi, s):
@@ -70,7 +71,7 @@ def test_report_satellogic_scenes_filters_level_carries_scene_and_sorts(monkeypa
     assert scenes[0]["added_to_s3"] == _dt(2026, 6, 10, 7, 11, 21)
 
 
-def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys):
+def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys, report_dates):
     scenes = [
         {"date": "2026-04-18 19:33:05", "scene": SCENE_A,
          "acquired": datetime(2026, 4, 18, 19, 33, 5),
@@ -79,18 +80,20 @@ def test_list_dates_prints_table_and_writes_csv(tmp_path, monkeypatch, capsys):
          "acquired": datetime(2026, 4, 15, 22, 57, 47),
          "added_to_s3": _dt(2026, 6, 10, 4, 54, 52)},
     ]
+    # report_dates imports satellogic_v2 lazily and calls
+    # satellogic_v2.report_satellogic_scenes(level), so patch it on the source.
     monkeypatch.setattr(
-        process_satellogic, "report_satellogic_scenes",
-        lambda level: scenes,
+        satellogic_v2, "report_satellogic_scenes",
+        lambda *a, **k: scenes,
     )
-    # --level is required even in list_dates mode (the report is level-scoped).
+    # --level is required for satellogic (the report is level-scoped).
     monkeypatch.setattr(
         "sys.argv",
-        ["process_satellogic", "--list_dates", "--level", "L1D",
+        ["report_dates", "--sensor", "satellogic", "--level", "L1D",
          "--output", str(tmp_path)],
     )
 
-    process_satellogic.main()
+    report_dates.main()
 
     # stdout table includes the new scene-folder column + a copy-ready date
     out = capsys.readouterr().out

@@ -1,6 +1,7 @@
 import numpy as np
 from osgeo import osr, gdal, gdalconst
 import sys
+from typing import Union
 
 def bytescale(arr, cmin=0, cmax=1, low=0, high=255):
   # in this scenario, 'low and high' are y-value (byte)
@@ -49,7 +50,11 @@ def get_geo(f, band=1):
   projref = ds.GetProjectionRef()
   return img, in_geo, projref
 
-def dump_geotiff_float(filename, arr, projref, in_geo):
+def dump_geotiff_float(filename, arr, projref, in_geo, nodata=None):
+  # nodata defaults to None = write no nodata tag, which is what the SAR
+  # callers (capella/umbra/iceye) rely on: their output is dB backscatter
+  # where every finite value is legitimate, and they declare nodata at the
+  # CLI instead. Pass a value only for products that reserve a fill.
   format = 'GTiff'
   rows, cols = np.shape(arr)
   driver = gdal.GetDriverByName(format)
@@ -60,6 +65,8 @@ def dump_geotiff_float(filename, arr, projref, in_geo):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(arr)
+  if nodata is not None:
+    out_ds.GetRasterBand(1).SetNoDataValue(float(nodata))
   out_ds = None
   return filename
 
@@ -92,3 +99,23 @@ def dump_geotiff_rgb(filename, r, g, b, projref, in_geo):
   out_ds.GetRasterBand(3).WriteArray(b)
   out_ds = None
   return filename
+
+def transform_geotifs_to_projection(input_filename : Union[str, list[str]], output_filename : Union[str, list[str]], destination_projection : Union[str, list[str]] = 'EPSG:4326'):
+    if (type(input_filename) is list) or (type(input_filename) is list) or (type(input_filename) is list):
+        if not ((type(input_filename) is list) and (type(input_filename) is list) and (type(input_filename) is list)):
+            raise TypeError(f"input_filename, output_filename, and destination_projection must all be the same type (str or list[str]), but are types {type(input_filename)}, {type(output_filename)}, and {type(destination_projection)}.")
+        else:
+            if not len(input_filename) == len(output_filename) == len(destination_projection):
+                raise IndexError(f"input_filename, output_filename, and destination_projection must all be the same length, but have lengths {len(input_filename)}, {len(output_filename)}, and {len(destination_projection)}.")
+
+    if (type(input_filename) is str):
+        input_filename = [input_filename]
+        output_filename = [output_filename]
+        destination_projection = [destination_projection]
+        
+        
+    for i in range(len(input_filename)):
+        gdal.Warp(output_filename[i], input_filename[i], options = gdal.WarpOptions(dstSRS = destination_projection[i]))
+        print(f"Transformed {input_filename[i]} to {destination_projection[i]} and saved it to {output_filename[i]}.")
+
+    return output_filename

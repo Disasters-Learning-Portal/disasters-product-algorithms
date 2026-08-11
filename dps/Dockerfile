@@ -92,7 +92,9 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # real work; the import line proves every sensor package + shared_utils resolves.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
     && conda run --name disasters_dps python -c \
-        "import shared_utils, capella, umbra, satellogic, landsat, sentinel2"
+        "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
+    && conda run --name disasters_dps python -c "import blackmarble" \
+    && conda run --name disasters_dps python -m blackmarble.cli --help >/dev/null
 
 # MAAP's OGC runtime invokes the CWL baseCommand
 # (disasters-product-algorithms/dps/<sensor>/run.sh) from /app. Match that CWD.

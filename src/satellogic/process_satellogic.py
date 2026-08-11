@@ -1,13 +1,8 @@
 import argparse
-import csv
 import os
-import sys
-
-from botocore.exceptions import BotoCoreError, ClientError
 
 from satellogic.satellogic_v2 import (
     retrieve_satellogic_resources,
-    report_satellogic_scenes,
     genTrueColor,
     gencolorIR,
     genNDVI,
@@ -17,7 +12,6 @@ from satellogic.satellogic_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
-from shared_utils.s3utils import explain_s3_read_failure
 
 
 def group_satellogic_tifs(tifs):
@@ -72,24 +66,13 @@ def main():
     parser = argparse.ArgumentParser(description="Process Satellogic imagery")
 
     parser.add_argument(
-        "--list_dates",
-        action="store_true",
-        help=(
-            "Report the Satellogic scenes available in the vendor bucket for the "
-            "given --level, newest first by S3 delivery time, then exit without "
-            "processing. Use it to discover which --date values exist; each "
-            "printed date can be passed straight back as --date. Ignores "
-            "--date/--product (but --level is still required)."
-        ),
-    )
-
-    parser.add_argument(
         "--product",
         choices=["truecolor", "colorir", "ndvi", "ndwi", "evi"],
+        required=True,
         help="Product to generate",
     )
 
-    parser.add_argument("--date", help="Target datetime (YYYY-MM-DD HH:MM:SS) or (YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,etc) for multiple")
+    parser.add_argument("--date", required=True, help="Target datetime (YYYY-MM-DD HH:MM:SS) or (YYYY-MM-DD HH:MM:SS,YYYY-MM-DD HH:MM:SS,etc) for multiple")
     parser.add_argument("--level", required=True, help="Processing level (e.g. L1D, L1B)")
     parser.add_argument("--output", default="/tmp/s3_temp")
 
@@ -127,69 +110,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    if args.list_dates:
-        # Bucket/prefix are hardcoded in report_satellogic_scenes; mirror them
-        # here only so a read failure reports the right location to the operator.
-        sat_bucket, sat_prefix = "csda-data-vendor-satellogic", "disasters"
-        try:
-            scenes = report_satellogic_scenes(args.level)
-        except (ClientError, BotoCoreError) as e:
-            msg = explain_s3_read_failure(e, sat_bucket, sat_prefix)
-            print(msg or f"Failed to list s3://{sat_bucket}/{sat_prefix}: {e}",
-                  file=sys.stderr)
-            sys.exit(2)
-        print(
-            f"{len(scenes)} available Satellogic {args.level} scene(s) in "
-            f"s3://csda-data-vendor-satellogic/disasters -- most recently added "
-            f"to S3 first (top = closest to today). Copy a --date value to "
-            f"process:\n"
-        )
-        # Aligned table; scene folder LAST so the fixed-width columns stay
-        # aligned regardless of the (long) Satellogic scene name.
-        print(
-            f"  {'--date':<22}{'acquired (UTC)':<22}"
-            f"{'added to S3 (UTC)':<22}scene folder"
-        )
-        for s in scenes:
-            print(
-                f"  {s['date']:<22}"
-                f"{s['acquired'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['added_to_s3'].strftime('%Y-%m-%d %H:%M:%S'):<22}"
-                f"{s['scene']}"
-            )
-
-        # Also drop a sortable CSV artifact so the report survives outside the
-        # raw job log (on DPS it lands in output/ -> browsable via the Jobs
-        # panel's "Open in File Browser", rendered as a grid by JupyterLab).
-        os.makedirs(args.output, exist_ok=True)
-        csv_path = os.path.join(args.output, "available_satellogic_dates.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["date", "scene", "acquired_utc", "added_to_s3_utc"])
-            for s in scenes:
-                writer.writerow([
-                    s["date"],
-                    s["scene"],
-                    s["acquired"].strftime("%Y-%m-%d %H:%M:%S"),
-                    s["added_to_s3"].strftime("%Y-%m-%d %H:%M:%S"),
-                ])
-        print(f"\nWrote {len(scenes)} scene(s) to {csv_path}")
-        if not scenes:
-            print(
-                f"\nNo {args.level} scenes found at "
-                f"s3://{sat_bucket}/{sat_prefix} (read access OK). Check the "
-                "level, or the vendor may not have delivered any scenes at this "
-                "level yet.",
-                file=sys.stderr,
-            )
-        return
-
-    # --date / --product are optional above so --list_dates can run without
-    # them; enforce them here for the normal processing path.
-    missing = [n for n, v in (("--date", args.date), ("--product", args.product)) if not v]
-    if missing:
-        parser.error("the following arguments are required: " + ", ".join(missing))
 
     activation_metadata = load_metadata_json(args.metadata_json)
 

@@ -498,6 +498,42 @@ watcher reports success for a registration that never happened. Confirm with
 the registration itself from the `{"title": "<name>", …, "status": "accepted"}` JSON
 the deploy step prints.
 
+### The dev → deploy-algorithm sync needs a PAT to carry workflow-file changes
+
+`sync-deploy-algorithm.yml` pushes the merge with a checkout-persisted credential.
+That credential **must not be `GITHUB_TOKEN`**: GitHub refuses any push from a
+GitHub App that touches `.github/workflows/**` —
+
+```
+! [remote rejected] HEAD -> deploy-algorithm (refusing to allow a GitHub App to
+  create or update workflow `.github/workflows/register-dps.yml` without
+  `workflows` permission)
+```
+
+— and there is **no `workflows:` key** you can add to the workflow's `permissions:`
+block; that permission doesn't exist for `GITHUB_TOKEN`. So any `dev` commit editing
+a workflow file failed the sync at the push step and left `deploy-algorithm` stale.
+The merge is *clean* in that case, so the conflict-issue path never fires — the run
+just goes red, and it's easy to miss that registrations are now running from an
+out-of-date branch. (Hit 2026-08-12 by a one-line `uses:` pin bump in
+`register-dps.yml`.)
+
+The fix: the checkout uses **`secrets.DISASTERS_RELEASE_PAT`** (the same
+fine-grained PAT `release.yaml` uses — Contents + PRs + **Workflows** = Read & write)
+and falls back to `GITHUB_TOKEN` only if that secret is empty. **PAT expiry brings the
+failure back**, with the same message. To recover a stale `deploy-algorithm` by hand:
+
+```bash
+git fetch origin
+git switch deploy-algorithm && git pull
+git merge --no-ff --no-edit -m "Merge dev into deploy-algorithm (automated sync)" origin/dev
+git push origin HEAD:deploy-algorithm
+```
+
+Also note PAT pushes **do** trigger workflows (GITHUB_TOKEN pushes don't). Nothing
+triggers on push to `deploy-algorithm` today, so there's no loop — but adding a
+`push: branches: [deploy-algorithm]` trigger anywhere would now fire on every sync.
+
 ### `deploy-algorithm` stays one file ahead of `dev` — don't merge it back
 
 Every register run commits the generated

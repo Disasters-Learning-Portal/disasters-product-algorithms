@@ -95,11 +95,30 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # the import proves the VCS install landed with its WRS2 package data, and the --help
 # proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
 # obstore) all resolved. This is the only build-time gate on that install.
+#
+# The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
+# non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
+# does NOT pull in, and nothing above notices: `blackmarble --help` and every
+# `process_* --help` pass fine without them, so a missing driver only surfaces at DPS
+# job time as `plugin gdal_<DRV>.so is not available`. That has now bitten twice --
+# JP2OpenJPEG (Sentinel-2 .jp2 bands, silent empty-success) and HDF5 (Black Marble
+# VIIRS .h5 granules, permanentFail). Assert on the plugin FILE, not on
+# `gdal.GetDriverByName("HDF5")`: GDAL's deferred plugin loading registers a PROXY
+# driver even when the .so is absent (that proxy is what emits the "could have been
+# recognized by driver HDF5, but plugin ... is not available" message), so
+# GetDriverByName returns non-None either way and gates nothing. The glob tolerates
+# any version suffix conda-forge adds. Adding a driver dep to dps/environment.yml?
+# Add it here too.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
     && conda run --name disasters_dps python -c \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
     && conda run --name disasters_dps python -c "import blackmarble" \
-    && conda run --name disasters_dps blackmarble --help >/dev/null
+    && conda run --name disasters_dps blackmarble --help >/dev/null \
+    && conda run --name disasters_dps bash -c '\
+        for drv in HDF5 JP2OpenJPEG; do \
+          ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \
+            || { echo "MISSING GDAL plugin gdal_${drv}.so - add the matching libgdal-* package to dps/environment.yml"; exit 1; }; \
+        done'
 
 # MAAP's OGC runtime invokes the CWL baseCommand
 # (disasters-product-algorithms/dps/<sensor>/run.sh) from /app. Match that CWD.

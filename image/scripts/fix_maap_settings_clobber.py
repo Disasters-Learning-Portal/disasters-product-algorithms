@@ -119,6 +119,15 @@ SET_RE = re.compile(
     r"([A-Za-z_$][\w$]*)\.set\(\s*(['\"])(" + "|".join(SETTING_KEYS) + r")\2\s*,\s*([^,()]+?)\s*\)"
 )
 
+# Any settings write at all, with no constraint on receiver or value. Used only to prove
+# the pass left nothing behind: a guarded call carries MARKER between `set(` and the
+# quote, so it cannot match. Deliberately looser than SET_RE -- a call SET_RE is too
+# strict to rewrite (say, a value wrapped in a function call) is skipped rather than
+# matched, and without this it would be reported as a clean run while the clobber lived
+# on. That failure is invisible in the UI and costs an operator their token on every
+# login, so it fails the build even under --lenient.
+LOOSE_SET_RE = re.compile(r"\.set\(\s*(['\"])(" + "|".join(SETTING_KEYS) + r")\1")
+
 
 def guard_call(match: re.Match) -> str:
     """`R.set("maapToken", V)` -> `(V?R.set(<marker>"maapToken",V):Promise.resolve())`."""
@@ -179,17 +188,19 @@ def main() -> int:
         rel = os.path.relpath(path, root)
 
         new_text, n = SET_RE.subn(guard_call, text)
+
+        # Checked on every fingerprinted file, including ones this pass did not touch --
+        # a partially guarded bundle (marker present AND a bare write left over) is still
+        # broken, and would otherwise be reported as "already guarded".
+        if LOOSE_SET_RE.search(new_text):
+            leftovers.append(rel)
+
         if not n:
             if MARKER in text:
                 already.append(rel)
             continue
 
         patched.append((rel, n))
-
-        # The marker makes a guarded call unmatchable, so anything still matching is a
-        # variant the replacement did not cover.
-        if SET_RE.search(new_text):
-            leftovers.append(rel)
 
         if args.check:
             continue

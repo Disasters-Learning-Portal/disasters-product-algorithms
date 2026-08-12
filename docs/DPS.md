@@ -800,6 +800,12 @@ the only gate proving the VCS install and its deps resolved — including that t
 shapefile (`blackmarble/data/WRS2_descending/*`, loaded via a plain `Path(__file__)…`
 lookup) came along; upstream ships it via its `[tool.hatch.build] artifacts`.
 
+What that smoke does **not** prove is that GDAL can read the data: `--help` and the
+import both pass with no raster drivers installed at all. Black Marble reads VIIRS
+`VNP46A2.*.h5`, which needs the separate **`libgdal-hdf5`** conda package — see the
+driver-plugin entries under [Gotchas](#gotchas). The same `RUN` block now also asserts
+the plugin `.so` files exist, so that gap fails the build rather than the job.
+
 ### Other ways it deviates from the sensor pattern
 
 - **Called through upstream's own console script**, `blackmarble` (a single-command typer
@@ -826,7 +832,49 @@ Get a token at <https://urs.earthdata.nasa.gov/> (Profile → Generate Token). T
 `earthdata_secret_name` input only names *which* secret to read (default
 `EARTHDATA_TOKEN`; names are not sensitive) — unlike Sentinel-2's hardcoded
 `COP_USER`/`COP_PASS`, blackmarble exposes the secret name as an input so an operator
-can point at a differently-named secret without a re-register.
+can point at a differently-named secret without a re-register. The name matching the env
+var is a convention, not a requirement: run.sh exports the fetched value as
+`EARTHDATA_TOKEN` whatever the secret was called.
+
+**Never run the `blackmarble` CLI by hand without exporting a token first** — upstream's
+missing-token guard is inverted with respect to its own error message
+(`blackmarble/cli.py`, pinned SHA `20e7d78`):
+
+```python
+resolved_earthdata_token = earthdata_token or str(os.getenv("EARTHDATA_TOKEN")).strip()
+if resolved_earthdata_token:
+    os.environ["EARTHDATA_TOKEN"] = resolved_earthdata_token.strip()
+else:
+    typer.echo("Error: EARTHDATA_TOKEN env var not set or --earthdata-token not provided.", ...)
+```
+
+`str(None)` is the four-character string `"None"`, which is truthy — so an **unset**
+`EARTHDATA_TOKEN` sails past the guard and gets installed as the token. The error branch
+fires *only* when the variable is set-but-blank (`str("").strip() == ""`), the one case
+its message does not describe:
+
+```bash
+env -u EARTHDATA_TOKEN python -c \
+  'import os; print(repr(str(os.getenv("EARTHDATA_TOKEN")).strip()))'   # -> 'None'
+```
+
+Nothing downstream rejects the bogus value either. `earthaccess.login()` →
+`Auth._environment()` sees a truthy token so it never raises `LoginStrategyUnavailable`,
+and `_get_credentials(None, None, "None")` sets `token = {"access_token": "None"}` with
+`authenticated = True`. The failure therefore surfaces **late and mislabelled**: CMR
+search needs no auth, so `Searching for VIIRS data...` succeeds and reports granules, and
+only `earthaccess.download` 401s — while `cli.py` has already set
+`logging.getLogger("earthaccess").setLevel(WARNING)`, suppressing the one breadcrumb
+(`Using environment variables for EDL`). It reads like missing VIIRS coverage for the
+date, not a bad credential.
+
+**The DPS path is covered from both sides** — though by accident, not design, so don't
+remove either half. `_get_secret.py` exits 1 unless the secret is a non-empty `str` and
+run.sh's `|| die` catches that, so the variable is never *unset* when the CLI runs; and a
+whitespace-only secret (which `_get_secret.py`'s `if not value` check lets through) is
+exactly the case upstream *does* handle correctly. The exposure is interactive use — a
+hub terminal or notebook in the `disasters_dps` env with no token exported. Fixing the
+guard upstream (`os.getenv("EARTHDATA_TOKEN") or ""`) would retire this note.
 
 **Inputs** (all optional in the OGC descriptor; run.sh validates after parsing):
 `bbox` (WGS84, lat span ≥ 0.05° — enforced by `validate_bbox` in `dps/_validate.sh`),
@@ -943,3 +991,20 @@ ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
   skipped → 0 files uploaded. It's pinned in `dps/environment.yml`. The hub image gets
   JP2 for free from the MAAP base, so this only ever bites the DPS worker env. Confirm
   from a worker/job log: `grep -i jp2 _stderr.txt`.
+- **Black Marble `RasterioIOError` on a `.h5` = missing HDF5 driver.** Same plugin-split
+  cause as the JP2 entry above: VIIRS `VNP46A2.*.h5` granules need `libgdal-hdf5`, now
+  pinned in `dps/environment.yml`. Unlike the Sentinel-2 case this fails **loudly** —
+  upstream's `blackmarble/acquire/viirs.py::convert_to_tiff` calls
+  `rasterio.open(<granule>.h5).subdatasets`, which raises on the first granule and
+  `permanentFail`s the job. It fails *after* a successful Earthdata download, so the
+  log looks healthy right up to the traceback. Confirm from the job log:
+  `grep -i "gdal_.*\.so is not available" _stderr.txt`.
+- **Any new conda-forge GDAL driver is a separate `libgdal-*` package.** `gdal` alone
+  carries only the core drivers; everything else must be named explicitly in
+  `dps/environment.yml` (float the version — the plugin ABI is pinned to the resolved
+  `libgdal-core` build, so never hard-pin one). `dps/Dockerfile`'s build-time smoke
+  check now asserts the plugin `.so` files for the two drivers we depend on, so a
+  missing one fails the image build instead of a live job — **add any new driver to
+  that loop as well as to `environment.yml`**. Note the check asserts on the file, not
+  `gdal.GetDriverByName(...)`: deferred plugin loading registers a proxy driver even
+  when the `.so` is absent, so the Python lookup succeeds either way.

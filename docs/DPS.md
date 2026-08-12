@@ -985,3 +985,20 @@ ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
   skipped → 0 files uploaded. It's pinned in `dps/environment.yml`. The hub image gets
   JP2 for free from the MAAP base, so this only ever bites the DPS worker env. Confirm
   from a worker/job log: `grep -i jp2 _stderr.txt`.
+- **Black Marble `RasterioIOError` on a `.h5` = missing HDF5 driver.** Same plugin-split
+  cause as the JP2 entry above: VIIRS `VNP46A2.*.h5` granules need `libgdal-hdf5`, now
+  pinned in `dps/environment.yml`. Unlike the Sentinel-2 case this fails **loudly** —
+  upstream's `blackmarble/acquire/viirs.py::convert_to_tiff` calls
+  `rasterio.open(<granule>.h5).subdatasets`, which raises on the first granule and
+  `permanentFail`s the job. It fails *after* a successful Earthdata download, so the
+  log looks healthy right up to the traceback. Confirm from the job log:
+  `grep -i "gdal_.*\.so is not available" _stderr.txt`.
+- **Any new conda-forge GDAL driver is a separate `libgdal-*` package.** `gdal` alone
+  carries only the core drivers; everything else must be named explicitly in
+  `dps/environment.yml` (float the version — the plugin ABI is pinned to the resolved
+  `libgdal-core` build, so never hard-pin one). `dps/Dockerfile`'s build-time smoke
+  check now asserts the plugin `.so` files for the two drivers we depend on, so a
+  missing one fails the image build instead of a live job — **add any new driver to
+  that loop as well as to `environment.yml`**. Note the check asserts on the file, not
+  `gdal.GetDriverByName(...)`: deferred plugin loading registers a proxy driver even
+  when the `.so` is absent, so the Python lookup succeeds either way.

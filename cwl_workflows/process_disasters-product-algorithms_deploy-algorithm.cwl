@@ -1,28 +1,39 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: disasters-iam-probe
-  doc: "TEMPORARY IAM diagnostic. Prints the DPS worker's AWS identity (role ARN +\
-    \ account), then attempts ONE Secrets Manager read and reports only OK or the\
-    \ error code/message \u2014 never the secret value. Reads, writes and publishes\
-    \ no data; exits 0 even on denial. Used to determine whether the DPS worker role\
-    \ can read a cross-account Secrets Manager secret BEFORE building the KMS setup:\
-    \ the secret need not exist, because AWS distinguishes an identity-policy denial\
-    \ (\"no identity-based policy allows the secretsmanager:GetSecretValue action\"\
-    ) from a missing resource (ResourceNotFoundException)."
-  id: disasters-iam-probe
+  label: capella-ogc-test
+  doc: 'Process Capella SAR scenes into Cloud Optimized GeoTIFF disaster-response
+    products (sigma-naught, optional Lee filter). Fetches source rasters from the
+    CSDA Capella vendor S3 bucket keyed by date. OGC test build: every input is optional
+    in the schema so the Submit form never blocks; run.sh enforces the real requirements
+    (date, source, non-placeholder activation_event).'
+  id: capella-ogc-test
   inputs:
-    secret_arn:
-      doc: "Full ARN of a us-west-2 Secrets Manager secret to attempt reading. The\
-        \ secret need NOT exist \u2014 a made-up ARN in your own account still separates\
-        \ \"no identity-based policy allows secretsmanager:GetSecretValue\" (the worker\
-        \ role cannot read secrets at all; only MAAP can change that) from ResourceNotFoundException\
-        \ (the action is permitted; proceed to create the customer-managed KMS key,\
-        \ the secret, and its resource policy). Defaulted to a placeholder ARN so\
-        \ a bare Submit answers the question. Blank = print the worker identity only."
-      label: Secret ARN to probe
+    date:
+      doc: Target acquisition date, YYYYMMDDHHMMSS. Closest matching Capella scene
+        is selected. Discover valid dates via the 'list-dates' algorithm (sensor=capella).
+        REQUIRED for a real run (run.sh rejects an empty date).
+      label: Target date
       type: string?
-      default: arn:aws:secretsmanager:us-west-2:515966502221:secret:disasters/dps/probe-AAAAAA
+      default: ''
+    filter_size:
+      doc: Lee speckle-filter window size in pixels. Filtering is always applied;
+        this only tunes the kernel. Must be 3, 5 or 7.
+      label: Lee filter window size
+      type: int?
+      default: 5
+    activation_event:
+      doc: Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location
+        is REJECTED at run time -- set a real value for a real run.
+      label: Activation event
+      type: string?
+      default: YYYYMM_Hazard_Location
+    source_label:
+      doc: Data origin, e.g. USGS, NASA, NOAA, Capella Space. REQUIRED for a real
+        run (run.sh rejects an empty source).
+      label: Source
+      type: string?
+      default: ''
   outputs:
     output:
       type: Directory
@@ -31,7 +42,10 @@ $graph:
     process:
       run: '#main'
       in:
-        secret_arn: secret_arn
+        date: date
+        filter_size: filter_size
+        activation_event: activation_event
+        source_label: source_label
       out:
       - outputs_result
 - class: CommandLineTool
@@ -42,17 +56,35 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 2
-      coresMin: 1
-      outdirMax: 1
-  baseCommand: /app/disasters-product-algorithms/dps/probe/run.sh
+      ramMin: 32
+      coresMin: 4
+      outdirMax: 20
+  baseCommand: /app/disasters-product-algorithms/dps/capella/run.sh
   inputs:
-    secret_arn:
+    date:
       type: string?
       inputBinding:
         position: 1
-        prefix: --secret_arn
-      default: arn:aws:secretsmanager:us-west-2:515966502221:secret:disasters/dps/probe-AAAAAA
+        prefix: --date
+      default: ''
+    filter_size:
+      type: int?
+      inputBinding:
+        position: 2
+        prefix: --filter_size
+      default: 5
+    activation_event:
+      type: string?
+      inputBinding:
+        position: 3
+        prefix: --activation_event
+      default: YYYYMM_Hazard_Location
+    source_label:
+      type: string?
+      inputBinding:
+        position: 4
+        prefix: --source_label
+      default: ''
   outputs:
     outputs_result:
       outputBinding:
@@ -66,14 +98,14 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 6d495afc282865bb78a1f532b87c98cee8959b2f
+s:commitHash: 9123113ac1649eaa4e1dbd1487052aeb54c39a04
 s:dateCreated: 2026-08-12
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: Temporary IAM/Secrets Manager reachability probe for the DPS worker
-  role; image built in-workflow from dps/Dockerfile.
-s:keywords: diagnostic, iam, secrets-manager, temporary
+s:releaseNotes: "OGC registration test \u2014 all inputs optional (no \"Valid value\
+  \ required\") + image built in-workflow from dps/Dockerfile."
+s:keywords: capella, sar, sigma0, cog, disasters, flood
 $namespaces:
   s: https://schema.org/
 $schemas:

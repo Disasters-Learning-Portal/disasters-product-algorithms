@@ -595,10 +595,21 @@ time. The whole mechanism:
   *previous* run's CWL (the filename is branch-based, `process_<repo>_<branch>.cwl`,
   overwritten each run), so registering **N algorithms needed N+1 runs** and a
   **single** one needed **two**. `register-dps.yml` now pins
-  **`Disasters-Learning-Portal/ogc-app-pack-generator@<sha>`**, whose only delta
-  from upstream is deploying at the just-pushed `HEAD` (`git rev-parse HEAD`) — so
-  a **single run registers its own CWL**. Re-pin the SHA when pulling upstream
-  changes into the fork.
+  **`Disasters-Learning-Portal/ogc-app-pack-generator@<sha>`**, which deploys at the
+  just-pushed `HEAD` (`git rev-parse HEAD`) — so a **single run registers its own
+  CWL**. Re-pin the SHA when pulling upstream changes into the fork.
+- **FORK PATCH #2 — node24 action pins.** The fork also bumps the generator's four
+  JavaScript actions to their node24 majors (`actions/checkout@v7`,
+  `actions/setup-python@v7`, `docker/login-action@v4`,
+  `docker/build-push-action@v7`). Upstream is on v4/v5/v3/v5, all of which target
+  **Node 20** — [deprecated on GitHub-hosted
+  runners](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/),
+  so every register run ended with *"Node.js 20 is deprecated. The following actions
+  target Node.js 20 but are being forced to run on Node.js 24: …"* and would break
+  outright once the shim is removed. Both patches are marked `# FORK PATCH #N` in the
+  fork's `action.yml`, and the fork's monthly Jules reconcile is told to preserve
+  both. Retiring the fork (below) gives the node20 pins back unless upstream has
+  bumped too — the retire job's prompt says so.
 - **The fork is SELF-RETIRING (two monthly Jules jobs, one per repo).** Jules opens
   PRs in the repo it's invoked from, so the automation is split:
   - the **fork's** `.github/workflows/check-upstream.yml` (monthly) reconciles the

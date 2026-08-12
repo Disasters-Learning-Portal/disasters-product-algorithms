@@ -49,11 +49,6 @@ $graph:
       label: Also export EPSG:4326
       type: boolean?
       default: false
-    basename:
-      doc: Output COG filename stem -> <basename>.tif (letters, digits, . _ - only).
-      label: Output filename stem
-      type: string?
-      default: black_marble_output
     earthdata_secret_name:
       doc: NAME of the MAAP secret holding your NASA Earthdata token (not the token
         value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN',
@@ -75,7 +70,6 @@ $graph:
         config: config
         osm_source: osm_source
         wgs84: wgs84
-        basename: basename
         earthdata_secret_name: earthdata_secret_name
       out:
       - outputs_result
@@ -128,16 +122,10 @@ $graph:
         position: 6
         prefix: --wgs84
       default: false
-    basename:
-      type: string?
-      inputBinding:
-        position: 7
-        prefix: --basename
-      default: black_marble_output
     earthdata_secret_name:
       type: string?
       inputBinding:
-        position: 8
+        position: 7
         prefix: --earthdata_secret_name
       default: EARTHDATA_TOKEN
   outputs:
@@ -153,7 +141,7 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: dac47080352f248818069ab1bc3ca485e58914d3
+s:commitHash: 06c790b5c8ba4d1ebb2b2c59b85835c95d8f9299
 s:dateCreated: 2026-08-12
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0

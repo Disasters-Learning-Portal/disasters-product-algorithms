@@ -31,6 +31,15 @@ dependencies:
   # match whatever `gdal`/`libgdal-core` conda resolves (plugin ABI is pinned to
   # the core GDAL build, so do NOT hard-pin a version here).
   - libgdal-jp2openjpeg
+  # Same plugin-split story for Black Marble: VIIRS VNP46A2 granules ship as HDF5
+  # (.h5), and the HDF5 driver is ALSO a separate plugin package. Without it,
+  # upstream blackmarble's convert_to_tiff() dies on the first granule with
+  # "not recognized as being in a supported file format. It could have been
+  # recognized by driver HDF5, but plugin gdal_HDF5.so is not available"
+  # -- after a successful Earthdata download, so the job looks healthy until it
+  # permanentFails. Version floats to match the resolved libgdal-core (plugin ABI
+  # is pinned to the core GDAL build); do NOT hard-pin.
+  - libgdal-hdf5
   # VERSION FLOORS: the >= floors below are NOT our requirements -- they mirror the
   # floors declared by the upstream `blackmarble` package (pip-installed at the bottom
   # of this file). pip only reinstalls a dependency it considers UNSATISFIED, so pinning

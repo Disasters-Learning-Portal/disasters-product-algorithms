@@ -377,6 +377,116 @@ styles (`@scope`, a build-time class prefix, MUI's `ScopedCssBaseline`). The unp
 upstream reports, plus a script that re-checks a future bxplorer release straight from the
 PyPI wheel, are in [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md).
 
+## Debugging: MAAP Settings (API URL / PGT) reset on every login
+
+Symptom: you paste a MAAP API URL and PGT into **Settings → Settings Editor → MAAP
+Settings**, run an algorithm, log out, log back in — and both fields are blank again.
+Reported as [issue #88](https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/issues/88).
+
+**It is not a persistence problem.** The settings land in
+`~/.jupyter/lab/user-settings/maap-jupyter-server-extension/plugin.jupyterlab-settings`,
+on the persistent home volume, and they survive fine on an image *without* the MAAP
+extensions. Something actively overwrites them — which is why booting a non-MAAP image
+"fixes" it.
+
+**Cause — upstream, in `maap-jupyter-server-extension` v3.0.0** (the version
+`maap-workspaces/base_images/2i2c/pangeo` pins). On **every page load**, its frontend
+plugin fetches its five settings from its own server handler and writes all of them back,
+unconditionally, with no guard for empty values ([`src/index.ts`](https://github.com/MAAP-Project/jupyter-server-extension/blob/v3.0.0/src/index.ts)):
+
+```ts
+GET {baseUrl}maap-jupyter-server-extension/get-maap-params
+  .then(maapParams => Promise.all([
+    serverExtSettings.set('maapApiUrl', maapParams.maapApiUrl),
+    serverExtSettings.set('maapToken',  maapParams.maapToken),
+    ...
+  ]))
+```
+
+`ISettings.set()` PATCHes `/lab/api/settings/<plugin-id>`, which is exactly what writes
+that file. The server half (`handlers.py::GetMaapParamsHandler`) reads env vars and
+returns `""` for anything unset:
+
+```python
+token    = os.environ.get('MAAP_PGT', "")
+api_host = os.environ.get('MAAP_API_HOST', "")
+```
+
+MAAP injects those per-pod from its ADE devfile (`MAAP_API_HOST: api.dit.maap-project.org`).
+**The Disasters hub is not a MAAP-managed hub**, so nothing sets them — the endpoint
+returns `""` for both and the plugin writes `""` over whatever you typed.
+
+**Reproduce in seconds, no pod restart.** Set the fields, **hard-refresh the browser**,
+re-read the file — already wiped, with `Successfully updated MAAP extension settings.` in
+the DevTools console. That is the verification loop for this bug; a rebuild + `dev`→`main`
+promotion + pod restart is far too slow to guess against.
+
+```bash
+env | grep MAAP_        # expect no MAAP_API_HOST / MAAP_PGT on an unfixed image
+cat ~/.jupyter/lab/user-settings/maap-jupyter-server-extension/plugin.jupyterlab-settings
+```
+
+**Fixed in the image since 2026-08-12**, in two halves, because the two fields differ in
+kind:
+
+- **`ENV MAAP_API_HOST=api.maap-project.org`** in `image/Dockerfile`. Same for every
+  operator, so just set it — the write now lands the *correct* URL instead of `""`. This
+  also gives a brand-new user a working default (the PGT prompt only appears once a URL
+  exists), and `maap-py` reads the same var, so a bare `MAAP()` in a notebook stops
+  depending on ambient config. Value is a **bare hostname**: no scheme (maap-py adds it,
+  overridable via `MAAP_API_HOST_SCHEME`), no `/api` suffix (the extensions append the
+  path). The handler's `format_api_url()` adds a trailing slash and the consuming
+  extensions' `joinUrl()` strips it again.
+- **[`image/scripts/fix_maap_settings_clobber.py`](../image/scripts/fix_maap_settings_clobber.py)**
+  rewrites each `R.set("<key>", V)` in the installed bundle to
+  `(V ? R.set(<marker>"<key>", V) : Promise.resolve())` — write only a non-empty value.
+  The token is per-user and secret, so it can't be baked into an image; it has to survive
+  in the settings file. Auto-population still works wherever the env var *is* set.
+
+The script is scoped to files containing `get-maap-params`, so the *user-initiated*
+`settings.set('maapApiUrl', ...)` in `dps-jupyter-extension` / `algorithms-jupyter-extension`
+is left alone — guarding that one would stop an operator deliberately clearing a field.
+
+Unlike `fix_lm_widget_overflow.py`, it is **strict by default**: missing bundle, no match,
+or any unguarded write surviving the pass all fail the build. A silent miss is invisible
+in the UI and costs an operator their token on every login. A base-image bump that
+restructures this upstream is *expected* to trip it — re-read the bundle, then update the
+pattern or drop the layer.
+
+```bash
+python image/scripts/fix_maap_settings_clobber.py --check    # report only
+python image/scripts/fix_maap_settings_clobber.py            # patch in place, then hard-refresh
+```
+
+**Verifying the patch without a pod** — grab the real prebuilt bundle from PyPI and run the
+script against it. Note the bundle ships **unminified** (readable `serverExtSettings.set(...)`
+calls), so this is easy to eyeball:
+
+```bash
+pip download --no-deps maap-jupyter-server-extension==3.0.1 -d /tmp/mjse && unzip -q /tmp/mjse/*.whl -d /tmp/mjse/x
+python image/scripts/fix_maap_settings_clobber.py \
+  --root /tmp/mjse/x/maap_jupyter_server_extension-*.data/data/share/jupyter/labextensions
+```
+
+⚠ **Use 3.0.1, not 3.0.0.** The PyPI **3.0.0 wheel is a stale build** — its `lib_index_js`
+is the unmodified cookiecutter placeholder (plugin id `jupyter-server-extension:plugin`,
+one `requestAPI('get_example')` call) with no settings code at all, and its internal
+`package.json` still says `3.0.0` in *both* wheels. It does **not** reflect the git tag
+`v3.0.0`, whose `src/index.ts` does carry the five writes. This matters only for local
+verification: the base image installs `git+https://github.com/MAAP-Project/jupyter-server-extension.git@v3.0.0`
+and builds from **source**, so the hub gets the real plugin regardless.
+
+**The real fix belongs upstream** in
+[MAAP-Project/jupyter-server-extension](https://github.com/MAAP-Project/jupyter-server-extension)
+— a guard on the `set()` calls, ~3 lines. Related open issues there (#27 propagate the
+saved token, #29 handle a missing `MAAP_PGT` on non-MAAP hubs) are part of the same epic
+but none describes this destructive write. This layer retires when it lands.
+
+**Still open:** whether a PGT survives logout at all, or expires with the CAS session. If
+it expires, persistence only removes the re-paste, not the re-fetch — the durable answer
+is a PAT from `console.maap-project.org/profile/tokens`, *if* the extensions accept one in
+the `cpticket` header. Worth confirming with JPL.
+
 ## Design history (short)
 
 The hub-image build mechanism has gone through three iterations:

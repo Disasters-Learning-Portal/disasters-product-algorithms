@@ -48,6 +48,49 @@ RUN /srv/conda/envs/notebook/bin/python /tmp/fix_lm_widget_overflow.py \
       --root /srv/conda/envs/notebook/share/jupyter/labextensions \
     && rm /tmp/fix_lm_widget_overflow.py
 
+# === Make MAAP Settings stick across logins (issue #88) ===
+# maap-jupyter-server-extension writes all five of its settings back into
+# ~/.jupyter/lab/user-settings/... on EVERY page load, unconditionally, from
+# values its server handler reads out of the environment (src/index.ts +
+# handlers.py::GetMaapParamsHandler, v3.0.0 -- the version the base image pins).
+# Unset env var -> the handler returns "" -> the plugin writes "" over whatever
+# the operator typed into Settings -> MAAP Settings. MAAP injects those vars from
+# the ADE devfile; the Disasters hub is not a MAAP-managed hub, so nothing does.
+# That is the "re-paste the PGT every login" loop.
+#
+# Two halves, because the two fields differ in kind:
+#
+#   MAAP_API_HOST is the same for every operator, so just set it. The handler's
+#   format_api_url() turns it into https://api.maap-project.org/ and the
+#   consuming extensions' joinUrl() strips the trailing slash, so the write now
+#   lands the CORRECT url instead of "". This also gives the field a working
+#   default for a brand-new user (previously blank, and the PGT prompt only
+#   appears once a url exists), and maap-py reads the same var -- so a bare
+#   MAAP() in a notebook stops depending on ambient config. NOTE the value is a
+#   bare hostname with no scheme and no /api suffix: the extensions append the
+#   path, and maap-py adds the scheme (MAAP_API_HOST_SCHEME, default https).
+#
+#   MAAP_PGT is per-user and secret, so it cannot be baked into an image -- it
+#   has to survive in the settings file instead. The script below rewrites the
+#   bundle's unconditional set() calls to skip empty values, so a saved token is
+#   left alone while env-provided values still auto-populate.
+#
+# STRICT BY DEFAULT, unlike fix_lm_widget_overflow.py above: a silent miss here
+# is invisible in the UI and costs operators their token on every login, so it
+# fails the build instead of no-op'ing. A base-image bump that restructures (or
+# fixes) this upstream is expected to trip it -- re-read the bundle, then update
+# the pattern or delete this layer. The real fix belongs upstream in
+# MAAP-Project/jupyter-server-extension; this retires when it lands there.
+# Runs AFTER Layer 1 in case a conda env update reinstates the bundle.
+# See .clinerules.md rule 41.
+ENV MAAP_API_HOST=api.maap-project.org
+
+COPY --chown=${NB_USER}:${NB_USER} image/scripts/fix_maap_settings_clobber.py \
+     /tmp/fix_maap_settings_clobber.py
+RUN /srv/conda/envs/notebook/bin/python /tmp/fix_maap_settings_clobber.py \
+      --root /srv/conda/envs/notebook/share/jupyter/labextensions \
+    && rm /tmp/fix_maap_settings_clobber.py
+
 # === JupyterLab Help-menu customization ===
 # Bake the "Disasters Resources" submenu into Help (Report a Bug -> GitHub
 # Issues, Community Forum -> GitHub Discussions, Email Support -> mailto).

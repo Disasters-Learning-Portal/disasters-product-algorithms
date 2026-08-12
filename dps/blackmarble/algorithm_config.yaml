@@ -65,11 +65,6 @@ inputs:
     doc: "Also write an EPSG:4326 (WGS84) COG next to the native output (for web mapping)."
     type: boolean
     default: false
-  - name: basename
-    label: Output filename stem
-    doc: "Output COG filename stem -> <basename>.tif (letters, digits, . _ - only)."
-    type: string
-    default: "black_marble_output"
   - name: earthdata_secret_name
     label: Earthdata secret name
     doc: "NAME of the MAAP secret holding your NASA Earthdata token (not the token value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN', '<token>')."

@@ -793,6 +793,67 @@ OSM roads, and fuses them into an urban-focused Cloud Optimized GeoTIFF
 validate the inputs → fetch the Earthdata token from a MAAP secret → run upstream's CLI
 unmodified → publish the output COG to S3 via the shared `_finalize.sh`.
 
+### Output naming + layout (and the activation-event bake)
+
+Black Marble writes its **own** COG — it never goes through
+`shared_utils.convert_to_cog` — so neither the repo's filename convention nor its
+metadata plumbing applies for free. Both are supplied by `run.sh` (2026-08-12).
+Until then the job shipped `black_marble_output.tif` flat under the event, with no
+event tags in the raster. **This was never an upstream regression**: the previously
+vendored fork at `src/blackmarble/` produced the identical name (its `cli.py`
+defaulted `output_path = "black_marble_output.tif"`, and the old `run.sh` built
+`${OUT_HOME}/${BASENAME}.tif` exactly as the new one did) — the convention had simply
+never been applied to this algorithm.
+
+**Layout** mirrors every other sensor, because `_finalize.sh` keys each S3 object by
+its `OUT_HOME`-relative path:
+
+```
+~/drcs_outputs/<event>/<YYYYMMDD>/hdnightlights/<stem>.tif
+  → s3://nasa-disasters-staging/dps_output/<event>/<YYYYMMDD>/hdnightlights/<stem>.tif
+```
+
+the same shape `process_sentinel2` produces
+(`…/20251231/trueColor/S2B_MSIL1C_trueColor_T17RLM_…`).
+
+**Filename** is `hdnightlights_<NW><SE>_<YYYY-MM-DD>_day.tif`, e.g.
+
+```
+hdnightlights_32_97N90_96W32_83N90_79W_2023-03-25_day.tif
+```
+
+`<NW>` is the north-west corner (`max_lat`, `min_lon`), `<SE>` the south-east corner
+(`min_lat`, `max_lon`); each coordinate is `|value|` to 2 dp with `.` rewritten as `_`
+and a hemisphere letter appended, concatenated with no separator. The trailing
+`_YYYY-MM-DD_day` is the repo-wide token for a **time-less individual** product
+(`cog_utils._relocate_datetime`) — Black Marble is a daily composite with no
+acquisition time, so `_day` is correct and the **date stays last**.
+
+The **activation event is deliberately not in the filename.** It lives in the S3
+prefix and in the COG's own tags, matching `bake_event_metadata.ipynb`, which *strips*
+an event prefix out of any filename it finds.
+
+Upstream derives its second raster from the path we pass — literally
+`output_path.replace(".tif", "-colored.tif")` (`blackmarble/pipeline.py`) — which would
+leave `..._2023-06-15_day-colored.tif`, i.e. a date token no longer last. `run.sh`
+renames it onto the colored product's own stem, `hdnightlightscolored_<NW><SE>_<date>_day.tif`.
+
+**The event bake** is `dps/blackmarble/bake_event.py`, run after the pipeline: it
+re-creates each output COG with `ACTIVATION_EVENT` (plus the `YEAR_MONTH`/`HAZARD`/
+`LOCATION` split `resolve_metadata` derives, `PROCESSOR`, and `SOURCE`) applied. It
+**re-creates rather than edits** because GDAL 3.10+ refuses an in-place COG update —
+baking must happen at creation (see the repo's "Critical Constraints"). It passes
+`preserve_compression=True, web_optimized=False, target_crs=None`; the middle one is
+load-bearing, since `create_cog_with_metadata` defaults `web_optimized=True` and would
+silently reproject the product to EPSG:3857.
+
+> **There is no `basename` input any more.** The stem is derived, so the knob was
+> removed from `run.sh`, `algorithm_config.yaml` and `dps/ogc/blackmarble.yml`
+> (Capella/Satellogic precedent: hardcode rather than expose). That is a **schema
+> change**, so re-registering over the existing name+version will 409 and silently keep
+> the old schema — delete the process by `processID` first, or register a new
+> `algorithm_version`. See "Re-registering an existing name+version returns HTTP 409".
+
 ### How it's installed
 
 `dps/environment.yml` pip-installs the package straight from its repo:

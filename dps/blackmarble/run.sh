@@ -46,7 +46,6 @@ DATE="2023-06-15"
 CONFIG="fast"
 OSM_SOURCE="overpass"
 WGS84="false"
-BASENAME="black_marble_output"
 LOG_LEVEL="INFO"
 # NAME of the MAAP secret holding the Earthdata token (not the value). Default
 # EARTHDATA_TOKEN; run.sh fetches it by this name at run time.
@@ -75,7 +74,6 @@ while [[ $# -gt 0 ]]; do
     --date)                   DATE="$2"; shift 2;;
     --config)                 CONFIG="$2"; shift 2;;
     --osm_source)             OSM_SOURCE="$2"; shift 2;;
-    --basename)               BASENAME="$2"; shift 2;;
     --earthdata_secret_name)  EARTHDATA_SECRET_NAME="$2"; shift 2;;
     --wgs84)                  if [[ "${2:-}" =~ ^(true|false)$ ]]; then WGS84="$2"; shift 2; else WGS84="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
@@ -86,7 +84,6 @@ done
 BBOX="${BBOX//[\"\']/}"
 CONFIG="${CONFIG//[\"\']/}"
 OSM_SOURCE="${OSM_SOURCE//[\"\']/}"
-BASENAME="${BASENAME//[\"\']/}"
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 validate_activation_event "${ACTIVATION_EVENT}"
@@ -94,11 +91,31 @@ validate_bbox "${BBOX}"
 validate_regex date "${DATE}" '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$' 'YYYY-MM-DD'
 validate_in_set config "${CONFIG}" "default high_quality fast"
 validate_in_set osm_source "${OSM_SOURCE}" "overpass layercake"
-require_nonempty basename "${BASENAME}" 'output filename stem, e.g. black_marble_output'
-validate_regex basename "${BASENAME}" '^[A-Za-z0-9._-]+$' 'a filename stem (letters, digits, . _ - only; no slashes)'
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"
+
+# --- output naming + layout -------------------------------------------------
+# Mirrors what every other sensor puts under OUT_HOME, because _finalize.sh keys each
+# S3 object by its OUT_HOME-RELATIVE path: <YYYYMMDD>/<product>/<file> becomes
+# s3://nasa-disasters-staging/dps_output/<event>/<YYYYMMDD>/<product>/<file>, the same
+# shape process_sentinel2 produces (…/20251231/trueColor/S2B_MSIL1C_trueColor_…).
+# The activation event is deliberately NOT in the filename -- it lives in the S3 prefix
+# and in the COG's own tags (baked below), matching bake_event_metadata.ipynb, which
+# STRIPS an event prefix out of names it finds.
+#
+# The filename convention itself (and why it is shaped that way) lives in the sourced
+# naming.sh, so the test suite can assert it -- same split as dps/_validate.sh.
+PRODUCT="hdnightlights"
+PRODUCT_COLORED="hdnightlightscolored"
+
+source "${basedir}/naming.sh"
+
+DATE_DIR="${DATE//-/}"                       # 2023-06-15 -> 20230615, as Sentinel-2 does
+OUT_DIR="${OUT_HOME}/${DATE_DIR}/${PRODUCT}"
+mkdir -p "${OUT_DIR}"
+STEM="$(bm_stem "${BBOX}" "${DATE}" "${PRODUCT}")"
+STEM_COLORED="$(bm_stem "${BBOX}" "${DATE}" "${PRODUCT_COLORED}")"
 
 # --- fetch the Earthdata token from MAAP secrets (NEVER a job input; never logged).
 # _get_secret.py prints ONLY the secret value; capture it into EARTHDATA_TOKEN and
@@ -111,11 +128,12 @@ export EARTHDATA_TOKEN
 # --- run the Black Marble pipeline ---
 # Scratch dir for downloads/cache/temp lives OUTSIDE OUT_HOME so only the final
 # COG(s) land there for _finalize.sh to publish. blackmarble writes --output-path
-# (+ an extra EPSG:4326 file when --wgs84 is set) under OUT_HOME.
+# (+ a `-colored` companion it derives from that path, + an extra EPSG:4326 file when
+# --wgs84 is set) into OUT_DIR.
 SCRATCH="$(mktemp -d)"
 DATA_DIR="${SCRATCH}/data"
 mkdir -p "${DATA_DIR}"
-OUTFILE="${OUT_HOME}/${BASENAME}.tif"
+OUTFILE="${OUT_DIR}/${STEM}.tif"
 
 echo "Running Black Marble pipeline"
 echo "  activation_event=${ACTIVATION_EVENT}"
@@ -145,8 +163,26 @@ conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
 
 # Fail fast if the pipeline produced no COG (rather than silently "succeeding").
 shopt -s nullglob
-produced=( "${OUT_HOME}"/*.tif )
-(( ${#produced[@]} )) || die "Black Marble produced no COG in ${OUT_HOME} for bbox='${BBOX}' date='${DATE}'. Check the date has VIIRS/Landsat coverage and the Earthdata token is valid."
+produced=( "${OUT_DIR}"/*.tif )
+(( ${#produced[@]} )) || die "Black Marble produced no COG in ${OUT_DIR} for bbox='${BBOX}' date='${DATE}'. Check the date has VIIRS/Landsat coverage and the Earthdata token is valid."
+
+# --- rename the colored companion onto its own product stem ---
+# Upstream derives the second raster from OUR path, literally
+# `output_path.replace(".tif", "-colored.tif")` (blackmarble/pipeline.py), which would
+# leave `..._2023-06-15_day-colored.tif` -- a date token that is no longer last. Rename
+# it to the colored product's own stem so both files obey the convention.
+if [[ -f "${OUT_DIR}/${STEM}-colored.tif" ]]; then
+  mv "${OUT_DIR}/${STEM}-colored.tif" "${OUT_DIR}/${STEM_COLORED}.tif"
+fi
+
+# --- bake the activation event into every produced COG ---
+# Black Marble writes its own COG and never touches shared_utils.convert_to_cog, so it
+# misses the --metadata-json path that gives every process_* sensor its event tags.
+# bake_event.py RE-CREATES each COG with the tags applied at creation (GDAL 3.10+
+# refuses an in-place COG update; see CLAUDE.md "Critical Constraints").
+conda run --live-stream --name disasters_dps python "${basedir}/bake_event.py" \
+  --out-home "${OUT_HOME}" --event "${ACTIVATION_EVENT}" \
+  || die "failed to bake ACTIVATION_EVENT into the Black Marble COG(s) in ${OUT_DIR}."
 
 # --- delete the raw downloads/cache now that the product is written ---
 rm -rf "${SCRATCH}"

@@ -800,6 +800,12 @@ the only gate proving the VCS install and its deps resolved — including that t
 shapefile (`blackmarble/data/WRS2_descending/*`, loaded via a plain `Path(__file__)…`
 lookup) came along; upstream ships it via its `[tool.hatch.build] artifacts`.
 
+What that smoke does **not** prove is that GDAL can read the data: `--help` and the
+import both pass with no raster drivers installed at all. Black Marble reads VIIRS
+`VNP46A2.*.h5`, which needs the separate **`libgdal-hdf5`** conda package — see the
+driver-plugin entries under [Gotchas](#gotchas). The same `RUN` block now also asserts
+the plugin `.so` files exist, so that gap fails the build rather than the job.
+
 ### Other ways it deviates from the sensor pattern
 
 - **Called through upstream's own console script**, `blackmarble` (a single-command typer

@@ -1,68 +1,28 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: disasters-sentinel2-process
-  doc: Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
-    MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
-    products (true color, SWIR, NDVI, water extent, etc.). Every input is optional
-    in the schema so the Submit form never blocks; run.sh enforces the real requirements
-    (tile, non-placeholder activation_event, readable Copernicus secrets). Credentials
-    come from MAAP secrets, never the job inputs.
-  id: disasters-sentinel2-process
+  label: disasters-iam-probe
+  doc: "TEMPORARY IAM diagnostic. Prints the DPS worker's AWS identity (role ARN +\
+    \ account), then attempts ONE Secrets Manager read and reports only OK or the\
+    \ error code/message \u2014 never the secret value. Reads, writes and publishes\
+    \ no data; exits 0 even on denial. Used to determine whether the DPS worker role\
+    \ can read a cross-account Secrets Manager secret BEFORE building the KMS setup:\
+    \ the secret need not exist, because AWS distinguishes an identity-policy denial\
+    \ (\"no identity-based policy allows the secretsmanager:GetSecretValue action\"\
+    ) from a missing resource (ResourceNotFoundException)."
+  id: disasters-iam-probe
   inputs:
-    tile:
-      doc: 'Sentinel-2 MGRS tile ID(s) to download, e.g. T17RLN (space-separated for
-        several, no quotes: T17RLN T17RLM). Pre-filled with a known-good test tile;
-        change it for a real activation.'
-      label: MGRS tile(s)
+    secret_arn:
+      doc: "Full ARN of a us-west-2 Secrets Manager secret to attempt reading. The\
+        \ secret need NOT exist \u2014 a made-up ARN in your own account still separates\
+        \ \"no identity-based policy allows secretsmanager:GetSecretValue\" (the worker\
+        \ role cannot read secrets at all; only MAAP can change that) from ResourceNotFoundException\
+        \ (the action is permitted; proceed to create the customer-managed KMS key,\
+        \ the secret, and its resource policy). Defaulted to a placeholder ARN so\
+        \ a bare Submit answers the question. Blank = print the worker identity only."
+      label: Secret ARN to probe
       type: string?
-      default: T17RLN T17RLM
-    activation_event:
-      doc: Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so
-        a bare Submit runs; set a REAL event for a real activation (the placeholder
-        YYYYMM_Hazard_Location is rejected at run time).
-      label: Activation event
-      type: string?
-      default: 202601_KyleWx_US
-    download_date:
-      doc: 'Acquisition date to download: one YYYYMMDD, or a start end pair (space-separated).
-        Blank = the CLI''s recent-scenes default (~past 10 days). Pre-filled with
-        a known-good test date.'
-      label: Download date (optional)
-      type: string?
-      default: '20251231'
-    level:
-      doc: 'Sentinel-2 processing level to download: 2 = L2A (surface reflectance),
-        1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected
-        production.'
-      label: Processing level
-      type: string?
-      default: '1'
-    products:
-      doc: Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or
-        'all'.
-      label: Products
-      type: string?
-      default: true swir
-    we_nstd:
-      doc: Only used when 'we' is in products; ignored otherwise. One or more NIR
-        std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5
-        2. One water-extent COG is produced per value (filename carries NSTD_<value>).
-        Higher = higher NIR threshold = MORE pixels classified as water. Decimals
-        use a dot (1.5, not 1,5). Default 1.
-      label: Water-extent std devs
-      type: string?
-      default: '1'
-    merge:
-      doc: Mosaic scenes by date and product (-merge).
-      label: Merge by date/product
-      type: boolean?
-      default: true
-    mask:
-      doc: Generate and apply a cloud mask (-mask, L2A only).
-      label: Cloud mask
-      type: boolean?
-      default: false
+      default: arn:aws:secretsmanager:us-west-2:515966502221:secret:disasters/dps/probe-AAAAAA
   outputs:
     output:
       type: Directory
@@ -71,14 +31,7 @@ $graph:
     process:
       run: '#main'
       in:
-        tile: tile
-        activation_event: activation_event
-        download_date: download_date
-        level: level
-        products: products
-        we_nstd: we_nstd
-        merge: merge
-        mask: mask
+        secret_arn: secret_arn
       out:
       - outputs_result
 - class: CommandLineTool
@@ -89,59 +42,17 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 64
-      coresMin: 8
-      outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/sentinel2/run.sh
+      ramMin: 2
+      coresMin: 1
+      outdirMax: 1
+  baseCommand: /app/disasters-product-algorithms/dps/probe/run.sh
   inputs:
-    tile:
+    secret_arn:
       type: string?
       inputBinding:
         position: 1
-        prefix: --tile
-      default: T17RLN T17RLM
-    activation_event:
-      type: string?
-      inputBinding:
-        position: 2
-        prefix: --activation_event
-      default: 202601_KyleWx_US
-    download_date:
-      type: string?
-      inputBinding:
-        position: 3
-        prefix: --download_date
-      default: '20251231'
-    level:
-      type: string?
-      inputBinding:
-        position: 4
-        prefix: --level
-      default: '1'
-    products:
-      type: string?
-      inputBinding:
-        position: 5
-        prefix: --products
-      default: true swir
-    we_nstd:
-      type: string?
-      inputBinding:
-        position: 6
-        prefix: --we_nstd
-      default: '1'
-    merge:
-      type: boolean?
-      inputBinding:
-        position: 7
-        prefix: --merge
-      default: true
-    mask:
-      type: boolean?
-      inputBinding:
-        position: 8
-        prefix: --mask
-      default: false
+        prefix: --secret_arn
+      default: arn:aws:secretsmanager:us-west-2:515966502221:secret:disasters/dps/probe-AAAAAA
   outputs:
     outputs_result:
       outputBinding:
@@ -155,15 +66,14 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 1931cc60971a079114ba1cf355ff58a62229ff94
-s:dateCreated: 2026-08-11
+s:commitHash: 6d495afc282865bb78a1f532b87c98cee8959b2f
+s:dateCreated: 2026-08-12
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 download-from-Copernicus (creds via\
-  \ MAAP secrets, not job inputs); all inputs optional; image built in-workflow from\
-  \ dps/Dockerfile."
-s:keywords: sentinel-2, cog, disasters, flood, fire, ndvi, water-extent, copernicus
+s:releaseNotes: Temporary IAM/Secrets Manager reachability probe for the DPS worker
+  role; image built in-workflow from dps/Dockerfile.
+s:keywords: diagnostic, iam, secrets-manager, temporary
 $namespaces:
   s: https://schema.org/
 $schemas:

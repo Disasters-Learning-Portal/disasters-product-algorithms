@@ -498,6 +498,45 @@ watcher reports success for a registration that never happened. Confirm with
 the registration itself from the `{"title": "<name>", …, "status": "accepted"}` JSON
 the deploy step prints.
 
+### ⚠️ Re-registering an existing name+version returns HTTP 409 — and the run still says `success`
+
+Observed 2026-08-12 re-registering `blackmarble` after the `libgdal-hdf5` fix. The
+deploy step printed:
+
+```json
+{"type": "http://www.opengis.net/def/exceptions/ogcapi-processes-2/1.0/duplicated-process",
+ "title": "Duplicate process. Use PUT to modify existing process with process ID 44",
+ "status": 409, "additionalProperties": {"processID": 44}}
+```
+
+…and the run concluded **`success`**. MAAP rejects a POST of an
+`algorithm_name` + `algorithm_version` pair that is already deployed, and the action
+does not treat that 409 as a failure — so `gh run watch --exit-status` **and**
+`gh run view --json conclusion` both report success for a deployment that did not
+happen. This is a *second*, independent way a green run can mean "not registered"
+(the first is the silent cancellation above). **Confirm the presence of
+`"status": "accepted"`, never merely the absence of a red X.**
+
+What does still happen on a 409 — the saving grace and the trap in equal measure —
+is that the image is built and pushed **before** the register call, and the generated
+CWL pins the **mutable branch tag**
+`ghcr.io/<org>/disasters-product-algorithms:<branch>`, which is the same reference
+the already-deployed process carries. Therefore:
+
+- **Code-only changes** — anything baked into the image (`src/`, `dps/*/run.sh`,
+  `dps/environment.yml`) — are already under the tag the live process points at.
+  Whether a job picks them up depends on whether MAAP's ADES re-pulls a mutable tag
+  or reuses a locally cached image. **We have not confirmed which**; suspect it first
+  if a job behaves like the old code after a green re-register.
+- **CWL/schema changes** — `dps/ogc/<name>.yml` inputs, defaults, `run_command`,
+  `ram_min`/`cores_min`/`outdir_max` — do **NOT** land. The deployed process keeps
+  its old schema, and nothing in the log says so.
+
+To genuinely replace a deployment: delete it by its numeric `processID` (the 409 body
+hands you the ID — see "Deleting (undeploying) an algorithm") and dispatch again, or
+dispatch with a different `algorithm_version`, which registers a **new** process and
+leaves the old one runnable.
+
 ### The dev → deploy-algorithm sync needs a PAT to carry workflow-file changes
 
 `sync-deploy-algorithm.yml` pushes the merge with a checkout-persisted credential.

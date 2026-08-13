@@ -79,4 +79,7 @@ markers = [
     "gdal: tests requiring GDAL CLI tools",
     "rio_cogeo: tests requiring rio-cogeo CLI",
     "slow: slow integration tests",
+    # tests/e2e -- real network, real NASA Earthdata credentials, real downloads. Opt-in
+    # via DPS_E2E=1 + EARTHDATA_TOKEN; they skip otherwise, including in CI.
+    "e2e: end-to-end tests against live external services",
 ]

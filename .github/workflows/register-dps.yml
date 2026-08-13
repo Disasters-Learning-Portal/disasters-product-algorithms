@@ -54,8 +54,11 @@ on:
           - landsat
           - sentinel2
           - blackmarble
+          - blackmarble_noaa
           # TEMPORARY diagnostic (dps/probe/). Remove this entry, dps/ogc/probe.yml
           # and dps/probe/ once the Secrets Manager reachability question is answered.
+          # Lives ONLY on deploy-algorithm -- it is deliberately not on dev, which is
+          # why this file conflicts on every sync until the probe is retired.
           - probe
         default: capella
       register_to_maap:

@@ -58,6 +58,22 @@ validate_regex() {
   [[ "$2" =~ $3 ]] || die "$1 '$2' is invalid: expected $4."
 }
 
+# validate_date_not_before NAME VALUE MIN_YYYY-MM-DD -- VALUE must be a
+# well-formed YYYY-MM-DD on or after MIN. Used for satellite-mission start dates:
+# a date before a product's CMR TemporalExtents.BeginningDateTime returns ZERO
+# granules, which surfaces much later as an obscure downstream failure (or an
+# empty-success) rather than "that satellite wasn't flying yet". Lexicographic
+# string comparison is exact for zero-padded ISO dates, so no date parsing is
+# needed -- but the shape is checked first so a malformed value can't compare
+# "greater" by accident (e.g. "9/9/2020" > "2018-01-19" as a string).
+validate_date_not_before() {
+  local name="$1" value="$2" min="$3"
+  [[ "$value" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]] || \
+    die "$name '$value' is invalid: expected YYYY-MM-DD."
+  [[ "$value" > "$min" || "$value" == "$min" ]] || \
+    die "$name '$value' is before $min, the first date this product exists. Pick a later date."
+}
+
 # validate_granule NAME PATH "EXT1 EXT2 ..." -- exists, is a regular file, and
 # has one of the allowed extensions (case-insensitive).
 validate_granule() {

@@ -96,6 +96,14 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
 # obstore) all resolved. This is the only build-time gate on that install.
 #
+# `bm_noaa.py --self-check` is the gate on the NOAA-20 variant. That script retargets the
+# pinned upstream package from VNP46A2 to VJ146A2 by setting a MODULE CONSTANT
+# (blackmarble.acquire.viirs.BM_SHORT_NAME) -- upstream has no flag for it. If upstream
+# renames that constant or moves the HDF5 layer path, a naive patch would silently do
+# NOTHING: the job would download Suomi-NPP granules, publish them under a NOAA-20 product
+# name, and exit 0. --self-check applies the patch offline (no token, no network) and
+# fails if the contract moved, so that drift breaks THIS BUILD rather than an activation.
+#
 # The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
 # non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
 # does NOT pull in, and nothing above notices: `blackmarble --help` and every
@@ -114,6 +122,8 @@ RUN conda run --name disasters_dps process_capella --help >/dev/null \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
     && conda run --name disasters_dps python -c "import blackmarble" \
     && conda run --name disasters_dps blackmarble --help >/dev/null \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
     && conda run --name disasters_dps bash -c '\
         for drv in HDF5 JP2OpenJPEG; do \
           ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \

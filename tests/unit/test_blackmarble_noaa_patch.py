@@ -37,19 +37,60 @@ UPSTREAM_LAYER = (
 )
 
 
-def build_stub_blackmarble(short_name="VNP46A2", version="2", layer=UPSTREAM_LAYER):
+def _stub_process_landsat_date():
+    """Stands in for upstream's real `process_landsat_date` in the stub package.
+
+    bm_georef's contract guard greps this function's SOURCE (via `inspect.getsource`) for
+    the two call shapes it cares about -- the buggy band-path one it patches, and the
+    correct QA-path one that proves the file still has the structure the patch was derived
+    from. Both must therefore appear here LITERALLY. `inspect.getsource` reads this test
+    file, so string constants are enough; nothing is executed.
+    """
+    buggy_band_path = 'dst_transform=band_profile["transform"]'
+    correct_qa_path = "dst_transform=rasterio.windows.transform("
+    return buggy_band_path, correct_qa_path
+
+
+def build_stub_blackmarble(short_name="VNP46A2", version="2", layer=UPSTREAM_LAYER,
+                           margin_pixels=120):
     """A minimal stand-in for the parts of upstream bm_noaa.py touches.
 
     Deliberately mirrors upstream's real structure: `download_viirs` reads BM_SHORT_NAME as
     a MODULE GLOBAL at call time (it takes no product argument), and `create_metadata` is
     reached as an attribute of the `blackmarble.export` package -- those two facts are
     exactly what make the patch possible, so the stub must reproduce them.
+
+    `blackmarble.prepare.landsat` is here because bm_noaa.main() also applies the LANDSAT
+    GEOREFERENCING patch (bm_georef.py) -- that fix is platform-independent, but NOAA-20
+    enters through bm_noaa rather than bm_georef, so both patches compose in main(). The
+    stub mirrors the three module-level names bm_georef wraps or asserts on.
     """
     root = types.ModuleType("blackmarble")
     acquire = types.ModuleType("blackmarble.acquire")
     viirs = types.ModuleType("blackmarble.acquire.viirs")
     export = types.ModuleType("blackmarble.export")
     cli = types.ModuleType("blackmarble.cli")
+    prepare = types.ModuleType("blackmarble.prepare")
+    landsat = types.ModuleType("blackmarble.prepare.landsat")
+
+    landsat.MARGIN_PIXELS = margin_pixels
+    landsat.process_landsat_date = _stub_process_landsat_date
+
+    def reproject(*args, **kwargs):
+        landsat.reproject_calls.append(kwargs)
+        return None
+
+    def round_window_offsets_correctly(window, transform):
+        return window
+
+    def calculate_window_offsets(*args, **kwargs):
+        return None
+
+    landsat.reproject_calls = []
+    landsat.reproject = reproject
+    landsat.round_window_offsets_correctly = round_window_offsets_correctly
+    landsat.calculate_window_offsets = calculate_window_offsets
+    prepare.landsat = landsat
 
     if short_name is not None:
         viirs.BM_SHORT_NAME = short_name
@@ -89,12 +130,15 @@ def build_stub_blackmarble(short_name="VNP46A2", version="2", layer=UPSTREAM_LAY
     root.acquire = acquire
     root.export = export
     root.cli = cli
+    root.prepare = prepare
     return {
         "blackmarble": root,
         "blackmarble.acquire": acquire,
         "blackmarble.acquire.viirs": viirs,
         "blackmarble.export": export,
         "blackmarble.cli": cli,
+        "blackmarble.prepare": prepare,
+        "blackmarble.prepare.landsat": landsat,
     }
 
 
@@ -117,6 +161,7 @@ def stub(monkeypatch):
             viirs=modules["blackmarble.acquire.viirs"],
             export=modules["blackmarble.export"],
             cli=modules["blackmarble.cli"],
+            landsat=modules["blackmarble.prepare.landsat"],
         )
     return _install
 
@@ -330,6 +375,24 @@ def test_main_patches_before_running_the_upstream_cli(bm_noaa, stub):
     assert bm_noaa.main(["--bbox", "-122.55,37.69,-122.32,37.81"]) == 0
     assert bm.cli.app_calls[0]["short_name"] == "VJ146A2"
     assert bm.cli.app_calls[0]["version"] == "2"
+
+
+def test_main_also_applies_the_georef_patch(bm_noaa, stub):
+    """NOAA-20 enters through bm_noaa, NOT bm_georef, so main() must apply BOTH patches.
+
+    The Landsat misregistration is platform-independent: without this, every NOAA-20
+    product would still land ~3.6 km north-west of truth while the Suomi-NPP job -- which
+    goes through bm_georef.py directly -- came out correct. Nothing downstream could tell.
+    """
+    bm = stub()
+    assert bm_noaa.main(["--bbox", "-122.55,37.69,-122.32,37.81"]) == 0
+
+    assert getattr(bm.landsat, "_disasters_georef_patched", False), (
+        "bm_noaa.main() ran the pipeline without applying the georeferencing patch"
+    )
+    # ...and the VJ146A2 retarget still took effect: the two compose, neither shadows
+    # the other.
+    assert bm.cli.app_calls[0]["short_name"] == "VJ146A2"
 
 
 def test_main_forwards_argv_to_the_upstream_cli_untouched(bm_noaa, stub, monkeypatch):

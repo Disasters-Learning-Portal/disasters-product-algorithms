@@ -65,6 +65,21 @@ CURRENT_OGC = {"sentinel2", "umbra", "blackmarble", "blackmarble_noaa"}
 # silently excluded -- `pytest -ra` prints the list every run.
 STALE_UNREGISTERED_OGC = {"capella", "landsat", "list_dates", "satellogic"}
 
+# Configs that exist ONLY on the `deploy-algorithm` branch and are deliberately never
+# merged into `dev` (docs/DPS.md: deploy-algorithm stays ahead of dev by the generated
+# CWL and by whatever is being deployed ad hoc).
+#
+# They are named HERE, on dev, even though the files are not on dev -- because this test
+# file is what deploy-algorithm's CI runs. Without the entry, every pull request on that
+# branch fails with "dps/ogc/probe.yml is neither in CURRENT_OGC nor
+# STALE_UNREGISTERED_OGC" (observed on run 31713560843). The sets are plain name lists
+# and the tests iterate over files that actually exist, so naming a file that is absent
+# from dev is inert here.
+#
+# `probe` is the temporary IAM / Secrets-Manager reachability diagnostic in `dps/probe/`,
+# marked DELETE AFTER USE. Remove this entry when the probe itself is retired.
+DEPLOY_ONLY_OGC = {"probe"}
+
 # --- known defect in a LIVE config ---------------------------------------------------
 # dps/ogc/umbra.yml still declares an `apply_filter` boolean that dps/umbra/run.sh does
 # not parse: PR #44 removed the toggle (Umbra speckle filtering is always on) but the OGC
@@ -170,16 +185,29 @@ def live_job(request):
             f"dps/ogc/{job}.yml is stale and not registered (predates the sensor CLI "
             f"changes); only {sorted(CURRENT_OGC)} are live"
         )
+    if job in DEPLOY_ONLY_OGC:
+        pytest.skip(
+            f"dps/ogc/{job}.yml exists only on the deploy-algorithm branch and is not a "
+            f"product algorithm; it is not held to the dev/OGC parity rules"
+        )
     assert job in CURRENT_OGC, (
-        f"dps/ogc/{job}.yml is neither in CURRENT_OGC nor STALE_UNREGISTERED_OGC -- add "
-        f"it to one so its registration status is recorded"
+        f"dps/ogc/{job}.yml is in no registration-status set (CURRENT_OGC, "
+        f"STALE_UNREGISTERED_OGC, DEPLOY_ONLY_OGC) -- add it to one so its status is "
+        f"recorded"
     )
     return job
 
 
 def test_every_ogc_config_has_a_recorded_registration_status():
-    """A new OGC config must be classified, so it can't slip past the checks below."""
-    unclassified = set(OGC_CONFIGS) - CURRENT_OGC - STALE_UNREGISTERED_OGC
+    """A new OGC config must be classified, so it can't slip past the checks below.
+
+    This runs on `deploy-algorithm` too, which carries configs that are not on `dev` --
+    hence DEPLOY_ONLY_OGC. Leaving one out fails that branch's CI, not this one, which is
+    why the sets are maintained here rather than on the branch that owns the file.
+    """
+    unclassified = (
+        set(OGC_CONFIGS) - CURRENT_OGC - STALE_UNREGISTERED_OGC - DEPLOY_ONLY_OGC
+    )
     assert not unclassified, f"unclassified OGC configs: {sorted(unclassified)}"
 
 

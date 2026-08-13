@@ -104,6 +104,16 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # name, and exit 0. --self-check applies the patch offline (no token, no network) and
 # fails if the contract moved, so that drift breaks THIS BUILD rather than an activation.
 #
+# `bm_georef.py --self-check` is the same kind of gate on the LANDSAT GEOREFERENCING patch,
+# which applies to BOTH platforms. Upstream renders band tiles at mosaic coordinates into a
+# window-sized array and then pastes them at the window offset, applying that offset twice
+# and putting every product ~3.6 km north-west of truth. A stale patch fails silently in the
+# worst way -- the job publishes a misregistered COG that passes cog_validate, has a correct
+# transform, and lands over the right city, so nothing downstream notices. --self-check
+# validates upstream's shape AND pushes markers at known coordinates through the patched
+# path offline, asserting they land within 200 m (unpatched puts them ~3600 m out, or off
+# the grid entirely).
+#
 # The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
 # non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
 # does NOT pull in, and nothing above notices: `blackmarble --help` and every
@@ -124,6 +134,8 @@ RUN conda run --name disasters_dps process_capella --help >/dev/null \
     && conda run --name disasters_dps blackmarble --help >/dev/null \
     && conda run --name disasters_dps python \
         /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_georef.py --self-check \
     && conda run --name disasters_dps bash -c '\
         for drv in HDF5 JP2OpenJPEG; do \
           ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \

@@ -9,10 +9,11 @@ Two things are worth pinning, and neither is visible from a green job:
 
   1. the tags actually land (and ACTIVATION_EVENT is split into YEAR_MONTH/HAZARD/
      LOCATION), and
-  2. the raster itself is untouched. create_cog_with_metadata defaults
-     web_optimized=True, which REPROJECTS to EPSG:3857 -- a default that would silently
-     resample every nighttime-lights product if the call ever lost its explicit
-     web_optimized=False / target_crs=None.
+  2. the raster lands in EPSG:3857 WITHOUT moving. Upstream writes an unnamed per-bbox
+     Albers (crs.to_epsg() is None), which is what breaks veda-data-airflow's build_stac,
+     so the bake -- the one place the COG is re-created -- is where the product gets a
+     named projection. web_optimized must stay False: rio-cogeo's True also forces 3857
+     but snaps onto the WebMercatorQuad grid, changing resolution and extent.
 
 bake_event.py lives under dps/, which is not an installed package, so it is loaded by
 path the way a DPS worker runs it.
@@ -23,12 +24,43 @@ import os
 import numpy as np
 import pytest
 import rasterio
+from rasterio.crs import CRS
 from rasterio.transform import from_bounds
+from rasterio.warp import transform_bounds
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BAKE_EVENT_PY = os.path.join(REPO_ROOT, "dps", "blackmarble", "bake_event.py")
 
 EVENT = "202601_KyleWx_US"
+
+
+def assert_same_ground(src, before_bounds):
+    """The warp must change the PROJECTION without relocating the raster.
+
+    Reprojecting an Albers rectangle into Web Mercator yields a slightly curved
+    quadrilateral, so its axis-aligned bounds legitimately grow by up to about a pixel.
+    What must NOT happen is the footprint sliding -- so this checks the CENTRE (which a
+    shift moves and a bbox-expansion does not) and that no ground was dropped.
+    """
+    after = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+    px_deg = (after[2] - after[0]) / src.width
+
+    for axis, (got, want) in enumerate(zip(after, before_bounds)):
+        # grew outward, never inward: west/south may only decrease, east/north increase
+        slack = 2 * px_deg
+        if axis in (0, 1):
+            assert want - slack <= got <= want + 1e-9, f"footprint moved (axis {axis})"
+        else:
+            assert want - 1e-9 <= got <= want + slack, f"footprint moved (axis {axis})"
+
+    before_centre = ((before_bounds[0] + before_bounds[2]) / 2,
+                     (before_bounds[1] + before_bounds[3]) / 2)
+    after_centre = ((after[0] + after[2]) / 2, (after[1] + after[3]) / 2)
+    for got, want in zip(after_centre, before_centre):
+        assert abs(got - want) < px_deg, (
+            f"centre shifted by {abs(got - want):.6f} deg (> one {px_deg:.6f} deg pixel): "
+            f"{after_centre} vs {before_centre}"
+        )
 
 
 @pytest.fixture(scope="module")
@@ -53,10 +85,18 @@ def bm_output(request, tmp_path):
     path = product_dir / f"{product}_37_81N122_55W37_69N122_32W_2023-06-15_day.tif"
 
     data = np.linspace(0, 100, 64 * 64, dtype="float32").reshape(64, 64)
+    # The source CRS is the per-bbox ad-hoc Albers upstream actually emits -- unnamed, with
+    # no EPSG authority code -- NOT a tidy EPSG:4326. That is the input the bake has to cope
+    # with, and an EPSG-backed stand-in would not exercise the same code path.
+    albers = CRS.from_dict({
+        "proj": "aea", "lon_0": -122.435, "lat_0": 37.75,
+        "lat_1": 37.71, "lat_2": 37.79, "datum": "WGS84", "units": "m", "no_defs": None,
+    })
+    assert albers.to_epsg() is None
     with rasterio.open(
         str(path), "w", driver="GTiff", height=64, width=64, count=1,
-        dtype="float32", crs="EPSG:4326",
-        transform=from_bounds(-122.55, 37.69, -122.32, 37.81, 64, 64),
+        dtype="float32", crs=albers,
+        transform=from_bounds(-10170, -6660, 10140, 6690, 64, 64),
         tiled=True, blockxsize=64, blockysize=64, compress="zstd",
     ) as dst:
         dst.write(data, 1)
@@ -80,25 +120,108 @@ def test_bake_embeds_event_and_splits_it(bake_event, bm_output):
     assert "Black Marble" in tags["SOURCE"]
 
 
-def test_bake_leaves_the_raster_identical(bake_event, bm_output):
-    """Guards the web_optimized=False / target_crs=None / preserve_compression=True call.
+def test_bake_reprojects_to_web_mercator(bake_event, bm_output):
+    """Guards the target_crs=EPSG:3857 / web_optimized=False / preserve_compression=True call.
 
-    If any of those regressed to the function's defaults, the product would be silently
-    reprojected to EPSG:3857 and resampled.
+    Upstream emits an unnamed per-bbox Albers with no EPSG code, which is what breaks
+    veda-data-airflow's build_stac (rio_stac.get_dataset_geom). The bake is the one place
+    the COG is re-created, so it is where the product gets a NAMED projection.
+
+    web_optimized must stay False: rio-cogeo's True ALSO forces 3857, but by snapping onto
+    the WebMercatorQuad grid, which changes resolution and extent.
     """
-    _out_home, path, original = bm_output
+    _out_home, path, _original = bm_output
     with rasterio.open(str(path)) as src:
-        before = (src.crs.to_string(), src.transform, src.width, src.height,
-                  src.profile.get("compress"))
+        before_bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+        before_compress = src.profile.get("compress")
 
     bake_event.bake(str(path), EVENT)
 
     with rasterio.open(str(path)) as src:
-        assert src.crs.to_string() == before[0]      # NOT reprojected to EPSG:3857
-        assert src.transform == before[1]
-        assert (src.width, src.height) == before[2:4]
-        assert src.profile.get("compress") == before[4]
-        np.testing.assert_array_equal(src.read(1), original)
+        assert src.crs.to_epsg() == 3857
+        assert src.profile.get("compress") == before_compress  # preserve_compression=True
+        assert_same_ground(src, before_bounds)
+        assert src.read(1).any(), "reprojection produced an empty raster"
+
+
+# Upstream's provenance block, as it appears on a real product (see the tags on
+# tests/fixtures/blackmarble_sf_misregistered_crop.tif).
+UPSTREAM_TAGS = {
+    "bbox": "-122.55,37.69,-122.32,37.81",
+    "crs": "+proj=aea +lon_0=-122.435 +lat_0=37.75 +datum=WGS84 +units=m",
+    "producer": "Black Marble Pipeline",
+    "resolution": "30.0",
+    "data_sources": "{'viirs': {'files': ['VNP46A2.A2023166.h05v05.002.tif']}}",
+    "processing_steps": "cloud_masking,spatial_reprojection,colormap_application",
+    "indices": "ndvi,ndwi,ndui",
+    "creation_date": "2026-08-12T15:36:53.625633",
+}
+
+
+def test_bake_preserves_upstream_provenance(bake_event, bm_output):
+    """Reprojecting drops EVERY source tag, so they must be re-supplied explicitly.
+
+    With target_crs set, create_cog_with_metadata wraps the source in a WarpedVRT, which
+    carries no dataset tags -- cog_translate then has nothing to copy. Without the
+    carry-forward this silently discards `data_sources`, the record of which VIIRS and
+    Landsat granules the product was actually built from. That is the one tag you cannot
+    reconstruct after the fact.
+    """
+    _out_home, path, _ = bm_output
+    with rasterio.open(str(path), "r+") as src:
+        src.update_tags(**UPSTREAM_TAGS)
+
+    bake_event.bake(str(path), EVENT)
+
+    with rasterio.open(str(path)) as src:
+        tags = src.tags()
+
+    for key in ("bbox", "producer", "data_sources", "processing_steps", "indices",
+                "creation_date"):
+        assert tags.get(key) == UPSTREAM_TAGS[key], f"{key} was lost by the reprojection"
+    assert "VNP46A2" in tags["data_sources"]
+
+
+def test_bake_rewrites_the_tags_the_warp_invalidates(bake_event, bm_output):
+    """`crs` and `resolution` describe the PRE-warp grid, so copying them verbatim would
+    make the file describe a projection and a pixel size it does not have."""
+    _out_home, path, _ = bm_output
+    with rasterio.open(str(path), "r+") as src:
+        src.update_tags(**UPSTREAM_TAGS)
+
+    bake_event.bake(str(path), EVENT)
+
+    with rasterio.open(str(path)) as src:
+        tags = src.tags()
+        actual_res = abs(src.transform.a)
+
+    assert tags["crs"] == "EPSG:3857"
+    assert tags["crs"] != UPSTREAM_TAGS["crs"]
+    # Web Mercator metres are not ground metres -- the pixel grows by ~1/cos(lat).
+    assert float(tags["resolution"]) != float(UPSTREAM_TAGS["resolution"])
+    assert abs(float(tags["resolution"]) - actual_res) < 0.01, (
+        "the resolution tag must describe the raster we actually wrote"
+    )
+
+
+def test_bake_records_the_original_projection(bake_event, bm_output):
+    """The per-bbox ad-hoc Albers has no EPSG code, so once the raster is in Web Mercator
+    it is unrecoverable from anything else in the file. Keep it, or the native-grid product
+    cannot be reconstructed and the resampling becomes invisible."""
+    _out_home, path, _ = bm_output
+    with rasterio.open(str(path)) as src:
+        native_wkt = src.crs.to_wkt()
+
+    bake_event.bake(str(path), EVENT)
+
+    with rasterio.open(str(path)) as src:
+        tags = src.tags()
+        assert src.crs.to_epsg() == 3857
+
+    assert tags["SOURCE_CRS"] == native_wkt
+    assert CRS.from_wkt(tags["SOURCE_CRS"]).to_epsg() is None
+    assert "aea" in tags["SOURCE_CRS_PROJ4"]
+    assert "lon_0=-122.435" in tags["SOURCE_CRS_PROJ4"]
 
 
 def test_main_walks_the_tree_and_bakes_every_tif(bake_event, bm_output, monkeypatch):
@@ -196,20 +319,19 @@ def test_bake_rejects_an_unknown_platform(bake_event, bm_output):
         bake_event.bake(str(path), EVENT, "noaa-20")
 
 
-def test_bake_still_leaves_the_raster_identical_under_noaa20(bake_event, bm_output):
-    """The web_optimized=False / target_crs=None guard is per-call, so re-assert it on the
-    platform-aware path: a regression there silently reprojects every NOAA-20 product."""
-    _out_home, path, original = bm_output
+def test_bake_still_reprojects_under_noaa20(bake_event, bm_output):
+    """The target_crs / web_optimized arguments are per-call, so re-assert them on the
+    platform-aware path: a regression there leaves every NOAA-20 product in the unnamed
+    Albers that build_stac cannot ingest."""
+    _out_home, path, _original = bm_output
     with rasterio.open(str(path)) as src:
-        before = (src.crs.to_string(), src.transform, src.width, src.height)
+        before_bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
 
     bake_event.bake(str(path), EVENT, "noaa20")
 
     with rasterio.open(str(path)) as src:
-        assert src.crs.to_string() == before[0]
-        assert src.transform == before[1]
-        assert (src.width, src.height) == before[2:4]
-        np.testing.assert_array_equal(src.read(1), original)
+        assert src.crs.to_epsg() == 3857
+        assert_same_ground(src, before_bounds)
 
 
 def test_main_passes_the_platform_through(bake_event, bm_output, monkeypatch):

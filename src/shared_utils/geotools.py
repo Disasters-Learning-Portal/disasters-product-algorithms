@@ -85,6 +85,16 @@ def dump_geotiff_byte(filename, arr, projref, in_geo):
   return filename
 
 def dump_geotiff_rgb(filename, r, g, b, projref, in_geo, alpha=None):
+  """Write an 8-bit RGB GeoTIFF, optionally with a 4th alpha band.
+
+  alpha=None (default) writes the legacy 3-band output unchanged. Pass a
+  uint8 array (0 = transparent / nodata, 255 = valid) to get a 4-band RGBA
+  whose band 4 is tagged GCI_AlphaBand. Use alpha instead of a scalar nodata
+  whenever 0 is a legitimate sample — for an 8-bit composite it always is.
+  The caller must then pass nodata=False to convert_to_cog: a scalar nodata
+  declared alongside an alpha band shadows it (rasterio NodataShadowWarning)
+  and masks real black pixels.
+  """
   # Write a GeoTIFF
   format = 'GTiff'
   rows, cols = np.shape(r)

@@ -365,6 +365,14 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
 
+    # NaN means nodata (load_reflectance_band does arr[arr == 0] = np.nan).
+    # Take the mask from the SOURCE bands, not from the post-normalize stack:
+    # normalize_band returns np.zeros_like(band) for a degenerate band (no
+    # finite samples, or hi <= lo), which silently destroys the NaN and would
+    # leave the whole scene opaque.
+    valid_mask = np.isfinite(red) & np.isfinite(green) & np.isfinite(blue)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
     if visualize:
         r = normalize_band(red)
         g = normalize_band(green)
@@ -373,11 +381,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     else:
         rgb = np.clip(np.dstack([red, green, blue]), 0, 1)
 
-    # NaN here means nodata (from load_reflectance_band's arr[arr==0]=np.nan).
-    # Capture it BEFORE the uint8 cast destroys the distinction.
-    valid_mask = np.all(np.isfinite(rgb), axis=-1)
-    alpha = (valid_mask * 255).astype(np.uint8)
-
+    # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
     out_img = np.nan_to_num(rgb, nan=0.0)
     out_img = (out_img * 255).astype(np.uint8)
 
@@ -401,6 +405,10 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
 
+    # Mask from the SOURCE bands — see genTrueColor for why not from `rgb`.
+    valid_mask = np.isfinite(nir) & np.isfinite(red) & np.isfinite(green)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
     if visualize:
         r = normalize_band(nir)
         g = normalize_band(red)
@@ -409,11 +417,7 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     else:
         rgb = np.clip(np.dstack([nir, red, green]), 0, 1)
 
-    # NaN here means nodata (from load_reflectance_band's arr[arr==0]=np.nan).
-    # Capture it BEFORE the uint8 cast destroys the distinction.
-    valid_mask = np.all(np.isfinite(rgb), axis=-1)
-    alpha = (valid_mask * 255).astype(np.uint8)
-
+    # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
     out_img = np.nan_to_num(rgb, nan=0.0)
     out_img = (out_img * 255).astype(np.uint8)
 

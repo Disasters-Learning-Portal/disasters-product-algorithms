@@ -13,6 +13,16 @@ from satellogic.satellogic_v2 import (
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
 
+# COG parameters are hardcoded, not CLI flags (ticket #320; same pattern as
+# process_capella.py). Level 9 rather than the library default 22: the outputs
+# are 8-bit RGB composites and float32 indices where 22 costs a large share of
+# the DPS job's wall-clock for a marginal size win.
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 9
+
+# Native projection — no warp. See CLAUDE.md "Critical Constraints".
+DST_CRS = None
+
 
 def group_satellogic_tifs(tifs):
     """Group each image tif with its cloud/visual companions.
@@ -134,6 +144,10 @@ def main():
             outfile = None
     
             if args.product == "truecolor":
+                # False (not 0) — the composite carries its own alpha band, and
+                # 0 is a legitimate 8-bit sample. Declaring a scalar nodata
+                # alongside an alpha band makes the nodata SHADOW the alpha
+                # (rasterio NodataShadowWarning), masking real black pixels.
                 nodata_setting = False
                 outfile = genTrueColor(
                     scene_tifs,
@@ -144,6 +158,7 @@ def main():
                 )
     
             elif args.product == "colorir":
+                # See the truecolor branch — alpha band, so no scalar nodata.
                 nodata_setting = False
                 outfile = gencolorIR(
                     scene_tifs,
@@ -186,9 +201,9 @@ def main():
                 cog_path = convert_to_cog(
                     outfile,
                     nodata=nodata_setting,
-                    dst_crs=None,
-                    compression="ZSTD",
-                    compression_level=1,
+                    dst_crs=DST_CRS,
+                    compression=COMPRESSION,
+                    compression_level=COMPRESSION_LEVEL,
                     metadata=activation_metadata,
                 )
     

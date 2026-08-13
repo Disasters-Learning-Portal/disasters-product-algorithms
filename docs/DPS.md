@@ -384,8 +384,9 @@ CLI, so bash does not re-check it. Assertions live in
   **Sentinel-2**, which hardcodes `Copernicus` (see ³).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
   (EPSG:3857 is NOT required for VEDA `build_stac`.)
-- **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/22
-  compression, and per-product nodata (composites `0`, indices `-9999`)** — those
+- **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/9
+  compression, and per-product nodata (composites: an ALPHA band and NO declared
+  nodata; indices `-9999`)** — those
   inputs were removed, so their validators don't run for it. It adds `filter_size`
   (Lee filter on indices, `{3,5,7}`, default 5) and accepts a comma-separated
   `--date` (multi-date).

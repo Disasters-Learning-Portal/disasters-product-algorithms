@@ -266,7 +266,7 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
 def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
-    nodata: Optional[Union[int, float]] = None,
+    nodata: Optional[Union[int, float, bool]] = None,
     dst_crs: Optional[str] = 'EPSG:3857',
     resampling_method: Optional[str] = None,
     clip_to_webmerc: Optional[bool] = None,
@@ -284,7 +284,15 @@ def convert_to_cog(
     Args:
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
-        nodata: No-data value (if None, auto-detects from file or data type)
+        nodata: No-data value. `None` (default) auto-detects from the file's
+            existing tag, else from the data type. A number is used as-is,
+            after `validate_nodata_for_dtype`. **`False` is an explicit
+            opt-out**: declare no nodata at all, because the input already
+            carries an alpha or mask band. Required for inputs written by
+            `geotools.dump_geotiff_rgb(..., alpha=...)` — a scalar nodata
+            declared alongside an alpha band shadows it (rasterio raises
+            NodataShadowWarning, rio-cogeo warns "Nodata value will be
+            prioritized") and masks legitimately-black pixels.
         dst_crs: Target CRS (default: 'EPSG:3857', None to preserve native CRS).
             Web Mercator avoids the WGS 84 ensemble / lat-first axis bug that
             breaks rio_stac.get_dataset_geom in veda-data-airflow build_stac.
@@ -369,6 +377,8 @@ def convert_to_cog(
 
     # Read input file metadata and check if reprojection is needed
     warped_file = None
+    nodata_stripped_vrt = None
+    strip_source_nodata = False
     input_for_cog = input_tif
 
     from shared_utils.reprojection import (
@@ -380,8 +390,41 @@ def convert_to_cog(
         existing_nodata = src.nodata
         src_crs = src.crs
 
-        # Determine no-data value
-        if nodata is None:
+        # Determine no-data value.
+        #
+        # `bool` is checked BEFORE the numeric branch and with isinstance, not
+        # `is False`, for two reasons:
+        #   - bool subclasses int, so a bare `True`/`False` would otherwise sail
+        #     through validate_nodata_for_dtype as 1/0 and silently declare the
+        #     wrong sentinel.
+        #   - np.bool_ is NOT the `False` singleton (`np.False_ is False` is
+        #     False), so an `is False` check would miss a numpy-derived flag.
+        if isinstance(nodata, (bool, np.bool_)):
+            if nodata:
+                raise ValueError(
+                    "nodata=True is not a no-data value. Use False to declare "
+                    "no nodata (for inputs that carry their own alpha/mask "
+                    "band), None to auto-detect from the file or dtype, or a "
+                    "number for an explicit sentinel."
+                )
+            # Explicit opt-out: caller's file already carries an alpha/mask band
+            # (e.g. RGB composites where 0 is a legitimate data value, not nodata).
+            # Declaring a scalar nodata alongside an alpha band SHADOWS it
+            # (rasterio NodataShadowWarning) — an RGB read then masks every
+            # legitimately-black pixel. Leaving nodata unset lets consumers use
+            # the mask the file already carries.
+            nodata = None
+            # Passing nodata=None downstream is NOT enough on its own: both
+            # `rio cogeo create` and cog_translate fall back to the source's
+            # own nodata tag when none is supplied, so an opt-out on a file
+            # that already declares one would be silently ignored. Strip it
+            # first (see the VRT step below).
+            strip_source_nodata = existing_nodata is not None
+            if not quiet:
+                print("  No nodata value will be set; preserving existing alpha/mask band.")
+                if strip_source_nodata:
+                    print(f"  Dropping the source's existing nodata tag ({existing_nodata}).")
+        elif nodata is None:
             from shared_utils.compression import is_extreme_float_nodata
             if existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
                 # Known FLT_MAX corruption pattern — remap before it
@@ -445,6 +488,33 @@ def convert_to_cog(
     # Default overview resampling (may be overridden during reprojection)
     overview_resampling = 'average'
 
+    # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
+    # already declares one. A VRT is a lazy XML header — no pixel copy — so this
+    # costs nothing but makes the opt-out actually stick: without it both
+    # `rio cogeo create` and cog_translate re-read the source's nodata tag.
+    if strip_source_nodata:
+        nodata_stripped_vrt = os.path.join(
+            tempfile.gettempdir(), os.path.basename(input_tif) + '.nonodata.tmp.vrt'
+        )
+        translate_cmd = [
+            'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
+            input_tif, nodata_stripped_vrt,
+        ]
+        try:
+            subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
+            )
+        # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
+        # at the real file because its BASENAME is load-bearing downstream —
+        # resolve_metadata() parses the activation event out of it, and
+        # determine_resampling_method() reads it.
+        input_for_cog = nodata_stripped_vrt
+
+    # Pixel source for the warp step (the nodata-stripped VRT when opting out).
+    warp_source = input_for_cog
+
     # Step 1: Reproject if needed (warp to dst_crs)
     if needs_reprojection:
         warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
@@ -490,7 +560,7 @@ def convert_to_cog(
             warp_cmd.extend(['-srcnodata', str(nodata)])
             warp_cmd.extend(['-dstnodata', str(nodata)])
 
-        warp_cmd.extend([input_tif, warped_file])
+        warp_cmd.extend([warp_source, warped_file])
 
         try:
             result = subprocess.run(
@@ -608,6 +678,8 @@ def convert_to_cog(
         # Clean up warped temp file if it was created
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
 
         if not quiet:
             print(f"  ✓ COG created: {os.path.basename(output_cog)}")
@@ -622,12 +694,16 @@ def convert_to_cog(
             os.remove(temp_output)
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
         raise RuntimeError(error_msg)
     except Exception:
         if os.path.exists(temp_output):
             os.remove(temp_output)
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
         raise
 
 

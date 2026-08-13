@@ -978,11 +978,139 @@ guard upstream (`os.getenv("EARTHDATA_TOKEN") or ""`) would retire this note.
 
 **Inputs** (all optional in the OGC descriptor; run.sh validates after parsing):
 `bbox` (WGS84, lat span ≥ 0.05° — enforced by `validate_bbox` in `dps/_validate.sh`),
-`activation_event`, `date` (YYYY-MM-DD), `config` (`fast`|`default`|`high_quality`),
-`osm_source` (`overpass`|`layercake`), `wgs84` (also emit an EPSG:4326 COG), `basename`
-(output filename stem), `earthdata_secret_name`. Output publishes to
+`activation_event`, `date` (YYYY-MM-DD, on or after the platform's mission start),
+`config` (`fast`|`default`|`high_quality`), `osm_source` (`overpass`|`layercake`),
+`wgs84` (also emit an EPSG:4326 COG), `earthdata_secret_name`. There is **no `basename`**
+input (see above). Output publishes to
 `nasa-disasters-staging/dps_output/<activation_event>/` via the shared `_finalize.sh`
 (same locked staging path as every other algorithm).
+
+## Black Marble on NOAA-20 (VJ146A2)
+
+`disasters-blackmarble-noaa-process` (`dps/blackmarble_noaa/`, OGC descriptor
+`dps/ogc/blackmarble_noaa.yml`) is the same pipeline running on the **NOAA-20 / JPSS-1**
+nighttime-lights product **VJ146A2** instead of Suomi-NPP's VNP46A2.
+
+**Why it exists.** [Suomi-NPP data product delivery ceases 2026-11-01][snpp-alert],
+taking VNP46A2 with it (disasters-portal#365). The archive stays readable — a historical
+activation still runs on the Suomi-NPP job — but there is no forward stream after that
+date. VJ146A2 is unaffected.
+
+[snpp-alert]: https://www.earthdata.nasa.gov/data/alerts-outages/suomi-npp-data-product-delivery-cease-november-1-2026
+
+**Why a product swap is sufficient.** The two collections are structural twins, verified
+against CMR and against real granules (`tests/e2e/test_blackmarble_noaa_e2e.py`):
+
+| | VNP46A2 | VJ146A2 |
+|---|---|---|
+| CMR concept-id | `C3365931269-LAADS` | `C3370789118-LAADS` |
+| Version | `2` | `2` |
+| Temporal start | 2012-01-19 | **2018-01-19** |
+| Tiling / grid | h`__`v`__`, 2400×2400 | identical |
+| NTL layer | `HDFEOS/GRIDS/VIIRS_Grid_DNB_2d/Data_Fields/Gap_Filled_DNB_BRDF-Corrected_NTL` | identical |
+
+### How it is wired
+
+**One engine, two entry points.** `dps/blackmarble/run.sh` is shared and selects the
+platform from the `BM_PLATFORM` environment variable (`snpp` default, `noaa20`);
+`dps/blackmarble_noaa/run.sh` is a four-line wrapper that exports `BM_PLATFORM=noaa20`
+and `exec`s it. Everything that differs lives in the sourced **`dps/blackmarble/platform.sh`**
+table — product token, product short name, date floor, `SOURCE` string — split out so the
+test suite can assert it, the same rationale as `naming.sh` and `_validate.sh`.
+
+**`BM_PLATFORM` is not a job input.** Which satellite ran is a property of the algorithm
+you submitted, not a checkbox to get wrong at submit time. Both algorithms expose an
+*identical* input form.
+
+**The retarget itself: `dps/blackmarble/bm_noaa.py`.** Upstream **hardcodes** the product
+(`BM_SHORT_NAME = "VNP46A2"` in `blackmarble/acquire/viirs.py`, and a literal
+`"product": "VNP46A2"` in `pipeline.py`'s metadata dict) and exposes **no** flag, config
+field or env var for it. `bm_noaa.py` sets the module constant and then invokes upstream's
+own typer app, unmodified — so every CLI option, default and behavior is still upstream's.
+It is *not* a fork: the package stays pip-installed from the SHA pin in
+`dps/environment.yml` (re-vendoring it is what the repo deliberately undid — see "How it's
+installed" above). When NASA-IMPACT adds a real product option, delete the shim and pass
+their flag.
+
+> **The failure mode this guards is a no-op, not a crash.** If upstream renamed the
+> constant, a naive patch would silently keep downloading Suomi-NPP granules, write them
+> into `hdnightlightsnoaa20/`, tag them `VJ146A2 (VIIRS/NOAA-20)`, publish, and exit 0 —
+> undetectable downstream. So `apply_noaa20_patch()` validates upstream's shape first and
+> raises, and `bm_noaa.py --self-check` runs that validation offline in **dps/Dockerfile's
+> build-time smoke gate**. Drift breaks an image build, never an activation.
+
+### Outputs
+
+Its own product folder and stem, so a NOAA-20 run **never overwrites** a Suomi-NPP run for
+the same event and date:
+
+```
+dps_output/<event>/<YYYYMMDD>/hdnightlights/hdnightlights_<NW><SE>_<date>_day.tif
+dps_output/<event>/<YYYYMMDD>/hdnightlightsnoaa20/hdnightlightsnoaa20_<NW><SE>_<date>_day.tif
+```
+
+Every COG carries `VIIRS_PRODUCT` (`VNP46A2`/`VJ146A2`) and `VIIRS_PLATFORM`
+(`Suomi-NPP`/`NOAA-20`) alongside the usual activation-event tags — which satellite
+produced a raster is **not** recoverable from its pixels, so it is recorded explicitly.
+
+### Guard rails
+
+- **Date floor.** `date` must be on or after the platform's mission start (2018-01-19 for
+  NOAA-20, 2012-01-19 for Suomi-NPP), via `validate_date_not_before` in `dps/_validate.sh`.
+  An earlier date returns *zero* granules from Earthdata, which otherwise surfaces long
+  after a successful login as an obscure failure.
+- **Sunset warning.** The Suomi-NPP job **warns** (never fails — the archive is still
+  served) when `date` is past 2026-11-01, and names this algorithm as the alternative.
+- **Token escape hatch.** If `EARTHDATA_TOKEN` is already in the environment, run.sh uses
+  it and skips the MAAP secret lookup. A DPS job never sets it (MAAP passes named CWL
+  flags, not env), so this is inert in production — it exists so the pipeline can be run
+  end to end outside MAAP. The token is still never a job input, and never echoed.
+
+### Testing it
+
+```bash
+# offline: shim logic, platform table, naming, tags, config consistency, run.sh
+# orchestration (conda stubbed)
+python -m pytest tests/unit tests/integration
+
+# the real pinned upstream still has the shape the patch reaches into
+conda run -n disasters_dps python dps/blackmarble/bm_noaa.py --self-check
+conda run -n disasters_dps python -m pytest tests/unit/test_blackmarble_noaa_upstream_contract.py
+
+# VIIRS layer, end to end against live NASA Earthdata (needs ONLY a token; minutes)
+export EARTHDATA_TOKEN='<token>'          # environment only — never a file in this repo
+DPS_E2E=1 conda run -n disasters_dps python -m pytest -v -ra -m 'not slow' tests/e2e/
+
+# whole pipeline, both run.sh scripts (ALSO needs ambient AWS credentials — see below)
+DPS_E2E=1 conda run -n disasters_dps python -m pytest -v -ra tests/e2e/
+```
+
+`tests/e2e` downloads real VJ146A2 *and* VNP46A2 granules, compares their HDF5 structure,
+runs both `run.sh` scripts for one bbox/date, and asserts the finished COGs are
+**structurally identical** while their **pixels differ** — the pair of checks that proves
+the swap both worked and changed nothing it shouldn't. It needs the `disasters_dps` env
+(upstream `blackmarble` + the `libgdal-hdf5` driver plugin) and skips everywhere else,
+including CI. `DPS_DRY_RUN=1` is what lets it run a real `run.sh` without publishing to
+`nasa-disasters-staging` or deleting the products it then inspects.
+
+> **The `slow` (whole-pipeline) tier needs AWS credentials, the rest does not.** Black
+> Marble fuses VIIRS with Landsat and OSM, and Landsat comes from the **requester-pays**
+> bucket `s3://usgs-landsat`, which upstream reads via `obstore`. On a machine with no
+> ambient AWS credentials, obstore falls back to the EC2 instance metadata service
+> (`169.254.169.254`) and the job fails there — *after* the VIIRS download has already
+> succeeded. The `job_runs` fixture recognises that exact signature and **skips with an
+> explanation** rather than reporting it as a code failure; run that tier on a DPS worker
+> or the MAAP hub. The VIIRS-layer tier (`-m 'not slow'`) covers everything the NOAA-20
+> change actually touches and needs only `EARTHDATA_TOKEN`.
+
+### Registering it
+
+New name, so the first registration cannot 409. Dispatch
+`.github/workflows/register-dps.yml` from the unprotected `deploy-algorithm` branch with
+`algorithm: blackmarble_noaa` and `register_to_maap` checked, then confirm the deploy step
+reported `{"status": "accepted"}` — a green run alone is not proof (see "Re-registering an
+existing name+version returns HTTP 409"). The Suomi-NPP algorithm's **schema is unchanged**
+by this work, so `disasters-blackmarble-process` does *not* need re-registering.
 
 ## Deploying a code change (push → re-register)
 

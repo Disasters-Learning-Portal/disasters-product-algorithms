@@ -209,14 +209,23 @@ bm_args=(
 )
 [[ "${WGS84}" == "true" ]] && bm_args+=( --wgs84 )
 
-# WHICH ENTRY POINT: Suomi-NPP runs upstream's console script directly. NOAA-20 runs it
-# through dps/blackmarble/bm_noaa.py, which sets the VIIRS product to VJ146A2 and then
-# invokes that SAME upstream CLI -- upstream hardcodes VNP46A2 and exposes no flag for it.
+# WHICH ENTRY POINT: NEITHER platform runs upstream's `blackmarble` console script directly
+# any more -- both go through a shim that monkeypatches upstream first, then invokes that
+# SAME upstream CLI unmodified.
+#
+#   bm_georef.py  BOTH platforms. Fixes the Landsat mosaic georeferencing: upstream renders
+#                 band tiles at MOSAIC coordinates into a WINDOW-sized array and then pastes
+#                 them at the window offset, applying that offset twice, which puts every
+#                 product ~3.6 km north-west of truth. See the module docstring.
+#   bm_noaa.py    NOAA-20 only. Sets the VIIRS product to VJ146A2 -- upstream hardcodes
+#                 VNP46A2 and exposes no flag for it. It applies the georef patch too, so
+#                 the two shims compose rather than one shadowing the other.
+#
 # The flags in bm_args are identical either way; only the product being downloaded differs.
 if [[ "${BM_PLATFORM}" == "noaa20" ]]; then
   conda run --live-stream --name disasters_dps python "${basedir}/bm_noaa.py" "${bm_args[@]}"
 else
-  conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
+  conda run --live-stream --name disasters_dps python "${basedir}/bm_georef.py" "${bm_args[@]}"
 fi
 
 # Fail fast if the pipeline produced no COG (rather than silently "succeeding").

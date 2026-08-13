@@ -203,6 +203,23 @@ def main(argv=None):
     if '--self-check' in argv:
         return self_check()
 
+    # The Landsat georeferencing fix is platform-independent -- it applies to Suomi-NPP and
+    # NOAA-20 alike -- but NOAA-20 enters through THIS module rather than bm_georef.py, so
+    # apply it here too. Both patches are idempotent, and they touch disjoint upstream
+    # symbols (viirs.BM_SHORT_NAME / export.create_metadata vs prepare.landsat.reproject),
+    # so the order does not matter.
+    #
+    # dps/ is not an installed package, so import bm_georef by its directory rather than by
+    # package path. run.sh invokes this file as a script (which already puts its directory on
+    # sys.path[0]), but the test suite loads it via importlib from an arbitrary cwd.
+    import os
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    from bm_georef import apply_georef_patch
+
+    apply_georef_patch()
     apply_noaa20_patch()
 
     from blackmarble.cli import app

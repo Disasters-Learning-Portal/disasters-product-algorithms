@@ -74,9 +74,24 @@ if [[ "${cmd}" == "python" && "${1:-}" == *bake_event.py ]]; then
   exec "${TEST_PYTHON}" "$@"
 fi
 
-# --- the Black Marble pipeline (upstream CLI, or our NOAA entry point) ---
-if [[ "${cmd}" == "blackmarble" || ( "${cmd}" == "python" && "${1:-}" == *bm_noaa.py ) ]]; then
-  if [[ "${cmd}" == "python" ]]; then entry="bm_noaa"; shift; else entry="blackmarble"; fi
+# --- the Black Marble pipeline (one of our two shim entry points) ---
+# NEITHER platform calls the bare `blackmarble` console script any more: both go through a
+# shim that monkeypatches upstream first (bm_georef.py for the Landsat georeferencing fix on
+# both platforms, bm_noaa.py which additionally retargets to VJ146A2). The bare name is still
+# matched here so that a regression to it produces a readable assertion failure rather than
+# "stub: unhandled command".
+if [[ "${cmd}" == "blackmarble" \
+      || ( "${cmd}" == "python" && "${1:-}" == *bm_noaa.py ) \
+      || ( "${cmd}" == "python" && "${1:-}" == *bm_georef.py ) ]]; then
+  if [[ "${cmd}" == "python" ]]; then
+    case "${1}" in
+      *bm_noaa.py)   entry="bm_noaa" ;;
+      *bm_georef.py) entry="bm_georef" ;;
+    esac
+    shift
+  else
+    entry="blackmarble"
+  fi
   printf '%s\n' "${entry} $*" >> "${PIPELINE_LOG}"
 
   if [[ "${PIPELINE_PRODUCES_NOTHING:-0}" == "1" ]]; then exit 0; fi
@@ -249,11 +264,20 @@ def test_noaa_job_runs_the_vj146a2_entry_point(run_job):
     assert result.pipeline_calls[0].startswith("bm_noaa ")
 
 
-def test_snpp_job_still_runs_the_upstream_console_script(run_job):
-    """The existing algorithm's behavior must be unchanged by the platform refactor."""
+def test_snpp_job_runs_the_georef_entry_point(run_job):
+    """Suomi-NPP must go through bm_georef.py, NOT the bare `blackmarble` console script.
+
+    Upstream misplaces the Landsat mosaic by ~3.6 km north-west; calling the console script
+    directly would skip the patch and publish a misregistered product that still passes
+    cog_validate, still has a correct transform, and still lands over the right city -- so
+    nothing downstream would catch it. See dps/blackmarble/bm_georef.py.
+    """
     result = run_job(SNPP_RUN_SH, **defaults())
     assert result.ok, result.output
-    assert result.pipeline_calls[0].startswith("blackmarble ")
+    assert len(result.pipeline_calls) == 1
+    assert result.pipeline_calls[0].startswith("bm_georef "), (
+        f"expected the georef shim, got {result.pipeline_calls[0]!r}"
+    )
 
 
 def test_both_jobs_pass_identical_pipeline_flags(run_job):

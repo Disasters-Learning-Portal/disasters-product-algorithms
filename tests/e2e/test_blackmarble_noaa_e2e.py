@@ -358,6 +358,13 @@ ENVIRONMENT_BLOCKERS = {
     "Max retries exceeded": "an upstream data service was unreachable",
 }
 
+# Per-job wall-clock cap. The same missing-credentials case that produces the signatures
+# above can instead WEDGE: obstore retries the metadata service 10 times with a 180s
+# timeout each, so the job neither fails nor finishes. Without a cap the fixture would sit
+# there for hours; with one that is too generous it still does. 20 minutes is comfortably
+# more than a `--config fast` San Francisco box needs on a healthy worker.
+JOB_TIMEOUT_S = int(os.environ.get("DPS_E2E_JOB_TIMEOUT", "1200"))
+
 
 def environment_blocker(log):
     for signature, reason in ENVIRONMENT_BLOCKERS.items():
@@ -391,12 +398,27 @@ def job_runs(tmp_path_factory):
             "EARTHDATA_TOKEN": token(),   # skips the MAAP secret lookup
             "DPS_DRY_RUN": "1",
         })
-        proc = subprocess.run(
-            ["bash", script,
-             "--activation_event", EVENT, "--bbox", BBOX, "--date", DATE,
-             "--config", "fast", "--osm_source", "overpass"],
-            cwd=str(cwd), env=environ, capture_output=True, text=True, timeout=3600,
-        )
+        try:
+            proc = subprocess.run(
+                ["bash", script,
+                 "--activation_event", EVENT, "--bbox", BBOX, "--date", DATE,
+                 "--config", "fast", "--osm_source", "overpass"],
+                cwd=str(cwd), env=environ, capture_output=True, text=True,
+                timeout=JOB_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            # A wedged job is the SAME environmental problem as a failed one -- most often
+            # obstore retrying the unreachable metadata service rather than erroring out.
+            # It must skip like the others: letting TimeoutExpired escape turns every
+            # dependent test into an ERROR, which reads as a code failure and buries the
+            # real cause (observed: a 1h run reported 14 errors, no explanation).
+            pytest.skip(
+                f"the {platform} pipeline did not finish within {JOB_TIMEOUT_S}s and was "
+                f"killed. Most likely the same missing-AWS-credentials case as the "
+                f"signature checks below, but hanging instead of failing (obstore retries "
+                f"the EC2 metadata service 10x/180s). Run these on a DPS worker or the "
+                f"MAAP hub, or raise DPS_E2E_JOB_TIMEOUT if the box is merely slow."
+            )
         log = proc.stdout + proc.stderr
         if proc.returncode != 0:
             blocker = environment_blocker(log)

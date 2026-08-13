@@ -84,12 +84,13 @@ def dump_geotiff_byte(filename, arr, projref, in_geo):
   out_ds = None
   return filename
 
-def dump_geotiff_rgb(filename, r, g, b, projref, in_geo):
+def dump_geotiff_rgb(filename, r, g, b, projref, in_geo, alpha=None):
   # Write a GeoTIFF
   format = 'GTiff'
   rows, cols = np.shape(r)
   driver = gdal.GetDriverByName(format)
-  out_ds = driver.Create(filename, cols, rows, 3, gdal.GDT_Byte)
+  n_bands = 4 if alpha is not None else 3
+  out_ds = driver.Create(filename, cols, rows, n_bands, gdal.GDT_Byte)
   out_cs = osr.SpatialReference()
   out_cs.ImportFromWkt(projref)
   out_ds.SetProjection(out_cs.ExportToWkt())
@@ -97,6 +98,10 @@ def dump_geotiff_rgb(filename, r, g, b, projref, in_geo):
   out_ds.GetRasterBand(1).WriteArray(r)
   out_ds.GetRasterBand(2).WriteArray(g)
   out_ds.GetRasterBand(3).WriteArray(b)
+  if alpha is not None:
+      alpha_band = out_ds.GetRasterBand(4)
+      alpha_band.WriteArray(alpha)
+      alpha_band.SetColorInterpretation(gdal.GCI_AlphaBand)
   out_ds = None
   return filename
 

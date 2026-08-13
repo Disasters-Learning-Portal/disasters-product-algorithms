@@ -1,14 +1,19 @@
 cwlVersion: v1.2
 $graph:
 - class: Workflow
-  label: disasters-blackmarble-process
-  doc: 'VEDA Black Marble nighttime-lights pipeline: for a WGS84 bbox + date, download
-    VIIRS VNP46A2 (Earthdata), Landsat (STAC), and OSM roads, then fuse into an urban-focused
-    Cloud Optimized GeoTIFF. Every input is optional in the schema so the Submit form
-    never blocks; run.sh enforces the real requirements (valid bbox/date, non-placeholder
-    activation_event, readable Earthdata secret). The Earthdata token comes from MAAP
-    secrets, never the job inputs.'
-  id: disasters-blackmarble-process
+  label: disasters-blackmarble-noaa-process
+  doc: "VEDA Black Marble nighttime-lights pipeline on NOAA-20 (VJ146A2): for a WGS84\
+    \ bbox + date, download VIIRS nighttime lights (Earthdata), Landsat (STAC), and\
+    \ OSM roads, then fuse into an urban-focused Cloud Optimized GeoTIFF. Use this\
+    \ when the target date has no Suomi-NPP coverage \u2014 Suomi-NPP product delivery\
+    \ ceases 2026-11-01, NOAA-20 is unaffected. VJ146A2 exists from 2018-01-19 onward;\
+    \ for earlier dates use disasters-blackmarble-process. Outputs go to their own\
+    \ hdnightlightsnoaa20/ product folder, so they never overwrite a Suomi-NPP run\
+    \ for the same event and date. Every input is optional in the schema so the Submit\
+    \ form never blocks; run.sh enforces the real requirements (valid bbox/date, date\
+    \ not before 2018-01-19, non-placeholder activation_event, readable Earthdata\
+    \ secret). The Earthdata token comes from MAAP secrets, never the job inputs."
+  id: disasters-blackmarble-noaa-process
   inputs:
     bbox:
       doc: min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81.
@@ -27,7 +32,9 @@ $graph:
       default: 202601_KyleWx_US
     date:
       doc: Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date.
-        Pre-filled with a known-good test date.
+        Must be 2018-01-19 or later -- NOAA-20 VJ146A2 does not exist before then
+        (use disasters-blackmarble-process for earlier dates). Pre-filled with a known-good
+        test date.
       label: Target date
       type: string?
       default: '2023-06-15'
@@ -84,7 +91,7 @@ $graph:
       ramMin: 16
       coresMin: 4
       outdirMax: 20
-  baseCommand: /app/disasters-product-algorithms/dps/blackmarble/run.sh
+  baseCommand: /app/disasters-product-algorithms/dps/blackmarble_noaa/run.sh
   inputs:
     bbox:
       type: string?
@@ -141,15 +148,16 @@ s:contributor:
   s:name: NASA Disasters
 s:citation: NASA Disasters Program
 s:codeRepository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
-s:commitHash: 06c790b5c8ba4d1ebb2b2c59b85835c95d8f9299
-s:dateCreated: 2026-08-12
+s:commitHash: e5082ef782e252e66369d07be7971dfe7e79d482
+s:dateCreated: 2026-08-13
 s:license: Apache-2.0
 s:softwareVersion: 1.0.0
 s:version: dev
-s:releaseNotes: "OGC registration test \u2014 download-from-Earthdata/STAC/OSM (token\
-  \ via MAAP secrets, not job inputs); all inputs optional; image built in-workflow\
-  \ from dps/Dockerfile."
-s:keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
+s:releaseNotes: NOAA-20 (VJ146A2) variant of the Black Marble job for dates without
+  Suomi-NPP coverage; shares the Suomi-NPP engine via BM_PLATFORM, image built in-workflow
+  from dps/Dockerfile.
+s:keywords: black-marble, viirs, vj146a2, noaa-20, jpss-1, nighttime-lights, landsat,
+  osm, cog, disasters, veda
 $namespaces:
   s: https://schema.org/
 $schemas:

@@ -794,6 +794,83 @@ OSM roads, and fuses them into an urban-focused Cloud Optimized GeoTIFF
 validate the inputs → fetch the Earthdata token from a MAAP secret → run upstream's CLI
 unmodified → publish the output COG to S3 via the shared `_finalize.sh`.
 
+### ⚠ Upstream georeferencing defect (patched here)
+
+**Every Black Marble product published before 2026-08-13 is misregistered by ~3.6 km to
+the north-west.** The frame is right and the pixels are in the wrong place, which is why
+nothing caught it: the COG's transform is exactly what
+`blackmarble.crs.create_processing_grid(bbox, 30)` returns, its WGS84 bounds match the
+requested bbox to 5 decimal places, `rio cogeo validate` passes, and in a viewer the layer
+lands over the correct city.
+
+Measured on the two products in
+[disasters-portal#365](https://github.com/Disasters-Learning-Portal/disasters-portal/issues/365)
+by phase-correlating the delivered COG against the OSM road network:
+
+| product | north–south | east–west |
+|---|---|---|
+| Suomi-NPP | -117 px (-3.51 km) | -93 px (-2.79 km) |
+| NOAA-20 | -116 px (-3.48 km) | -91 px (-2.73 km) |
+
+**Cause** — `blackmarble/prepare/landsat.py` (~line 509, in `process_landsat_date`)
+allocates a destination array sized to `dst_window_int`, reprojects into it with
+`dst_transform=band_profile["transform"]` (the **full-mosaic** transform), then pastes the
+result into the mosaic at that window's offsets. `dst_transform` says where destination
+pixel (0,0) *is*, so the window origin gets applied twice. `MARGIN_PIXELS = 120` makes that
+origin ≈ (-124, -120) px at 30 m — the 3.6 km. The QA/cloud-mask path in the same file does
+it correctly, so the cloud mask and the bands it masked were on different grids.
+
+**Fix** — `dps/blackmarble/bm_georef.py` monkeypatches the band path to use the window's own
+transform (never a fork; the SHA pin in `dps/environment.yml` is untouched). Both platforms
+now enter through a shim: `run.sh` calls `bm_georef.py` for Suomi-NPP and `bm_noaa.py` for
+NOAA-20 (which applies the georef patch as well). The bare `blackmarble` console script is
+no longer invoked by either job.
+
+A stale patch would fail **silently** — it simply would not fire, and the job would publish a
+misregistered COG and exit 0. So `apply_georef_patch()` validates upstream's shape and
+raises, and `bm_georef.py --self-check` (offline: no token, no network, no AWS) is wired into
+`dps/Dockerfile`'s smoke gate, pushing markers at known coordinates through the patched path
+and asserting they land within 200 m. Run it locally with:
+
+```bash
+conda run -n disasters_dps python dps/blackmarble/bm_georef.py --self-check
+```
+
+**This belongs upstream** at NASA-IMPACT/veda-black-marble. Delete `bm_georef.py` once a
+fixed release is pinned — `tests/unit/test_blackmarble_landsat_georef.py::test_upstream_still_has_the_defect`
+fails loudly the moment upstream fixes it. A reference crop of a real affected product is
+committed at `tests/fixtures/blackmarble_sf_misregistered_crop.tif`.
+
+### Output projection
+
+Upstream writes every product into a **per-bbox ad-hoc Albers Equal Area** built by
+`blackmarble.crs.make_local_albers()` — a different CRS for every bounding box, with **no
+EPSG authority code** (`crs.to_epsg()` returns `None`; the WKT reads
+`PROJCS["unknown", GEOGCS["unknown", ...]]`). There is no CLI flag, `PipelineConfig` field or
+env var to change it.
+
+An authority-less CRS is what breaks `veda-data-airflow`'s `build_stac`
+(`rio_stac.get_dataset_geom`), so `bake_event.py` reprojects to **EPSG:3857** during the COG
+re-creation it already performs for the event tags — no extra pass over the data.
+
+Two consequences worth knowing:
+
+* **Reprojecting destroys every upstream tag.** `create_cog_with_metadata` wraps the source
+  in a `WarpedVRT` when `target_crs` is set, and a WarpedVRT carries no dataset tags, so
+  `cog_translate` has nothing to copy. `_carry_forward_tags()` re-supplies them explicitly —
+  without it `data_sources` (the full VIIRS + Landsat granule list, the one tag that cannot
+  be reconstructed after the fact), `bbox`, `producer`, `processing_steps`, `indices` and
+  `creation_date` would all silently vanish.
+* **`resolution` changes.** Upstream writes `30.0` (Albers metres). Web Mercator metres are
+  not ground metres — at 37.75°N the `1/cos(lat)` scale factor makes the output pixel
+  **37.94 m** — so the tag is recomputed from the actual destination transform. The pre-warp
+  projection is preserved as `SOURCE_CRS` (WKT) and `SOURCE_CRS_PROJ4`.
+
+The `wgs84` job input does **not** address any of this: upstream treats `--wgs84` as a
+*secondary export* that writes an extra `<stem>_wgs84.tif` of the **colored** raster only,
+leaves the primary product in the local Albers, and emits the EPSG:4326 that breaks
+`build_stac` in the first place.
+
 ### Output naming + layout (and the activation-event bake)
 
 Black Marble writes its **own** COG — it never goes through

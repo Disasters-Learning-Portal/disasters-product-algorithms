@@ -134,7 +134,7 @@ def main():
             outfile = None
     
             if args.product == "truecolor":
-                nodata_setting = 0
+                nodata_setting = False
                 outfile = genTrueColor(
                     scene_tifs,
                     metadata,
@@ -144,7 +144,7 @@ def main():
                 )
     
             elif args.product == "colorir":
-                nodata_setting = 0
+                nodata_setting = False
                 outfile = gencolorIR(
                     scene_tifs,
                     metadata,
@@ -188,7 +188,7 @@ def main():
                     nodata=nodata_setting,
                     dst_crs=None,
                     compression="ZSTD",
-                    compression_level=22,
+                    compression_level=1,
                     metadata=activation_metadata,
                 )
     

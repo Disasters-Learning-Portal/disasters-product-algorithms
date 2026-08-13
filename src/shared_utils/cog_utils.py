@@ -266,7 +266,7 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
 def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
-    nodata: Optional[Union[int, float]] = None,
+    nodata: Optional[Union[int, float, bool]] = None,
     dst_crs: Optional[str] = 'EPSG:3857',
     resampling_method: Optional[str] = None,
     clip_to_webmerc: Optional[bool] = None,
@@ -381,7 +381,15 @@ def convert_to_cog(
         src_crs = src.crs
 
         # Determine no-data value
-        if nodata is None:
+        if nodata is False:
+            # Explicit opt-out: caller's file already carries an alpha/mask band
+            # (e.g. RGB composites where 0 is a legitimate data value, not nodata).
+            # Setting nodata=None downstream lets rio_cogeo honor the existing
+            # mask instead of forcing a scalar nodata that collides with real data.
+            nodata = None
+            if not quiet:
+                print("  No nodata value will be set; preserving existing alpha/mask band.")
+        elif nodata is None:
             from shared_utils.compression import is_extreme_float_nodata
             if existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
                 # Known FLT_MAX corruption pattern — remap before it

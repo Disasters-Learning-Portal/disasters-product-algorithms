@@ -370,15 +370,23 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
         g = normalize_band(green)
         b = normalize_band(blue)
         rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-
     else:
         rgb = np.clip(np.dstack([red, green, blue]), 0, 1)
 
-    out_img = (rgb * 255).astype(np.uint8)
+    # NaN here means nodata (from load_reflectance_band's arr[arr==0]=np.nan).
+    # Capture it BEFORE the uint8 cast destroys the distinction.
+    valid_mask = np.all(np.isfinite(rgb), axis=-1)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
+    out_img = np.nan_to_num(rgb, nan=0.0)
+    out_img = (out_img * 255).astype(np.uint8)
 
     outfile = build_output_name(in_file, out, "truecolor")
 
-    dump_geotiff_rgb(outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2], ds.GetProjection(), ds.GetGeoTransform())
+    dump_geotiff_rgb(
+        outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2],
+        ds.GetProjection(), ds.GetGeoTransform(), alpha=alpha,
+    )
 
     return outfile
 
@@ -398,15 +406,23 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
         g = normalize_band(red)
         b = normalize_band(green)
         rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-
     else:
         rgb = np.clip(np.dstack([nir, red, green]), 0, 1)
 
-    out_img = (rgb * 255).astype(np.uint8)
+    # NaN here means nodata (from load_reflectance_band's arr[arr==0]=np.nan).
+    # Capture it BEFORE the uint8 cast destroys the distinction.
+    valid_mask = np.all(np.isfinite(rgb), axis=-1)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
+    out_img = np.nan_to_num(rgb, nan=0.0)
+    out_img = (out_img * 255).astype(np.uint8)
 
     outfile = build_output_name(in_file, out, "colorir")
 
-    dump_geotiff_rgb(outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2], ds.GetProjection(), ds.GetGeoTransform())
+    dump_geotiff_rgb(
+        outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2],
+        ds.GetProjection(), ds.GetGeoTransform(), alpha=alpha,
+    )
 
     return outfile
 

@@ -109,6 +109,12 @@ process_capella --help
 
 # Notebooks — run from notebooks/ directory
 jupyter notebook notebooks/
+
+# Tests. Use `conda run` (or put the env's bin/ first on PATH) — invoking the
+# env's python directly is NOT enough: convert_to_cog's default backend shells
+# out to `rio cogeo create`, so without `rio` on PATH the COG tests fail with
+# FileNotFoundError: 'rio' rather than an obvious env error.
+conda run -n disasters_dps python -m pytest tests/ -q
 ```
 
 ## API Reference

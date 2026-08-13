@@ -3,9 +3,22 @@ set -euo pipefail
 # MAAP DPS run script (VEDA Black Marble) -- OGC/CWL schema.
 #
 # Black Marble is a DOWNLOAD-then-process pipeline (like Sentinel-2, unlike the
-# file-input sensors): given a WGS84 bbox + date it downloads VIIRS VNP46A2
-# nighttime lights (Earthdata), Landsat scenes (STAC), and OSM roads, then fuses
-# them into an urban-focused Cloud Optimized GeoTIFF.
+# file-input sensors): given a WGS84 bbox + date it downloads VIIRS nighttime
+# lights (Earthdata), Landsat scenes (STAC), and OSM roads, then fuses them into
+# an urban-focused Cloud Optimized GeoTIFF.
+#
+# TWO PLATFORMS, ONE ENGINE. This script serves both registered algorithms,
+# selected by the BM_PLATFORM environment variable (NOT a job input -- the choice
+# is a property of which algorithm you submitted, not something to get wrong at
+# submit time):
+#
+#   BM_PLATFORM=snpp    (default) Suomi-NPP VNP46A2 -- disasters-blackmarble-process
+#   BM_PLATFORM=noaa20            NOAA-20   VJ146A2 -- disasters-blackmarble-noaa-process
+#                                 entered through dps/blackmarble_noaa/run.sh
+#
+# Suomi-NPP data product delivery ceases 2026-11-01 (disasters-portal#365), which is
+# why the NOAA-20 twin exists. Everything that differs between the two lives in the
+# sourced platform.sh table; the pipeline itself is identical.
 #
 # The pipeline is NOT part of this repo. It is the upstream, NASA-IMPACT-maintained
 # package `blackmarble` (github.com/NASA-IMPACT/veda-black-marble), pip-installed into
@@ -29,11 +42,21 @@ set -euo pipefail
 # Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> output/ -> S3
 # (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
+# basedir resolves through the exec in dps/blackmarble_noaa/run.sh (that wrapper execs
+# THIS path, so $0 is this file either way) -- so ../_validate.sh, ../_finalize.sh and
+# the sibling platform.sh/naming.sh all resolve for both algorithms.
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
 # shared input validators (fail fast, before conda/download)
 source "${basedir}/../_validate.sh"
+
+# platform table: product token, product short name, date floor, SOURCE string.
+# Sourced before validation because the date floor comes from it.
+source "${basedir}/platform.sh"
+
+BM_PLATFORM="${BM_PLATFORM:-snpp}"
+validate_in_set BM_PLATFORM "${BM_PLATFORM}" "$(bm_platforms)"
 
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left at
 # its form default round-trips correctly whether or not MAAP re-emits the flag;
@@ -89,8 +112,20 @@ OSM_SOURCE="${OSM_SOURCE//[\"\']/}"
 validate_activation_event "${ACTIVATION_EVENT}"
 validate_bbox "${BBOX}"
 validate_regex date "${DATE}" '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$' 'YYYY-MM-DD'
+# A date before the product's mission start returns ZERO granules from Earthdata, which
+# only surfaces much later (and after a successful login) as an obscure failure.
+validate_date_not_before date "${DATE}" "$(bm_platform_min_date "${BM_PLATFORM}")"
 validate_in_set config "${CONFIG}" "default high_quality fast"
 validate_in_set osm_source "${OSM_SOURCE}" "overpass layercake"
+
+# Suomi-NPP delivery sunset (disasters-portal#365). WARN, never fail: the archive stays
+# readable, so a historical activation is perfectly valid -- it is FORWARD processing that
+# stops. Only a date past the sunset is worth flagging, and only for the Suomi-NPP job.
+if [[ "${BM_PLATFORM}" == "snpp" && "${DATE}" > "${BM_SNPP_SUNSET_DATE}" ]]; then
+  echo "WARN: date ${DATE} is after ${BM_SNPP_SUNSET_DATE}, when Suomi-NPP product delivery ceases." >&2
+  echo "WARN: $(bm_platform_short_name snpp) may have no coverage for this date. Submit the NOAA-20 algorithm" >&2
+  echo "WARN: (disasters-blackmarble-noaa-process, $(bm_platform_short_name noaa20)) instead; it is unaffected." >&2
+fi
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"
@@ -106,8 +141,12 @@ mkdir -p "${OUT_HOME}"
 #
 # The filename convention itself (and why it is shaped that way) lives in the sourced
 # naming.sh, so the test suite can assert it -- same split as dps/_validate.sh.
-PRODUCT="hdnightlights"
-PRODUCT_COLORED="hdnightlightscolored"
+#
+# The product token is PER PLATFORM (hdnightlights vs hdnightlightsnoaa20) so that running
+# both algorithms for the same activation event + date produces two products side by side
+# instead of one silently overwriting the other.
+PRODUCT="$(bm_platform_product "${BM_PLATFORM}")"
+PRODUCT_COLORED="${PRODUCT}colored"
 
 source "${basedir}/naming.sh"
 
@@ -121,8 +160,18 @@ STEM_COLORED="$(bm_stem "${BBOX}" "${DATE}" "${PRODUCT_COLORED}")"
 # _get_secret.py prints ONLY the secret value; capture it into EARTHDATA_TOKEN and
 # never echo it. Auth is ambient in DPS (the wrapper injects MAAP_PGT). blackmarble
 # reads EARTHDATA_TOKEN from the environment (no token on argv / in `ps` / the log). ---
-EARTHDATA_TOKEN="$(conda run --name disasters_dps python "${basedir}/../_get_secret.py" "${EARTHDATA_SECRET_NAME}")" \
-  || die "could not read Earthdata token from MAAP secret '${EARTHDATA_SECRET_NAME}' (store it with maap.secrets.add_secret('EARTHDATA_TOKEN', '<token>'); see docs/DPS.md)."
+#
+# ESCAPE HATCH: if EARTHDATA_TOKEN is ALREADY in the environment, use it and skip the MAAP
+# lookup. A real DPS job never sets it (MAAP passes named CWL flags, not env), so this is
+# inert in production -- it exists so the pipeline can be run end to end outside MAAP
+# (tests/e2e, a hub notebook, a laptop) where maap.secrets isn't reachable. The token is
+# still never a job input, and is still never echoed.
+if [[ -n "${EARTHDATA_TOKEN:-}" ]]; then
+  echo "Using EARTHDATA_TOKEN from the environment (MAAP secret lookup skipped)."
+else
+  EARTHDATA_TOKEN="$(conda run --name disasters_dps python "${basedir}/../_get_secret.py" "${EARTHDATA_SECRET_NAME}")" \
+    || die "could not read Earthdata token from MAAP secret '${EARTHDATA_SECRET_NAME}' (store it with maap.secrets.add_secret('EARTHDATA_TOKEN', '<token>'); see docs/DPS.md)."
+fi
 export EARTHDATA_TOKEN
 
 # --- run the Black Marble pipeline ---
@@ -136,6 +185,7 @@ mkdir -p "${DATA_DIR}"
 OUTFILE="${OUT_DIR}/${STEM}.tif"
 
 echo "Running Black Marble pipeline"
+echo "  platform=${BM_PLATFORM} ($(bm_platform_short_name "${BM_PLATFORM}"))"
 echo "  activation_event=${ACTIVATION_EVENT}"
 echo "  bbox=${BBOX}"
 echo "  date=${DATE}"
@@ -159,7 +209,15 @@ bm_args=(
 )
 [[ "${WGS84}" == "true" ]] && bm_args+=( --wgs84 )
 
-conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
+# WHICH ENTRY POINT: Suomi-NPP runs upstream's console script directly. NOAA-20 runs it
+# through dps/blackmarble/bm_noaa.py, which sets the VIIRS product to VJ146A2 and then
+# invokes that SAME upstream CLI -- upstream hardcodes VNP46A2 and exposes no flag for it.
+# The flags in bm_args are identical either way; only the product being downloaded differs.
+if [[ "${BM_PLATFORM}" == "noaa20" ]]; then
+  conda run --live-stream --name disasters_dps python "${basedir}/bm_noaa.py" "${bm_args[@]}"
+else
+  conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
+fi
 
 # Fail fast if the pipeline produced no COG (rather than silently "succeeding").
 shopt -s nullglob
@@ -180,8 +238,15 @@ fi
 # misses the --metadata-json path that gives every process_* sensor its event tags.
 # bake_event.py RE-CREATES each COG with the tags applied at creation (GDAL 3.10+
 # refuses an in-place COG update; see CLAUDE.md "Critical Constraints").
+#
+# SCOPED TO OUT_DIR, NOT OUT_HOME. bake_event.py walks its argument recursively and stamps
+# EVERY .tif it finds with THIS run's platform, so pointing it at OUT_HOME would re-tag a
+# product some other run left under the same activation event -- e.g. a Suomi-NPP raster
+# relabelled VJ146A2/NOAA-20 by a later NOAA-20 run of the same event. OUT_DIR holds
+# exactly what this run produced (including the --wgs84 companion), so it is the correct
+# scope. _finalize.sh still publishes the whole OUT_HOME tree.
 conda run --live-stream --name disasters_dps python "${basedir}/bake_event.py" \
-  --out-home "${OUT_HOME}" --event "${ACTIVATION_EVENT}" \
+  --out-home "${OUT_DIR}" --event "${ACTIVATION_EVENT}" --platform "${BM_PLATFORM}" \
   || die "failed to bake ACTIVATION_EVENT into the Black Marble COG(s) in ${OUT_DIR}."
 
 # --- delete the raw downloads/cache now that the product is written ---

@@ -54,6 +54,7 @@ on:
           - landsat
           - sentinel2
           - blackmarble
+          - blackmarble_noaa
         default: capella
       register_to_maap:
         # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless

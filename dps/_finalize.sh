@@ -14,10 +14,22 @@
 # ambient operational bucket) -> delete the COGs from ${OUT_HOME} to free home-dir
 # space (the output/ copy is retained for DPS). No PNG quicklooks are produced.
 
+# DPS_DRY_RUN=1 -- TEST HOOK. Copies products into output/ as usual, then SKIPS the
+# S3 publish and the scratch delete, printing what it would have done. This is what
+# lets tests/e2e run a real run.sh end to end (real download, real COG, real event
+# bake) without writing to nasa-disasters-staging or destroying the products the test
+# then inspects. It is an ENVIRONMENT variable on purpose: a DPS job receives named
+# CWL flags and never sets env, so no job input can reach it and the "publishing is
+# always on, destination is locked" invariant still holds for every real run.
 mkdir -p output
 
 # 1) copy products into the DPS output/ dir -- DPS uploads these
 cp -r "${OUT_HOME}/." output/ 2>/dev/null || true
+
+if [[ "${DPS_DRY_RUN:-0}" == "1" ]]; then
+  echo "DPS_DRY_RUN=1: skipping S3 publish and scratch-COG delete (products left in ${OUT_HOME} and output/)."
+  return 0 2>/dev/null || exit 0
+fi
 
 # 2) publish products (COG) to S3
 if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then

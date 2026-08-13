@@ -130,6 +130,31 @@ no "capella date dashes" validate_regex date 2023-11-07 '^[0-9]{14}$' ts
 ok "umbra date"          validate_regex date "2023-11-07 12:00:00" '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$' ts
 no "umbra date compact"  validate_regex date 20231107 '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$' ts
 
+# --- date_not_before (satellite mission-start floors) ------------------------
+# Black Marble: VNP46A2 (Suomi-NPP) starts 2012-01-19, VJ146A2 (NOAA-20) 2018-01-19.
+# A date before a product's CMR TemporalExtents.BeginningDateTime returns ZERO granules,
+# which surfaces far downstream (after a successful Earthdata login) as an obscure
+# failure -- so it is caught here instead.
+ok "dnb after"           validate_date_not_before date 2023-06-15 2018-01-19
+ok "dnb equal"           validate_date_not_before date 2018-01-19 2018-01-19
+ok "dnb day after"       validate_date_not_before date 2018-01-20 2018-01-19
+ok "dnb year after"      validate_date_not_before date 2019-01-01 2018-01-19
+no "dnb day before"      validate_date_not_before date 2018-01-18 2018-01-19
+no "dnb month before"    validate_date_not_before date 2017-12-31 2018-01-19
+no "dnb years before"    validate_date_not_before date 2015-06-15 2018-01-19
+# snpp floor accepts what the noaa20 floor rejects -- the two really are different gates
+ok "dnb snpp 2015"       validate_date_not_before date 2015-06-15 2012-01-19
+no "dnb snpp 2011"       validate_date_not_before date 2011-06-15 2012-01-19
+# Shape is checked BEFORE the comparison: string ordering would otherwise let a
+# malformed value like 9/9/2020 compare "greater" than 2018-01-19 and pass.
+no "dnb slashes"         validate_date_not_before date 9/9/2020 2018-01-19
+no "dnb compact"         validate_date_not_before date 20230615 2018-01-19
+no "dnb month 13"        validate_date_not_before date 2023-13-01 2018-01-19
+no "dnb day 32"          validate_date_not_before date 2023-06-32 2018-01-19
+no "dnb day 00"          validate_date_not_before date 2023-06-00 2018-01-19
+no "dnb empty"           validate_date_not_before date "" 2018-01-19
+no "dnb text"            validate_date_not_before date yesterday 2018-01-19
+
 # --- granule ----------------------------------------------------------------
 tmp="$(mktemp -d)"
 : > "${tmp}/g.tar"; : > "${tmp}/g.ZIP"; : > "${tmp}/g.txt"

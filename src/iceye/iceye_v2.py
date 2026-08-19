@@ -73,7 +73,11 @@ def getCalibrationFactor(s3_metadata_paths : list[str]):
     tree = ET.parse(xml_in_file)
     root = tree.getroot()
 
-    return float(root.find('calibration_factor').text)
+    calib = float(root.find('calibration_factor').text)
+
+    print(f"[INFO] Metadata-sourced calibration factor : {calib}")
+
+    return calib
     
 
 def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
@@ -100,6 +104,9 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_l
     dn = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
     in_geo = ds.GetGeoTransform()
     projref = ds.GetProjection()
+
+    print(f"[INFO] GeoTransform      : {in_geo}")
+    print(f"[INFO] Source Projection : {projref}")
 
     print(f"[INFO] Image shape : {dn.shape}")
     print(f"[INFO] DN dtype    : {dn.dtype}")

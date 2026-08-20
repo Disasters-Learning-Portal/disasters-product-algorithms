@@ -26,6 +26,36 @@ _INTEGER_DTYPE_DEFAULTS = {
     'int64': -9999,
 }
 
+# 8-bit imagery band counts that carry NO alpha/mask band. A 2-band
+# (gray + alpha) or 4-band (RGBA) file already carries its own mask, so a
+# scalar nodata there would shadow it (rasterio NodataShadowWarning). A 1- or
+# 3-band 8-bit file has no mask at all, and the dtype default (0 for uint8)
+# would mask legitimately-black imagery. Neither should declare a numeric
+# nodata -- see is_bare_8bit_imagery.
+_BARE_8BIT_BAND_COUNTS = frozenset({1, 3})
+
+_EIGHT_BIT_DTYPES = frozenset({'uint8', 'int8'})
+
+
+def is_bare_8bit_imagery(dtype, band_count) -> bool:
+    """True for an 8-bit raster with 1 or 3 bands (i.e. no alpha band).
+
+    These must not auto-declare a nodata value. In an 8-bit product every
+    in-range value is a legitimate sample -- dark water, shadow, burn scar and
+    deep shade are all genuinely 0 -- so `set_nodata_value('uint8')`'s `0`
+    masks real imagery rather than fill. Validity for 8-bit products belongs in
+    an alpha band (making the file 2- or 4-band); a 1- or 3-band file has no
+    such band, and is better off declaring nothing than declaring 0.
+
+    Deliberately keyed on band count, not on colour interpretation: the
+    colorinterp of a freshly written GTiff is not reliable until reopen, but
+    band count always is.
+    """
+    return (
+        str(dtype).lower() in _EIGHT_BIT_DTYPES
+        and band_count in _BARE_8BIT_BAND_COUNTS
+    )
+
 # Matches a trailing ISO 8601 Zulu datetime, e.g. "...2025-09-22T18:56:17Z".
 # Its presence at the end of a filename is itself the "already renamed"
 # marker for the new convention - no _day suffix needed alongside it.
@@ -285,14 +315,24 @@ def convert_to_cog(
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
         nodata: No-data value. `None` (default) auto-detects from the file's
-            existing tag, else from the data type. A number is used as-is,
-            after `validate_nodata_for_dtype`. **`False` is an explicit
-            opt-out**: declare no nodata at all, because the input already
-            carries an alpha or mask band. Required for inputs written by
+            existing tag, else from the data type — **except for 8-bit
+            imagery, which never auto-declares one**. For a uint8/int8 raster
+            with 1 or 3 bands (see `is_bare_8bit_imagery`) the result is *no*
+            nodata tag, and an existing tag on the source is stripped: every
+            uint8 value is a legitimate sample, so the old dtype default of 0
+            masked real black imagery. A number is used as-is, after
+            `validate_nodata_for_dtype`, and still wins over the 8-bit
+            carve-out. **`False` is an explicit opt-out**: declare no nodata at
+            all, because the input already carries an alpha or mask band.
+            Required for inputs written by
             `geotools.dump_geotiff_rgb(..., alpha=...)` — a scalar nodata
             declared alongside an alpha band shadows it (rasterio raises
             NodataShadowWarning, rio-cogeo warns "Nodata value will be
             prioritized") and masks legitimately-black pixels.
+
+            Net effect for 8-bit products: 2- and 4-band files carry validity
+            in their alpha band, 1- and 3-band files carry none, and neither
+            declares a numeric nodata.
         dst_crs: Target CRS (default: 'EPSG:3857', None to preserve native CRS).
             Web Mercator avoids the WGS 84 ensemble / lat-first axis bug that
             breaks rio_stac.get_dataset_geom in veda-data-airflow build_stac.
@@ -426,7 +466,25 @@ def convert_to_cog(
                     print(f"  Dropping the source's existing nodata tag ({existing_nodata}).")
         elif nodata is None:
             from shared_utils.compression import is_extreme_float_nodata
-            if existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
+            if is_bare_8bit_imagery(dtype, src.count):
+                # 8-bit imagery never auto-declares a nodata value; 0 is a real
+                # sample, not fill. Checked FIRST so it also strips a source tag
+                # that was written under the old dtype-default behaviour.
+                # Explicit numeric nodata= from the caller still wins (that lands
+                # in the else branch below), as does nodata=False.
+                nodata = None
+                strip_source_nodata = existing_nodata is not None
+                if not quiet:
+                    print(
+                        f"  8-bit {src.count}-band imagery: no nodata will be set "
+                        f"(every uint8 value is a legitimate sample)."
+                    )
+                    if strip_source_nodata:
+                        print(
+                            f"  Dropping the source's existing nodata tag "
+                            f"({existing_nodata})."
+                        )
+            elif existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
                 # Known FLT_MAX corruption pattern — remap before it
                 # propagates to gdalwarp / veda-data-airflow.
                 remapped = set_nodata_value(dtype)

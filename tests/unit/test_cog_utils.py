@@ -323,13 +323,53 @@ def rgb_geotiff(tmp_path):
 class TestNodataSentinelResolution:
     """None / False / number resolve to three distinct declared outcomes."""
 
-    def test_none_auto_detects_zero_for_uint8(self, tmp_path):
+    def test_none_declares_no_nodata_for_uint8(self, tmp_path):
+        """8-bit imagery never auto-declares a nodata value.
+
+        Previously this resolved to the dtype default of 0, which masked
+        legitimately-black pixels. See is_bare_8bit_imagery.
+        """
         from shared_utils.cog_utils import convert_to_cog
         src = _write(tmp_path / "u8.tif", 1, 'uint8', 120)
         out = str(tmp_path / "u8_cog.tif")
         convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
         with rasterio.open(out) as s:
+            assert s.nodata is None
+
+    def test_none_still_auto_detects_zero_for_uint16(self, tmp_path):
+        """The 8-bit carve-out must not leak into other integer dtypes.
+
+        uint16 keeps the dtype default (0) -- it is used for classified /
+        quality rasters where 0 genuinely is the fill class.
+        """
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "u16.tif", 1, 'uint16', 1200)
+        out = str(tmp_path / "u16_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
             assert s.nodata == 0
+
+    def test_explicit_numeric_nodata_still_wins_for_uint8(self, tmp_path):
+        """The carve-out applies to auto-detect only; a caller can override."""
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "u8_ovr.tif", 1, 'uint8', 120)
+        out = str(tmp_path / "u8_ovr_cog.tif")
+        convert_to_cog(src, out, nodata=255, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata == 255
+
+    def test_uint8_source_nodata_tag_is_stripped(self, tmp_path):
+        """An 8-bit file that already carries nodata=0 gets the tag removed.
+
+        Files produced before this change declare 0; re-running them through
+        convert_to_cog must not silently preserve the bug.
+        """
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "u8_tagged.tif", 3, 'uint8', 120, nodata=0)
+        out = str(tmp_path / "u8_tagged_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata is None
 
     def test_none_auto_detects_neg9999_for_float32(self, tmp_path):
         from shared_utils.cog_utils import convert_to_cog

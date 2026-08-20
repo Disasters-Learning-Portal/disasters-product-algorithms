@@ -14,12 +14,18 @@ HAS_RIO = shutil.which("rio") is not None
 class TestNodataPipeline:
 
     def test_nodata_auto_detection_uint8(self, uint8_geotiff):
-        """Auto-detect nodata=0 for uint8."""
+        """Auto-detect declares NO nodata for 8-bit imagery.
+
+        0 is a legitimate uint8 sample -- dark water, shadow, burn scar -- so
+        the old dtype default of 0 masked real imagery. Validity for 8-bit
+        products belongs in an alpha band (2- or 4-band); a 1- or 3-band file
+        has none, and declaring nothing beats declaring 0.
+        """
         from shared_utils.cog_utils import convert_to_cog
 
         result = convert_to_cog(uint8_geotiff, quiet=True)
         with rasterio.open(result) as src:
-            assert src.nodata == 0
+            assert src.nodata is None
 
     def test_nodata_auto_detection_float(self, float32_geotiff):
         """Auto-detect nodata=-9999 for float32."""

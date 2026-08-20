@@ -196,6 +196,16 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   g_no_data = np.where(g == 0.0)
   r_no_data = np.where(r == 0.0)
 
+  # Validity for the alpha band. A pixel is valid only where ALL THREE bands
+  # carry data -- an incomplete triple is not renderable colour. Mirrors
+  # Satellogic's `isfinite(red) & isfinite(green) & isfinite(blue)`.
+  #
+  # Derived HERE, from the same post-clip float arrays the zeroing below uses,
+  # and NOT from the enhanced uint8 output: ImageEnhance.Brightness can drive a
+  # legitimately dark pixel to 0, which would then be indistinguishable from
+  # fill. Reading validity from the source is what keeps real black valid.
+  alpha = (((r != 0.0) & (g != 0.0) & (b != 0.0)) * 255).astype(np.uint8)
+
   # increase brightness
   print('\t* Enhancing image')
   rgbArray = np.zeros( (rows,cols,3), 'uint8' )
@@ -213,8 +223,8 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   g[g_no_data] = 0
   b[b_no_data] = 0
 
-  # return bands and geographic information
-  return r,g,b,projref,in_geo
+  # return bands, alpha mask and geographic information
+  return r,g,b,alpha,projref,in_geo
 
 def gen_cloudMask(safe, outname, level):
   # check for quality file
@@ -346,11 +356,11 @@ def gen_true_color(safe, outname, level, mask=None, rayleigh=False):
     enhance_level = 3
 
   # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
+  r,g,b,alpha,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
 
   # write true color image to file
   print('\t* Generating true color geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
+  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo, alpha=alpha)
 
   # apply cloud mask
   if mask is not None:
@@ -386,11 +396,11 @@ def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
   enhance_level = 2
 
   # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
+  r,g,b,alpha,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
   
   # write natural color image to file
   print('\t* Generating natural color geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
+  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo, alpha=alpha)
 
   # apply cloud mask
   if mask is not None:
@@ -423,11 +433,11 @@ def gen_swir(safe, outname, level, mask=None, rayleigh=False):
     b_file = extract_band_geotiffs('B04', safe, level, '20')
 
   # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
+  r,g,b,alpha,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
 
   # write short wave infrared image to file
   print('\t* Generating short wave infrared geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
+  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo, alpha=alpha)
 
   # apply cloud mask
   if mask is not None:
@@ -460,11 +470,11 @@ def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
     b_file = extract_band_geotiffs('B03', safe, level, '10')
 
   # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
+  r,g,b,alpha,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
 
   # write color infrared image to file
   print('\t* Generating color infrared geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
+  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo, alpha=alpha)
 
   # apply cloud mask
   if mask is not None:

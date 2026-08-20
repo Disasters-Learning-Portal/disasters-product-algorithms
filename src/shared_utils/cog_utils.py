@@ -26,12 +26,13 @@ _INTEGER_DTYPE_DEFAULTS = {
     'int64': -9999,
 }
 
-# 8-bit imagery band counts that carry NO alpha/mask band. A 2-band
-# (gray + alpha) or 4-band (RGBA) file already carries its own mask, so a
-# scalar nodata there would shadow it (rasterio NodataShadowWarning). A 1- or
-# 3-band 8-bit file has no mask at all, and the dtype default (0 for uint8)
-# would mask legitimately-black imagery. Neither should declare a numeric
-# nodata -- see is_bare_8bit_imagery.
+# 8-bit imagery band counts that carry NO alpha/mask band. A 1- or 3-band
+# 8-bit file has no mask at all, and the dtype default (0 for uint8) would mask
+# legitimately-black imagery, so it must not declare a numeric nodata -- see
+# is_bare_8bit_imagery. A file that DOES carry alpha must not declare one
+# either (the scalar shadows the alpha band), but that is a dtype-independent
+# question answered by colour interpretation, not by band count -- see
+# carries_alpha_band.
 _BARE_8BIT_BAND_COUNTS = frozenset({1, 3})
 
 _EIGHT_BIT_DTYPES = frozenset({'uint8', 'int8'})
@@ -50,11 +51,51 @@ def is_bare_8bit_imagery(dtype, band_count) -> bool:
     Deliberately keyed on band count, not on colour interpretation: the
     colorinterp of a freshly written GTiff is not reliable until reopen, but
     band count always is.
+
+    Scope note: this predicate answers "8-bit, no alpha" only. Whether a raster
+    carries an alpha band is a separate, dtype-independent question — see
+    `carries_alpha_band`.
     """
     return (
         str(dtype).lower() in _EIGHT_BIT_DTYPES
         and band_count in _BARE_8BIT_BAND_COUNTS
     )
+
+
+def carries_alpha_band(colorinterp) -> bool:
+    """True when the raster's LAST band is tagged as an alpha band.
+
+    A raster that carries alpha must not declare a scalar nodata **at any bit
+    depth**: the two are mutually exclusive ways to express validity, and the
+    scalar wins. rasterio says so outright —
+
+        NodataShadowWarning: The dataset's nodata attribute is shadowing the
+        alpha band. All masks will be determined by the nodata attribute.
+
+    — so the alpha band is silently ignored and every pixel that happens to
+    equal the sentinel reads as fill, however legitimate it is.
+
+    That shadowing has nothing to do with dtype, which is why keying the
+    carve-out on "8-bit" alone (`is_bare_8bit_imagery`) is too narrow: a uint16
+    RGBA — the shape Satellogic's source rasters arrive in — would otherwise
+    auto-detect the uint16 default of 0 and shadow its own alpha band.
+
+    Takes the colorinterp tuple rather than a dataset so it stays pure and
+    directly testable. Read it from a dataset opened on a closed, on-disk file
+    (`rasterio.open(path).colorinterp`), NOT from a freshly created dataset
+    before close — that is the unreliability `is_bare_8bit_imagery` avoids.
+
+    Checks the LAST band only, deliberately, rather than inferring alpha from a
+    band count of 2 or 4. Band count is not evidence: a 4-band multispectral
+    stack (e.g. Satellogic's own uint16 B/G/R/NIR TOA) has four bands and no
+    alpha, and must keep its normal nodata behaviour. TIFF's ExtraSamples and
+    every GDAL writer put alpha last, so the last band is where it lives.
+    """
+    if not colorinterp:
+        return False
+    from rasterio.enums import ColorInterp
+    return colorinterp[-1] == ColorInterp.alpha
+
 
 # Matches a trailing ISO 8601 Zulu datetime, e.g. "...2025-09-22T18:56:17Z".
 # Its presence at the end of a filename is itself the "already renamed"
@@ -315,24 +356,35 @@ def convert_to_cog(
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
         nodata: No-data value. `None` (default) auto-detects from the file's
-            existing tag, else from the data type — **except for 8-bit
-            imagery, which never auto-declares one**. For a uint8/int8 raster
-            with 1 or 3 bands (see `is_bare_8bit_imagery`) the result is *no*
-            nodata tag, and an existing tag on the source is stripped: every
-            uint8 value is a legitimate sample, so the old dtype default of 0
-            masked real black imagery. A number is used as-is, after
-            `validate_nodata_for_dtype`, and still wins over the 8-bit
-            carve-out. **`False` is an explicit opt-out**: declare no nodata at
-            all, because the input already carries an alpha or mask band.
-            Required for inputs written by
-            `geotools.dump_geotiff_rgb(..., alpha=...)` — a scalar nodata
-            declared alongside an alpha band shadows it (rasterio raises
-            NodataShadowWarning, rio-cogeo warns "Nodata value will be
-            prioritized") and masks legitimately-black pixels.
+            existing tag, else from the data type — **except for two carve-outs,
+            both of which resolve to no nodata tag and strip an existing tag off
+            the source**:
 
-            Net effect for 8-bit products: 2- and 4-band files carry validity
-            in their alpha band, 1- and 3-band files carry none, and neither
-            declares a numeric nodata.
+            1. The raster **carries an alpha band** (`carries_alpha_band`, i.e.
+               its last band's colour interpretation is alpha) — at **any** bit
+               depth, uint16 RGBA included. A scalar nodata declared alongside
+               an alpha band shadows it: rasterio raises NodataShadowWarning
+               ("All masks will be determined by the nodata attribute"),
+               rio-cogeo warns "Nodata value will be prioritized", and the alpha
+               band is silently ignored. Detection is by colour interpretation,
+               never by band count — a 4-band multispectral stack has no alpha
+               and keeps its normal nodata behaviour.
+            2. The raster is **8-bit with 1 or 3 bands** and so carries no mask
+               at all (`is_bare_8bit_imagery`). Every uint8 value is a
+               legitimate sample — dark water, shadow, burn scar — so the old
+               dtype default of 0 masked real black imagery.
+
+            A number is used as-is, after `validate_nodata_for_dtype`, and still
+            wins over both carve-outs. **`False` is an explicit opt-out**:
+            declare no nodata at all, for an input that carries its own alpha or
+            mask band. It remains the right call for a producer that knows it
+            wrote alpha (e.g. `geotools.dump_geotiff_rgb(..., alpha=...)`); the
+            carve-out above is the safety net for everything else.
+
+            Net effect: validity is expressed exactly once per raster — by an
+            alpha band where one exists, by a scalar sentinel where the dtype
+            makes one meaningful (uint16 classified/quality rasters, float
+            -9999), and by nothing at all for bare 8-bit imagery.
         dst_crs: Target CRS (default: 'EPSG:3857', None to preserve native CRS).
             Web Mercator avoids the WGS 84 ensemble / lat-first axis bug that
             breaks rio_stac.get_dataset_geom in veda-data-airflow build_stac.
@@ -466,12 +518,36 @@ def convert_to_cog(
                     print(f"  Dropping the source's existing nodata tag ({existing_nodata}).")
         elif nodata is None:
             from shared_utils.compression import is_extreme_float_nodata
-            if is_bare_8bit_imagery(dtype, src.count):
+            if carries_alpha_band(src.colorinterp):
+                # An alpha band already expresses validity, and a scalar nodata
+                # declared alongside it SHADOWS it -- rasterio raises
+                # NodataShadowWarning and then determines every mask from the
+                # nodata attribute, so the alpha band is silently ignored.
+                # Dtype-independent, hence checked before the 8-bit rule: a
+                # uint16 RGBA would otherwise auto-detect the uint16 default of
+                # 0 and shadow its own alpha. An existing source tag is stripped
+                # for the same reason it is under nodata=False.
+                nodata = None
+                strip_source_nodata = existing_nodata is not None
+                if not quiet:
+                    print(
+                        f"  {src.count}-band {dtype} raster carries an alpha "
+                        f"band: no nodata will be set (a scalar nodata would "
+                        f"shadow the alpha band)."
+                    )
+                    if strip_source_nodata:
+                        print(
+                            f"  Dropping the source's existing nodata tag "
+                            f"({existing_nodata})."
+                        )
+            elif is_bare_8bit_imagery(dtype, src.count):
                 # 8-bit imagery never auto-declares a nodata value; 0 is a real
-                # sample, not fill. Checked FIRST so it also strips a source tag
-                # that was written under the old dtype-default behaviour.
-                # Explicit numeric nodata= from the caller still wins (that lands
-                # in the else branch below), as does nodata=False.
+                # sample, not fill. Reached only when the file carries no alpha
+                # band (the branch above), i.e. the 1- and 3-band shapes, which
+                # have no mask at all. Strips a source tag that was written
+                # under the old dtype-default behaviour. Explicit numeric
+                # nodata= from the caller still wins (that lands in the else
+                # branch below), as does nodata=False.
                 nodata = None
                 strip_source_nodata = existing_nodata is not None
                 if not quiet:

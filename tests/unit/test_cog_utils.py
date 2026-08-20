@@ -275,7 +275,12 @@ class TestRenameWithEvent:
 # ---------------------------------------------------------------------------
 
 def _write(path, count, dtype, fill, nodata=None, alpha=False, epsg=32617):
-    """Minimal 32x32 GeoTIFF helper for the nodata matrix below."""
+    """Minimal 32x32 GeoTIFF helper for the nodata matrix below.
+
+    `alpha=True` tags the LAST band as alpha, at whatever dtype/band count is
+    asked for — uint8 RGBA, uint16 RGBA and float32 gray+alpha all matter,
+    because the nodata-vs-alpha rule is dtype-independent.
+    """
     from rasterio.enums import ColorInterp
     from rasterio.transform import from_bounds
     from rasterio.crs import CRS
@@ -290,15 +295,28 @@ def _write(path, count, dtype, fill, nodata=None, alpha=False, epsg=32617):
         kwargs['nodata'] = nodata
     with rasterio.open(str(path), 'w', **kwargs) as dst:
         if alpha:
-            data[3] = 255
-            data[3, :8, :] = 0          # nodata fill border
-            data[:3, 16:20, 16:20] = 0  # legitimately-black, but VALID imagery
+            opaque = (
+                np.iinfo(dtype).max
+                if np.issubdtype(np.dtype(dtype), np.integer) else 1
+            )
+            last = count - 1
+            data[last] = opaque
+            data[last, :8, :] = 0          # nodata fill border
+            data[:last, 16:20, 16:20] = 0  # legitimately-black, but VALID imagery
         dst.write(data)
-        if alpha:
-            dst.colorinterp = [
-                ColorInterp.red, ColorInterp.green,
-                ColorInterp.blue, ColorInterp.alpha,
-            ]
+    if alpha:
+        # Set colour interpretation on REOPEN, not during creation: the
+        # in-create setter silently drops alpha for a 2-band (gray + alpha)
+        # file, which would make the fixture quietly assert nothing.
+        colors = [ColorInterp.red, ColorInterp.green, ColorInterp.blue]
+        with rasterio.open(str(path), 'r+') as dst:
+            dst.colorinterp = (
+                colors[:count - 1] if count == 4 else [ColorInterp.gray]
+            ) + [ColorInterp.alpha]
+        with rasterio.open(str(path)) as chk:
+            assert chk.colorinterp[-1] is ColorInterp.alpha, (
+                "fixture failed to persist an alpha band"
+            )
     return str(path)
 
 
@@ -621,3 +639,220 @@ class TestNodataVersusAlphaBand:
             assert s.count == 4
             assert s.colorinterp[3] is ColorInterp.alpha
             assert s.tags().get('ACTIVATION_EVENT') == '202406_Flood_TX'
+
+
+# ---------------------------------------------------------------------------
+# An alpha band suppresses nodata auto-detection at ANY bit depth.
+#
+# The 8-bit-only rule (is_bare_8bit_imagery) was too narrow: shadowing is a
+# property of declaring a scalar alongside alpha, not of the dtype. A uint16
+# RGBA -- the shape Satellogic source rasters arrive in -- auto-detected the
+# uint16 default of 0 and shadowed its own alpha band.
+#
+#   carries alpha (any dtype)     -> no nodata; alpha carries validity
+#   8-bit, 1 or 3 bands, no alpha -> no nodata; 0 is a legitimate sample
+#   uint16/int16+, 1 or 3 bands   -> unchanged (0 / -9999)
+#   float                         -> unchanged (-9999)
+#   explicit numeric nodata=N     -> still wins
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def rgba_uint16_geotiff(tmp_path):
+    """32x32 uint16 RGBA, band 4 = alpha, NO nodata tag. The headline case."""
+    return _write(tmp_path / "rgba_u16.tif", 4, 'uint16', 1200, alpha=True)
+
+
+@pytest.fixture
+def multispectral_uint16_geotiff(tmp_path):
+    """32x32 uint16 4-band B/G/R/NIR: FOUR bands and NO alpha.
+
+    The counterexample that forbids inferring alpha from a band count of 4 --
+    this is Satellogic's own TOA stack, and it must keep declaring nodata.
+    """
+    return _write(tmp_path / "ms_u16.tif", 4, 'uint16', 1200)
+
+
+class TestCarriesAlphaBandPredicate:
+    """The predicate itself: colour interpretation, never band count."""
+
+    def test_alpha_last_band_is_detected(self):
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import carries_alpha_band
+        assert carries_alpha_band(
+            (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+        )
+
+    def test_gray_plus_alpha_is_detected(self):
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import carries_alpha_band
+        assert carries_alpha_band((ColorInterp.gray, ColorInterp.alpha))
+
+    def test_four_undefined_bands_are_not_alpha(self):
+        """What GDAL reports for a 4-band uint16 multispectral stack."""
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import carries_alpha_band
+        assert not carries_alpha_band(
+            (ColorInterp.gray, ColorInterp.undefined,
+             ColorInterp.undefined, ColorInterp.undefined)
+        )
+
+    def test_rgb_is_not_alpha(self):
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import carries_alpha_band
+        assert not carries_alpha_band(
+            (ColorInterp.red, ColorInterp.green, ColorInterp.blue)
+        )
+
+    def test_empty_colorinterp_is_not_alpha(self):
+        from shared_utils.cog_utils import carries_alpha_band
+        assert not carries_alpha_band(())
+
+    def test_is_bare_8bit_imagery_is_unchanged(self):
+        """The 8-bit predicate keeps its name and its exact behaviour."""
+        from shared_utils.cog_utils import is_bare_8bit_imagery
+        assert is_bare_8bit_imagery('uint8', 1)
+        assert is_bare_8bit_imagery('uint8', 3)
+        assert is_bare_8bit_imagery('int8', 3)
+        assert not is_bare_8bit_imagery('uint8', 4)
+        assert not is_bare_8bit_imagery('uint16', 3)
+        assert not is_bare_8bit_imagery('float32', 1)
+
+
+class TestAlphaBandSuppressesNodataAtAnyDtype:
+    """nodata=None on an alpha-carrying raster resolves to NO nodata."""
+
+    def test_uint16_rgba_declares_no_nodata(self, rgba_uint16_geotiff, tmp_path):
+        """The headline: uint16 RGBA used to auto-detect 0 and shadow its alpha."""
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "u16_rgba_cog.tif")
+        convert_to_cog(rgba_uint16_geotiff, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata is None
+            assert s.count == 4
+            assert s.colorinterp[3] is ColorInterp.alpha
+
+    def test_uint16_rgba_alpha_still_carries_validity(self, rgba_uint16_geotiff, tmp_path):
+        """The point of the fix: black imagery stays valid, the fill border does not."""
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "u16_rgba_mask.tif")
+        convert_to_cog(rgba_uint16_geotiff, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            rgb_mask = s.read_masks([1, 2, 3])
+        assert (rgb_mask[:, 16:20, 16:20] == 255).all(), (
+            "black-but-valid uint16 imagery must stay valid"
+        )
+        assert (rgb_mask[:, :8] == 0).all(), "the alpha-marked fill border must be masked"
+
+    def test_uint16_rgba_source_nodata_tag_is_stripped(self, tmp_path):
+        """A tag written under the old behaviour is removed, not preserved."""
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "u16_rgba_tagged.tif", 4, 'uint16', 1200,
+                     nodata=0, alpha=True)
+        out = str(tmp_path / "u16_rgba_tagged_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata is None
+
+    def test_uint8_rgba_declares_no_nodata(self, rgba_geotiff, tmp_path):
+        """8-bit RGBA reaches the same outcome without needing nodata=False.
+
+        is_bare_8bit_imagery covers 1 and 3 bands only, so a 4-band uint8 file
+        previously fell through to the dtype default of 0.
+        """
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "u8_rgba_auto.tif")
+        convert_to_cog(rgba_geotiff, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata is None
+
+    def test_float32_gray_plus_alpha_declares_no_nodata(self, tmp_path):
+        """Dtype-independence, checked past the integer dtypes."""
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "f32_alpha.tif", 2, 'float32', 1.5, alpha=True)
+        out = str(tmp_path / "f32_alpha_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata is None, "float32 + alpha must not fall back to -9999"
+
+    def test_explicit_numeric_nodata_still_wins_over_alpha(
+        self, rgba_uint16_geotiff, tmp_path
+    ):
+        """The carve-out is auto-detect only; a caller can still override."""
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "u16_rgba_ovr.tif")
+        convert_to_cog(rgba_uint16_geotiff, out, nodata=42, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata == 42
+
+    def test_uint16_rgba_output_is_a_valid_cog(self, rgba_uint16_geotiff, tmp_path):
+        from shared_utils.cog_utils import convert_to_cog, validate_cog
+        out = str(tmp_path / "u16_rgba_valid.tif")
+        convert_to_cog(rgba_uint16_geotiff, out, nodata=None, dst_crs=None, quiet=True)
+        is_valid, details = validate_cog(out)
+        assert is_valid, details
+
+    def test_uint16_rgba_through_metadata_path(self, rgba_uint16_geotiff, tmp_path):
+        """The cog_translate route resolves nodata identically."""
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "u16_rgba_meta.tif")
+        convert_to_cog(
+            rgba_uint16_geotiff, out, nodata=None, dst_crs=None, quiet=True,
+            metadata={'ACTIVATION_EVENT': '202406_Flood_TX', 'SOURCE': 'CSDA'},
+        )
+        with rasterio.open(out) as s:
+            assert s.nodata is None
+            assert s.colorinterp[3] is ColorInterp.alpha
+            assert s.tags().get('ACTIVATION_EVENT') == '202406_Flood_TX'
+
+
+class TestFourBandMultispectralKeepsItsNodata:
+    """The anti-over-reach pin: 4 bands is NOT evidence of an alpha band.
+
+    Satellogic's own uint16 B/G/R/NIR TOA stack has four bands and no alpha.
+    Inferring alpha from the band count would strip nodata from every source
+    multispectral raster in the archive.
+    """
+
+    def test_uint16_four_band_no_alpha_auto_detects_zero(
+        self, multispectral_uint16_geotiff, tmp_path
+    ):
+        from shared_utils.cog_utils import convert_to_cog
+        out = str(tmp_path / "ms_u16_cog.tif")
+        convert_to_cog(multispectral_uint16_geotiff, out, nodata=None,
+                       dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata == 0, (
+                "a 4-band multispectral stack has no alpha band and must keep "
+                "the uint16 dtype default"
+            )
+
+    def test_uint16_four_band_no_alpha_has_no_alpha_colorinterp(
+        self, multispectral_uint16_geotiff
+    ):
+        """Guards the fixture itself: GDAL must not be tagging band 4 alpha."""
+        from rasterio.enums import ColorInterp
+        from shared_utils.cog_utils import carries_alpha_band
+        with rasterio.open(multispectral_uint16_geotiff) as s:
+            assert s.count == 4
+            assert s.colorinterp[3] is not ColorInterp.alpha
+            assert not carries_alpha_band(s.colorinterp)
+
+    def test_uint16_four_band_no_alpha_inherits_an_existing_tag(self, tmp_path):
+        """An operator-set tag on a multispectral stack survives untouched."""
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "ms_tagged.tif", 4, 'uint16', 1200, nodata=65535)
+        out = str(tmp_path / "ms_tagged_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata == 65535
+
+    def test_int16_three_band_still_declares_neg9999(self, tmp_path):
+        """Non-8-bit, non-alpha integer rasters are untouched by both rules."""
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / "i16_3b.tif", 3, 'int16', 1200)
+        out = str(tmp_path / "i16_3b_cog.tif")
+        convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
+        with rasterio.open(out) as s:
+            assert s.nodata == -9999

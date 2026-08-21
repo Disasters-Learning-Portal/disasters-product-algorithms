@@ -73,10 +73,14 @@ def getCalibrationFactor(s3_metadata_paths : list[str]):
     tree = ET.parse(xml_in_file)
     root = tree.getroot()
 
-    return float(root.find('calibration_factor').text)
+    calib = float(root.find('calibration_factor').text)
+
+    print(f"[INFO] Metadata-sourced calibration factor : {calib}")
+
+    return calib
     
 
-def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_products : Literal["amp", "db", "both"] = "both", save_location : str = "/tmp/s3_temp", filter_size : int = 5):
+def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     os.makedirs(save_location, exist_ok=True)
@@ -101,46 +105,40 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     in_geo = ds.GetGeoTransform()
     projref = ds.GetProjection()
 
+    print(f"[INFO] GeoTransform      : {in_geo}")
+    print(f"[INFO] Source Projection : {projref}")
+
     print(f"[INFO] Image shape : {dn.shape}")
     print(f"[INFO] DN dtype    : {dn.dtype}")
     ds = None  # Close file
 
     
-    dn_filtered = lee_filter(dn, size=filter_size)
-    dn_sqr = np.power(dn_filtered, 2)
+    
+    dn_sqr = np.power(dn, 2)
     dn_amp = dn_sqr * calib_value
+    dn_filtered = lee_filter(dn_amp, size=filter_size)
 
-    print(f"[INFO] Amplitude Max: ", np.max(dn_amp))
-    print(f"[INFO] Amplitude Min: ", np.min(dn_amp))
+    print(f"[INFO] Amplitude Max: ", np.max(dn_filtered))
+    print(f"[INFO] Amplitude Min: ", np.min(dn_filtered))
     
     
-    dn_db = 10.0*np.log10(dn_amp)
+    dn_db = 10.0*np.log10(dn_filtered)
     print(f"[INFO] dB Max: ", np.max(dn_db))
     print(f"[INFO] dB Min: ", np.min(dn_db))
 
-    ret_list = []
     dt = datetime.strptime(grd_in_file.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S")
     
-    outfile_base = (
+    outfile = (
         f"{save_location}/"
         f"{dt.strftime('%Y%m')}_"
         f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}_"
-        f"sigma0_"
+        f"sigma0-dB_"
         f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         f"_filtered{filter_size}"
         ".tif"
     )
     
-    if save_products in ["amp", "both"]:
-        outfile_amp = outfile_base.replace("sigma0", "sigma0-amp")
-        dump_geotiff_float(outfile_amp, dn_amp, projref, in_geo)
-        print(f"Generation of amplitude file completed, file saved to {outfile_amp}")
-        ret_list.append(outfile_amp)
-    
-    if save_products in ["db", "both"]:
-        outfile_dB = outfile_base.replace("sigma0", "sigma0-dB")
-        dump_geotiff_float(outfile_dB, dn_db, projref, in_geo)
-        print(f"Generation of dB file completed, file saved to {outfile_dB}")
-        ret_list.append(outfile_dB)
+    dump_geotiff_float(outfile, dn_db, projref, in_geo)
+    print(f"Generation of dB file completed, file saved to {outfile}")
 
-    return ret_list
+    return outfile

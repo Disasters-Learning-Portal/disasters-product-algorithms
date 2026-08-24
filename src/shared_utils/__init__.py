@@ -61,6 +61,7 @@ from shared_utils.file_naming import (
     categorize_file,
     create_output_filename,
     no_change,
+    prefix_event,
 )
 
 # Web Mercator clip detection (requires rasterio).
@@ -166,6 +167,7 @@ __all__ = [
     'categorize_file',
     'create_output_filename',
     'no_change',
+    'prefix_event',
     # Web Mercator clip detection (reprojection.py)
     'needs_webmerc_clip',
     'WEBMERC_VALID_LAT',

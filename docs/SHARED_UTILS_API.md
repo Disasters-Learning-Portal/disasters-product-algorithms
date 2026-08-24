@@ -635,12 +635,20 @@ from shared_utils.file_naming import (
     categorize_file,                  # (filename, {regex: subdir}) -> subdir | 'uncategorized'
     create_output_filename,           # (path, event, categories=None) -> '{event}_{stem}_{date}_{granularity}.tif'
     no_change,                        # passthrough builder for sub-products like AVIRIS
+    prefix_event,                     # (stem, event) -> stem with the event prefix applied at most once
 )
 ```
 
 `create_output_filename` auto-normalizes 8-digit `YYYYMMDD` to hyphenated `YYYY-MM-DD` so the output matches the legacy operator-facing convention.
 
-Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, etc.) are matched by the entries higher up in `DATETIME_PATTERNS` and emit `_hour.tif`; ordering is most-specific first so a filename containing both an ISO timestamp and a bare YYYYMMDD prefers the timestamp.
+Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, `2025-01-11T194616Z`, etc.) are matched by the entries higher up in `DATETIME_PATTERNS` and emit `_hour.tif`; ordering is most-specific first so a filename containing both an ISO timestamp and a bare YYYYMMDD prefers the timestamp.
+
+**`create_output_filename` is idempotent — feeding it its own output is a no-op.** Two guards make that true, and both are load-bearing for sources that arrive already named for the activation (vendor deliveries staged under the event, or a re-run over the pipeline's own output):
+
+- The event prefix goes through `prefix_event()` in every branch, so a stem that already starts with the event token is not prefixed again.
+- A stem already ending in a canonical marker — an ISO-Zulu datetime (with `HH:MM:SS` or compact `HHMMSS`) or a `_day` / `_hour` suffix — is kept verbatim; only the prefix rule applies. Mirrors the `cog_utils._ISO_ZULU_END_RE` short-circuit in `rename_with_event` / `get_final_filename`.
+
+Both were regressions in a real activation: a SkySat delivery named `202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z.tif` came out as `202607_Fire_OR_202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z_day.tif`. The mixed `YYYY-MM-DDTHHMMSSZ` stamp also needed its own `DATETIME_PATTERNS` entry — without one, the less-specific `YYYY-MM-DDTHH` pattern matched a *prefix* of it and left `3721Z` welded to the product token. Pinned by `tests/unit/test_file_naming.py` and `tests/unit/test_simple_disaster_naming.py`.
 
 > The earlier helpers `extract_date_from_filename`, `convert_date`,
 > `parse_filename_components`, `create_cog_filename`, and `create_output_path`

@@ -1,0 +1,173 @@
+name: Notify — new release on main
+
+# Tells the team when a new version lands on main.
+#
+# Trigger: a GitHub Release being published — i.e. the last step of
+# .github/workflows/release.yaml. NOT every push to main: one alert per
+# actual version, so the message can name the version.
+#
+# What it does: opens an issue in this repo that @mentions the disasters
+# team and walks people through updating their hub setup. The body text
+# lives in .github/scripts/release_alert_body.sh so it can be rendered and
+# reviewed WITHOUT cutting a release:
+#
+#   bash .github/scripts/release_alert_body.sh v1.0.1
+#
+# WHY AN ISSUE, NOT A PR OR A SLACK POST:
+#   • This org DISALLOWS the GitHub Actions token from creating pull
+#     requests, but does still allow it to OPEN ISSUES — same constraint
+#     documented at the top of sync-deploy-algorithm.yml.
+#   • So the default GITHUB_TOKEN + `issues: write` is all this needs.
+#     No new secret, nothing to expire (unlike DISASTERS_RELEASE_PAT).
+#
+# WHY THE `release` TRIGGER ACTUALLY FIRES HERE:
+#   Events created by the default GITHUB_TOKEN do NOT trigger further
+#   workflows. release.yaml's final step runs `gh release create` with
+#   secrets.DISASTERS_RELEASE_PAT — a PAT, not GITHUB_TOKEN — and
+#   PAT-authenticated API calls DO trigger workflows. Same reasoning is
+#   spelled out in sync-deploy-algorithm.yml. If release.yaml is ever
+#   changed to use GITHUB_TOKEN for that step, this workflow goes silent.
+#
+# TESTING:
+#   workflow_dispatch below has a dry_run mode that renders the alert into
+#   the run summary without opening an issue. GitHub only offers
+#   workflow_dispatch for workflows present on the DEFAULT branch, so until
+#   this file reaches main, test by running the script locally (above).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to announce (e.g. v1.0.1). Must match vX.Y.Z.'
+        required: true
+        type: string
+      dry_run:
+        description: 'Render to the run summary only — do not open an issue.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Resolve the version from whichever event fired, and validate it.
+      #
+      # A release whose tag isn't vX.Y.Z (a pre-release, an rc, a one-off
+      # tag) is SKIPPED rather than failed — it isn't an error, it's just
+      # not a version worth paging the team about. A hand-typed bad version
+      # on workflow_dispatch IS an error: you meant to announce something.
+      - name: Resolve version
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT" = "release" ]; then
+            VERSION="$RELEASE_TAG"
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              echo "::notice title=Skipped::$VERSION is marked as a pre-release; not alerting."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::notice title=Skipped::Release tag '$VERSION' is not vX.Y.Z; not alerting."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            VERSION="$INPUT_VERSION"
+            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error title=Bad version::Must match vX.Y.Z (got: $VERSION)"
+              exit 1
+            fi
+          fi
+          {
+            echo "skip=false"
+            echo "version=$VERSION"
+            echo "title=🚀 New release $VERSION is on main — update your hub copy"
+          } >> "$GITHUB_OUTPUT"
+
+      # Always render, even on a dry run, so the run page shows exactly
+      # what would have been (or was) sent.
+      - name: Render alert body
+        if: steps.v.outputs.skip == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          bash .github/scripts/release_alert_body.sh "$VERSION" > "$RUNNER_TEMP/alert.md"
+          {
+            echo "### Alert body for \`$VERSION\`"
+            echo
+            cat "$RUNNER_TEMP/alert.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run — stop here
+        if: steps.v.outputs.skip == 'false' && github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: echo "::notice title=Dry run::Body rendered to the run summary. No issue opened."
+
+      # Idempotent by exact title, matching the pattern in
+      # sync-deploy-algorithm.yml: re-running for the same version comments
+      # instead of opening a duplicate.
+      #
+      # Uses `gh issue list --json` (the list API) rather than
+      # `gh issue list --search`: the search index is eventually consistent,
+      # so a just-created issue can be invisible to a search for a minute —
+      # exactly long enough for a re-run to double-post.
+      - name: Open alert issue
+        id: issue
+        if: steps.v.outputs.skip == 'false' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ steps.v.outputs.title }}
+        run: |
+          # Match the title in awk, not inside the jq program. The title
+          # carries an emoji and an em dash; splicing it into a jq string
+          # is needlessly fragile, and `gh --jq` has no --arg to bind it
+          # safely. @tsv out, compare in awk.
+          EXISTING=$(gh issue list --state open --limit 200 \
+            --json number,title --jq '.[] | [.number, .title] | @tsv' \
+            | awk -F'\t' -v t="$TITLE" '$2 == t { print $1; exit }')
+
+          if [ -n "$EXISTING" ]; then
+            echo "::notice title=Already announced::Commenting on existing issue #${EXISTING}."
+            gh issue comment "$EXISTING" \
+              --body "Re-announced by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          URL=$(gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/alert.md")
+          echo "Opened $URL"
+          echo "number=${URL##*/}" >> "$GITHUB_OUTPUT"
+
+      # Keep the tracker clean: the previous release's alert is stale the
+      # moment this one opens. Best-effort — a failure here must not fail
+      # the run, the alert itself already went out.
+      - name: Close superseded alerts
+        if: steps.issue.outputs.number != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_NUMBER: ${{ steps.issue.outputs.number }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          gh issue list --state open --limit 200 --json number,title \
+            --jq '.[] | select(.title | startswith("🚀 New release ")) | .number' \
+          | while read -r N; do
+              if [ "$N" != "$NEW_NUMBER" ]; then
+                echo "Closing superseded alert #${N}"
+                gh issue close "$N" \
+                  --comment "Superseded by #${NEW_NUMBER} (\`${VERSION}\`)." \
+                  --reason "not planned"
+              fi
+            done

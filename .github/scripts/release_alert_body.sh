@@ -191,8 +191,8 @@ printf '%s\n' \
 "This is what updates the pre-installed \`process_*\` CLIs for everyone who doesn't keep a clone." \
 "" \
 "**Wait for the image build to finish first.** Pushing to \`main\` kicks off" \
-"\`build-and-push.yaml\`, which takes **~1–4 minutes**. Restarting before it goes green just" \
-"gets you the old image again. Check it here:" \
+"\`build-and-push.yaml\`, which takes **about 3–5 minutes** (measured across the last 12 builds)." \
+"Restarting before it goes green just gets you the old image again. Check it here:" \
 "" \
 "$REPO_URL/actions/workflows/build-and-push.yaml" \
 "" \

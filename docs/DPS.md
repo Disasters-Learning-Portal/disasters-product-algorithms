@@ -1,7 +1,7 @@
 # Running on MAAP DPS
 
-All five sensor pipelines (landsat-8-9, sentinel-2, capella, umbra, satellogic)
-are registerable as algorithms on the MAAP
+All five sensor pipelines (landsat-8-9, capella, umbra, satellogic, and
+disasters-sentinel2-process) are registerable as algorithms on the MAAP
 [Data Processing System (DPS)](https://docs.maap-project.org/en/latest/technical_tutorials/dps_tutorial/dps_tutorial_demo.html).
 The plumbing lives in [`dps/`](../dps/). This page is the source of truth for the
 **non-obvious** parts; the per-sensor files are self-documenting otherwise.
@@ -14,6 +14,7 @@ dps/
 ├── _validate.sh             # shared fail-fast input validators, sourced by every run.sh
 ├── _finalize.sh             # shared output handling, sourced by every run.sh
 ├── register_algorithms.py   # maap-py registration helper (legacy schema; see below)
+├── delete_algorithm.ipynb   # undeploy a process via the OGC API (see "Deleting")
 ├── README.md
 └── <sensor>/                # landsat, sentinel2, capella, umbra, satellogic
     ├── build-env.sh         # conda env update + pip install repo (+ scm guard)
@@ -101,7 +102,7 @@ Per-sensor run.sh maps the flags onto the `process_<sensor>` CLI (note the CLIs
 use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
 -compression_level` single-dash) and then `source dps/_finalize.sh`.
 
-## Three input models
+## Four input models
 
 - **File-input (landsat):** takes a **`file_path_of_raw_data`** File input (a
   `.tar`/`.zip` Collection-2 granule the operator downloaded from USGS). run.sh
@@ -128,6 +129,13 @@ use mixed spelling: `--date/--product/--output` double-dash, `-dst_crs/-nodata/
   line is a transient CDSE API error — re-run. There is **no per-file cap** (the
   `limit` input is the OData `$top` page size, default 50). See `.clinerules.md`
   rule 34.
+- **Download-from-Earthdata/STAC/OSM (blackmarble):** **no file input** — run.sh
+  takes a WGS84 `bbox` + `date` and the `blackmarble` pipeline downloads VIIRS
+  VNP46A2 (NASA Earthdata), Landsat (STAC), and OSM roads, fusing them into an
+  urban-focused COG. The NASA Earthdata token is read from **MAAP secrets** at run
+  time (default name `EARTHDATA_TOKEN`) — never a job input. The pipeline is an
+  **upstream package** (`NASA-IMPACT/veda-black-marble`, pip-installed into the DPS
+  env), not a `process_*` sensor; see "Black Marble (VEDA nighttime lights)" below.
 
 ### Vendor read access
 
@@ -352,10 +360,10 @@ Validators (in `dps/_validate.sh`) and what each run.sh enforces:
 | Check | Rule | Applies to |
 |---|---|---|
 | `validate_activation_event` | reject placeholder; require `YYYYMM_Hazard_Location` (`^[0-9]{4}(0[1-9]\|1[0-2])_[^_]+_.+$`) | all |
-| `require_nonempty source_label` | non-empty | all except Satellogic¹ |
-| `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹ |
-| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹ |
-| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all |
+| `require_nonempty source_label` | non-empty | all except Satellogic¹, Sentinel-2³ |
+| `validate_dst_crs` | `native` or `EPSG:<code>` | all except Satellogic¹, Sentinel-2³ |
+| `validate_int_range compression_level … 1 22` | integer 1–22 (ZSTD range) | all except Satellogic¹, Sentinel-2³ |
+| `validate_number` (nodata / gamma / we_nstd) | numeric when set | all (Sentinel-2: `we_nstd` only³) |
 | `validate_granule` | file exists + `.tar`/`.zip` (Landsat) / `.zip` (S2), case-insensitive | optical |
 | `validate_in_set products …` | token in the sensor's accepted set (the CLI's own check ends in `quit()` → exit 0, so bash catches it first) | optical |
 | `validate_regex process_date/process_tile` | `YYYYMMDD`; path/row `NNNNNN` (Landsat) or MGRS `T\d\d[A-Z]{3}` (S2) | optical |
@@ -372,11 +380,13 @@ CLI, so bash does not re-check it. Assertions live in
 - `activation_event` default is the placeholder **`YYYYMM_Hazard_Location`**, which
   run.sh **rejects** — operators must set a real event (e.g. `202511_Flood_TX`).
 - `source_label` is **required** (no default; the form marks it `*`) — **except
-  Satellogic**, which hardcodes `csda` and dropped the input (PR #45).
+  Satellogic**, which hardcodes `csda` and dropped the input (PR #45), and
+  **Sentinel-2**, which hardcodes `Copernicus` (see ³).
 - `dst_crs` defaults to **`native`** (no warp). EPSG:3857/4326 are per-job opts.
   (EPSG:3857 is NOT required for VEDA `build_stac`.)
-- **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/22
-  compression, and per-product nodata (composites `0`, indices `-9999`)** — those
+- **¹ Satellogic (PR #45) hardcodes `source_label=csda`, `dst_crs=native`, ZSTD/9
+  compression, and per-product nodata (composites: an ALPHA band and NO declared
+  nodata; indices `-9999`)** — those
   inputs were removed, so their validators don't run for it. It adds `filter_size`
   (Lee filter on indices, `{3,5,7}`, default 5) and accepts a comma-separated
   `--date` (multi-date).
@@ -388,6 +398,24 @@ CLI, so bash does not re-check it. Assertions live in
   apply any display stretch downstream at the visualization layer (VEDA/leafmap). Both **Capella & Umbra** default
   `-nodata` to **-9999.0** (float32 dB backscatter — 0 dB is a legitimate value, so
   nodata is never 0); leave the DPS `nodata` input blank to use it.
+- **³ Sentinel-2 (2026-08-11)** hardcodes `source_label=Copernicus` (a
+  download-from-CDSE job has no other origin), `dst_crs=native`, ZSTD
+  `compression_level=9`, and `limit=50`; all four inputs were removed, so their
+  validators no longer run for it. `limit` is `download_sentinel2`'s OData `$top`
+  — a **per-tile page size, not a total cap**, and the loop doesn't follow
+  `@odata.nextLink` — so 50 is a ceiling no realistic tile+date query reaches, and
+  exposing it only invited operators to "fix" a low scene count with the wrong
+  knob (the real cause is the ~5-day revisit or a wrong `level`). **`nodata` was removed WITHOUT a replacement constant** — the
+  CLI's `-nodata` applies ONE value to EVERY product, but S2 output is mixed-dtype:
+  uint8 color composites (fill `0`) alongside float32 indices, where
+  `dump_geotiff_float` writes **`-9999.0`** and `0` is a legitimate NDVI/NDWI value.
+  The old `nodata` input defaulted to `0`, which mis-declared nodata on every index
+  product. Omitting `-nodata` lets `cog_utils.set_nodata_value` auto-detect per
+  dtype (uint8 → `0`, float → `-9999.0`) and get both right. **Do not reintroduce a
+  blanket `-nodata` on Sentinel-2.** `we_nstd` survives as an input (a real
+  water-extent algorithm knob) and now defaults to `1` rather than blank — a blank
+  string is falsy and trips the Submit Job form's *"Valid value required"* check on
+  the GUI-registered path.
 
 ### Not yet hardened (documented follow-ups)
 
@@ -442,13 +470,147 @@ unchecked = safe dry-run). Via `dockerfile-path: dps/Dockerfile` the action
 validates the CWL (injecting that image), and — if checked — registers it to the
 prod OGC processes API. `run-name` shows which algorithm/version is registering.
 
+Note the Action reads **`dps/ogc/<name>.yml`** — *not* `dps/<sensor>/algorithm_config.yaml`.
+Editing only the latter changes nothing about what this path registers.
+
+### ⚠️ Register ONE algorithm at a time (a queued second run is silently cancelled)
+
+`register-dps.yml` and `sync-deploy-algorithm.yml` share
+`concurrency.group: sync-dev-to-deploy-algorithm` with `cancel-in-progress: false`,
+so they never overlap. The trap: GitHub keeps at most **one pending run per group**,
+and whatever queues *next* **evicts the run already waiting**. Two registrations
+dispatched back-to-back — or one dispatched while a merge into `dev` is imminent —
+means the earlier queued one dies. Observed 2026-08-11:
+
+| time | event |
+|---|---|
+| 17:35:20 | `blackmarble` dispatched → parks at the approval gate, holding the group |
+| 17:35:29 | `umbra` dispatched → queues as the single *pending* run |
+| 17:35:36 | PR #91 merged into `dev` |
+| 17:35:39 | `Sync dev → deploy-algorithm` created → takes the pending slot, **cancels `umbra`** |
+
+The workflow header warns about the *opposite* hazard (a sync push making the
+register's CWL push non-fast-forward). Eviction is the one that actually bites.
+**Dispatch → wait for `completed` → dispatch the next.**
+
+**A cancelled run does not fail `gh run watch --exit-status`** — it exits **0**, so a
+watcher reports success for a registration that never happened. Confirm with
+`gh run view <id> --json conclusion` (want `success`, not `cancelled`), and confirm
+the registration itself from the `{"title": "<name>", …, "status": "accepted"}` JSON
+the deploy step prints.
+
+### ⚠️ Re-registering an existing name+version returns HTTP 409 — and the run still says `success`
+
+Observed 2026-08-12 re-registering `blackmarble` after the `libgdal-hdf5` fix. The
+deploy step printed:
+
+```json
+{"type": "http://www.opengis.net/def/exceptions/ogcapi-processes-2/1.0/duplicated-process",
+ "title": "Duplicate process. Use PUT to modify existing process with process ID 44",
+ "status": 409, "additionalProperties": {"processID": 44}}
+```
+
+…and the run concluded **`success`**. MAAP rejects a POST of an
+`algorithm_name` + `algorithm_version` pair that is already deployed, and the action
+does not treat that 409 as a failure — so `gh run watch --exit-status` **and**
+`gh run view --json conclusion` both report success for a deployment that did not
+happen. This is a *second*, independent way a green run can mean "not registered"
+(the first is the silent cancellation above). **Confirm the presence of
+`"status": "accepted"`, never merely the absence of a red X.**
+
+What does still happen on a 409 — the saving grace and the trap in equal measure —
+is that the image is built and pushed **before** the register call, and the generated
+CWL pins the **mutable branch tag**
+`ghcr.io/<org>/disasters-product-algorithms:<branch>`, which is the same reference
+the already-deployed process carries. Therefore:
+
+- **Code-only changes** — anything baked into the image (`src/`, `dps/*/run.sh`,
+  `dps/environment.yml`) — are already under the tag the live process points at.
+  Whether a job picks them up depends on whether MAAP's ADES re-pulls a mutable tag
+  or reuses a locally cached image. **We have not confirmed which**; suspect it first
+  if a job behaves like the old code after a green re-register.
+- **CWL/schema changes** — `dps/ogc/<name>.yml` inputs, defaults, `run_command`,
+  `ram_min`/`cores_min`/`outdir_max` — do **NOT** land. The deployed process keeps
+  its old schema, and nothing in the log says so.
+
+To genuinely replace a deployment: delete it by its numeric `processID` (the 409 body
+hands you the ID — see "Deleting (undeploying) an algorithm") and dispatch again, or
+dispatch with a different `algorithm_version`, which registers a **new** process and
+leaves the old one runnable.
+
+### The dev → deploy-algorithm sync needs a PAT to carry workflow-file changes
+
+`sync-deploy-algorithm.yml` pushes the merge with a checkout-persisted credential.
+That credential **must not be `GITHUB_TOKEN`**: GitHub refuses any push from a
+GitHub App that touches `.github/workflows/**` —
+
+```
+! [remote rejected] HEAD -> deploy-algorithm (refusing to allow a GitHub App to
+  create or update workflow `.github/workflows/register-dps.yml` without
+  `workflows` permission)
+```
+
+— and there is **no `workflows:` key** you can add to the workflow's `permissions:`
+block; that permission doesn't exist for `GITHUB_TOKEN`. So any `dev` commit editing
+a workflow file failed the sync at the push step and left `deploy-algorithm` stale.
+The merge is *clean* in that case, so the conflict-issue path never fires — the run
+just goes red, and it's easy to miss that registrations are now running from an
+out-of-date branch. (Hit 2026-08-12 by a one-line `uses:` pin bump in
+`register-dps.yml`.)
+
+The fix: the checkout uses **`secrets.DISASTERS_RELEASE_PAT`** (the same
+fine-grained PAT `release.yaml` uses — Contents + PRs + **Workflows** = Read & write)
+and falls back to `GITHUB_TOKEN` only if that secret is empty. **PAT expiry brings the
+failure back**, with the same message. To recover a stale `deploy-algorithm` by hand:
+
+```bash
+git fetch origin
+git switch deploy-algorithm && git pull
+git merge --no-ff --no-edit -m "Merge dev into deploy-algorithm (automated sync)" origin/dev
+git push origin HEAD:deploy-algorithm
+```
+
+Also note PAT pushes **do** trigger workflows (GITHUB_TOKEN pushes don't). Nothing
+triggers on push to `deploy-algorithm` today, so there's no loop — but adding a
+`push: branches: [deploy-algorithm]` trigger anywhere would now fire on every sync.
+
+### `deploy-algorithm` stays one file ahead of `dev` — don't merge it back
+
+Every register run commits the generated
+`cwl_workflows/process_<repo>_<branch>.cwl` to the branch it ran on. That filename is
+**branch-derived** and its content is **overwritten on every run**, so it is a build
+artifact that belongs only on `deploy-algorithm` — `git ls-tree origin/dev` has no
+`cwl_workflows/` at all, deliberately. A `deploy-algorithm → dev` PR therefore
+contributes nothing but that artifact; close it. (PR #90 was opened and closed for
+exactly this.) Land real changes on `dev` and let the sync carry them the other way.
+
 **The `dps/ogc/<name>.yml` configs** mirror `dps/<sensor>/algorithm_config.yaml`
 but mark inputs **`type: X?`** (OGC-optional → `minOccurs:0`), carry **no
 container field** (the Action supplies the built image), and use an **absolute
 in-image `run_command`** (`/app/disasters-product-algorithms/dps/<sensor>/run.sh`).
-Registered names are `<sensor>-ogc-test`, so they coexist with the GUI-registered
-`capella`/`umbra`/etc. The dropdown covers **capella, umbra, satellogic,
-list_dates, landsat, sentinel2**.
+Registered names are `<sensor>-ogc-test` (except the three below), so they coexist
+with the GUI-registered `capella`/`landsat-8-9`/etc. The dropdown covers **capella,
+umbra, satellogic, list_dates, landsat, sentinel2**.
+
+**Exceptions — three algorithms use `disasters-<name>-process`, not `<name>-ogc-test`**
+(2026-08-11). For each, `dps/ogc/<name>.yml` and `dps/<name>/algorithm_config.yaml`
+carry the **same** canonical name, so either registration path targets the one
+process (the GUI path still can't express optional inputs — prefer the Action):
+
+| configs | registered as |
+|---|---|
+| `dps/ogc/sentinel2.yml` + `dps/sentinel2/algorithm_config.yaml` | `disasters-sentinel2-process` |
+| `dps/ogc/blackmarble.yml` + `dps/blackmarble/algorithm_config.yaml` | `disasters-blackmarble-process` |
+| `dps/ogc/umbra.yml` + `dps/umbra/algorithm_config.yaml` | `disasters-umbra-process` |
+
+⚠️ **A rename registers a NEW process; it does not rename the old one.** The old
+`sentinel-2` was deleted by hand before its rename, but Black Marble's and Umbra's
+predecessors (GUI-registered `black-marble` / `umbra`, and OGC-registered
+`black-marble-ogc-test` / `umbra-ogc-test`) are **still live** unless someone
+deletes them in MAAP. They point at the same `run.sh`, so a job submitted against
+either still runs — delete them so operators can't pick a stale entry out of the
+Process dropdown. How: [Deleting (undeploying) an
+algorithm](#deleting-undeploying-an-algorithm) / `dps/delete_algorithm.ipynb`.
 
 **`landsat` is the one file-input OGC config** — its granule `file_path_of_raw_data`
 is a **required** `File` (no `?`, `minOccurs:1`); nothing can run without a granule,
@@ -509,10 +671,21 @@ time. The whole mechanism:
   *previous* run's CWL (the filename is branch-based, `process_<repo>_<branch>.cwl`,
   overwritten each run), so registering **N algorithms needed N+1 runs** and a
   **single** one needed **two**. `register-dps.yml` now pins
-  **`Disasters-Learning-Portal/ogc-app-pack-generator@<sha>`**, whose only delta
-  from upstream is deploying at the just-pushed `HEAD` (`git rev-parse HEAD`) — so
-  a **single run registers its own CWL**. Re-pin the SHA when pulling upstream
-  changes into the fork.
+  **`Disasters-Learning-Portal/ogc-app-pack-generator@<sha>`**, which deploys at the
+  just-pushed `HEAD` (`git rev-parse HEAD`) — so a **single run registers its own
+  CWL**. Re-pin the SHA when pulling upstream changes into the fork.
+- **FORK PATCH #2 — node24 action pins.** The fork also bumps the generator's four
+  JavaScript actions to their node24 majors (`actions/checkout@v7`,
+  `actions/setup-python@v7`, `docker/login-action@v4`,
+  `docker/build-push-action@v7`). Upstream is on v4/v5/v3/v5, all of which target
+  **Node 20** — [deprecated on GitHub-hosted
+  runners](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/),
+  so every register run ended with *"Node.js 20 is deprecated. The following actions
+  target Node.js 20 but are being forced to run on Node.js 24: …"* and would break
+  outright once the shim is removed. Both patches are marked `# FORK PATCH #N` in the
+  fork's `action.yml`, and the fork's monthly Jules reconcile is told to preserve
+  both. Retiring the fork (below) gives the node20 pins back unless upstream has
+  bumped too — the retire job's prompt says so.
 - **The fork is SELF-RETIRING (two monthly Jules jobs, one per repo).** Jules opens
   PRs in the repo it's invoked from, so the automation is split:
   - the **fork's** `.github/workflows/check-upstream.yml` (monthly) reconciles the
@@ -551,6 +724,471 @@ time. The whole mechanism:
 
 Prereq: repo secret **`MAAP_PGT`** (only used when `register_to_maap` is checked).
 This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub UI.
+
+## Deleting (undeploying) an algorithm
+
+**The Register Algorithm GUI can register but not delete.** Undeploying is a
+`DELETE` against the OGC processes API. The ready-made notebook is
+[`dps/delete_algorithm.ipynb`](../dps/delete_algorithm.ipynb) — list → filter →
+dry-run → delete → verify. Run it on the MAAP hub / ADE with the **`disasters_dps`**
+kernel (the env `build-env.sh` creates, which pins `maap-py`).
+
+```python
+import requests
+from maap.maap import MAAP
+
+# NOTE the /api suffix — this is NOT the extensions' `maapApiUrl` (which takes none)
+BASE = "https://api.maap-project.org/api/ogc/processes"
+headers = MAAP()._get_api_header()
+
+procs = requests.get(BASE, headers=headers).json()["processes"]
+for p in procs:                       # find the processID — you cannot delete by name
+    print(p["processID"], f'{p["id"]}:{p["version"]}', p["deployedBy"])
+
+r = requests.delete(f"{BASE}/34", headers=headers)
+print(r.status_code, r.text)          # 200 {"detail": "Deleted process"}
+```
+
+The parts that bite:
+
+- **You delete by `processID`** — an int MAAP assigns at registration — **not by
+  `algorithm_name`**. Always list first; a name in the URL just returns `404`.
+- **Response codes:** `200` undeployed · `403` you are not the deployer · `404` no
+  such `processID`.
+- **Only the deployer can delete their own process.** A `403` on something you
+  believe is yours usually means the token belongs to a different MAAP account than
+  the one that registered it (registered from the ADE, deleting from the Disasters
+  hub, or vice versa) — check the `deployedBy` field.
+- **`processID` is per name+version.** Deleting `foo:dev` leaves `foo:v1.2.0` alone.
+- **The base URL has an `/api` suffix here** (`.../api/ogc/processes`), unlike the
+  `maapApiUrl` JupyterLab setting, which must have **none** (the extensions append
+  it themselves). Getting this backwards returns HTML → `Unexpected token '<'`.
+- **Delete removes the registration only.** Running jobs are not cancelled, job
+  history stays, outputs already in `nasa-disasters-staging/dps_output/<event>/`
+  stay, and the built container image stays. Re-registering the same name afterwards
+  gets a **new** `processID`.
+- Confirm the result in the **Submit Jobs → Process dropdown** — same "is it really
+  deployed" check as registration.
+
+**Why this comes up: a rename is not a move.** Changing `algorithm_name` in
+`dps/<sensor>/algorithm_config.yaml` / `dps/ogc/<sensor>.yml` and re-registering
+creates a **second** process — the old name is left registered and still runs the
+code its container was built with. That is exactly what the `<sensor>-ogc-test` →
+`disasters-<sensor>-process` consolidation produces, so each rename leaves up to two
+stale entries (the GUI-registered bare name, e.g. `umbra`, and the Action-registered
+`umbra-ogc-test`) to clean up here. The old GUI-registered `sentinel-2` was deleted
+this way on 2026-08-11.
+
+## Black Marble (VEDA nighttime lights)
+
+`disasters-blackmarble-process` (`dps/blackmarble/`, OGC descriptor
+`dps/ogc/blackmarble.yml`) is the one processing algorithm that is **not** a
+`process_*` sensor — and the one whose processing code **does not live in this repo
+at all**.
+
+The **VEDA Black Marble** pipeline is maintained upstream by NASA-IMPACT at
+<https://github.com/NASA-IMPACT/veda-black-marble>. Given a WGS84 `bbox` + `date` it
+downloads VIIRS VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and
+OSM roads, and fuses them into an urban-focused Cloud Optimized GeoTIFF
+(inferno-colormap RGB). Everything under `dps/blackmarble/` is a **thin wrapper**:
+validate the inputs → fetch the Earthdata token from a MAAP secret → run upstream's CLI
+unmodified → publish the output COG to S3 via the shared `_finalize.sh`.
+
+### ⚠ Upstream georeferencing defect (patched here)
+
+**Every Black Marble product published before 2026-08-13 is misregistered by ~3.6 km to
+the north-west.** The frame is right and the pixels are in the wrong place, which is why
+nothing caught it: the COG's transform is exactly what
+`blackmarble.crs.create_processing_grid(bbox, 30)` returns, its WGS84 bounds match the
+requested bbox to 5 decimal places, `rio cogeo validate` passes, and in a viewer the layer
+lands over the correct city.
+
+Measured on the two products in
+[disasters-portal#365](https://github.com/Disasters-Learning-Portal/disasters-portal/issues/365)
+by phase-correlating the delivered COG against the OSM road network:
+
+| product | north–south | east–west |
+|---|---|---|
+| Suomi-NPP | -117 px (-3.51 km) | -93 px (-2.79 km) |
+| NOAA-20 | -116 px (-3.48 km) | -91 px (-2.73 km) |
+
+**Cause** — `blackmarble/prepare/landsat.py` (~line 509, in `process_landsat_date`)
+allocates a destination array sized to `dst_window_int`, reprojects into it with
+`dst_transform=band_profile["transform"]` (the **full-mosaic** transform), then pastes the
+result into the mosaic at that window's offsets. `dst_transform` says where destination
+pixel (0,0) *is*, so the window origin gets applied twice. `MARGIN_PIXELS = 120` makes that
+origin ≈ (-124, -120) px at 30 m — the 3.6 km. The QA/cloud-mask path in the same file does
+it correctly, so the cloud mask and the bands it masked were on different grids.
+
+**Fix** — `dps/blackmarble/bm_georef.py` monkeypatches the band path to use the window's own
+transform (never a fork; the SHA pin in `dps/environment.yml` is untouched). Both platforms
+now enter through a shim: `run.sh` calls `bm_georef.py` for Suomi-NPP and `bm_noaa.py` for
+NOAA-20 (which applies the georef patch as well). The bare `blackmarble` console script is
+no longer invoked by either job.
+
+A stale patch would fail **silently** — it simply would not fire, and the job would publish a
+misregistered COG and exit 0. So `apply_georef_patch()` validates upstream's shape and
+raises, and `bm_georef.py --self-check` (offline: no token, no network, no AWS) is wired into
+`dps/Dockerfile`'s smoke gate, pushing markers at known coordinates through the patched path
+and asserting they land within 200 m. Run it locally with:
+
+```bash
+conda run -n disasters_dps python dps/blackmarble/bm_georef.py --self-check
+```
+
+**This belongs upstream** at NASA-IMPACT/veda-black-marble. Delete `bm_georef.py` once a
+fixed release is pinned — `tests/unit/test_blackmarble_landsat_georef.py::test_upstream_still_has_the_defect`
+fails loudly the moment upstream fixes it. A reference crop of a real affected product is
+committed at `tests/fixtures/blackmarble_sf_misregistered_crop.tif`.
+
+### Output projection
+
+Upstream writes every product into a **per-bbox ad-hoc Albers Equal Area** built by
+`blackmarble.crs.make_local_albers()` — a different CRS for every bounding box, with **no
+EPSG authority code** (`crs.to_epsg()` returns `None`; the WKT reads
+`PROJCS["unknown", GEOGCS["unknown", ...]]`). There is no CLI flag, `PipelineConfig` field or
+env var to change it.
+
+An authority-less CRS is what breaks `veda-data-airflow`'s `build_stac`
+(`rio_stac.get_dataset_geom`), so `bake_event.py` reprojects to **EPSG:3857** during the COG
+re-creation it already performs for the event tags — no extra pass over the data.
+
+Two consequences worth knowing:
+
+* **Reprojecting destroys every upstream tag.** `create_cog_with_metadata` wraps the source
+  in a `WarpedVRT` when `target_crs` is set, and a WarpedVRT carries no dataset tags, so
+  `cog_translate` has nothing to copy. `_carry_forward_tags()` re-supplies them explicitly —
+  without it `data_sources` (the full VIIRS + Landsat granule list, the one tag that cannot
+  be reconstructed after the fact), `bbox`, `producer`, `processing_steps`, `indices` and
+  `creation_date` would all silently vanish.
+* **`resolution` changes.** Upstream writes `30.0` (Albers metres). Web Mercator metres are
+  not ground metres — at 37.75°N the `1/cos(lat)` scale factor makes the output pixel
+  **37.94 m** — so the tag is recomputed from the actual destination transform. The pre-warp
+  projection is preserved as `SOURCE_CRS` (WKT) and `SOURCE_CRS_PROJ4`.
+
+The `wgs84` job input does **not** address any of this: upstream treats `--wgs84` as a
+*secondary export* that writes an extra `<stem>_wgs84.tif` of the **colored** raster only,
+leaves the primary product in the local Albers, and emits the EPSG:4326 that breaks
+`build_stac` in the first place.
+
+### Output naming + layout (and the activation-event bake)
+
+Black Marble writes its **own** COG — it never goes through
+`shared_utils.convert_to_cog` — so neither the repo's filename convention nor its
+metadata plumbing applies for free. Both are supplied by `run.sh` (2026-08-12).
+Until then the job shipped `black_marble_output.tif` flat under the event, with no
+event tags in the raster. **This was never an upstream regression**: the previously
+vendored fork at `src/blackmarble/` produced the identical name (its `cli.py`
+defaulted `output_path = "black_marble_output.tif"`, and the old `run.sh` built
+`${OUT_HOME}/${BASENAME}.tif` exactly as the new one did) — the convention had simply
+never been applied to this algorithm.
+
+**Layout** mirrors every other sensor, because `_finalize.sh` keys each S3 object by
+its `OUT_HOME`-relative path:
+
+```
+~/drcs_outputs/<event>/<YYYYMMDD>/hdnightlights/<stem>.tif
+  → s3://nasa-disasters-staging/dps_output/<event>/<YYYYMMDD>/hdnightlights/<stem>.tif
+```
+
+the same shape `process_sentinel2` produces
+(`…/20251231/trueColor/S2B_MSIL1C_trueColor_T17RLM_…`).
+
+**Filename** is `hdnightlights_<NW><SE>_<YYYY-MM-DD>_day.tif`, e.g.
+
+```
+hdnightlights_32_97N90_96W32_83N90_79W_2023-03-25_day.tif
+```
+
+`<NW>` is the north-west corner (`max_lat`, `min_lon`), `<SE>` the south-east corner
+(`min_lat`, `max_lon`); each coordinate is `|value|` to 2 dp with `.` rewritten as `_`
+and a hemisphere letter appended, concatenated with no separator. The trailing
+`_YYYY-MM-DD_day` is the repo-wide token for a **time-less individual** product
+(`cog_utils._relocate_datetime`) — Black Marble is a daily composite with no
+acquisition time, so `_day` is correct and the **date stays last**.
+
+The **activation event is deliberately not in the filename.** It lives in the S3
+prefix and in the COG's own tags, matching `bake_event_metadata.ipynb`, which *strips*
+an event prefix out of any filename it finds.
+
+Upstream derives its second raster from the path we pass — literally
+`output_path.replace(".tif", "-colored.tif")` (`blackmarble/pipeline.py`) — which would
+leave `..._2023-06-15_day-colored.tif`, i.e. a date token no longer last. `run.sh`
+renames it onto the colored product's own stem, `hdnightlightscolored_<NW><SE>_<date>_day.tif`.
+
+**The event bake** is `dps/blackmarble/bake_event.py`, run after the pipeline: it
+re-creates each output COG with `ACTIVATION_EVENT` (plus the `YEAR_MONTH`/`HAZARD`/
+`LOCATION` split `resolve_metadata` derives, `PROCESSOR`, and `SOURCE`) applied. It
+**re-creates rather than edits** because GDAL 3.10+ refuses an in-place COG update —
+baking must happen at creation (see the repo's "Critical Constraints"). It passes
+`preserve_compression=True, web_optimized=False, target_crs=None`; the middle one is
+load-bearing, since `create_cog_with_metadata` defaults `web_optimized=True` and would
+silently reproject the product to EPSG:3857.
+
+> **There is no `basename` input any more.** The stem is derived, so the knob was
+> removed from `run.sh`, `algorithm_config.yaml` and `dps/ogc/blackmarble.yml`
+> (Capella/Satellogic precedent: hardcode rather than expose). That is a **schema
+> change**, so re-registering over the existing name+version will 409 and silently keep
+> the old schema — delete the process by `processID` first, or register a new
+> `algorithm_version`. See "Re-registering an existing name+version returns HTTP 409".
+
+### How it's installed
+
+`dps/environment.yml` pip-installs the package straight from its repo:
+
+```yaml
+  - pip:
+    - git+https://github.com/NASA-IMPACT/veda-black-marble@20e7d782a6c826d19db73e35d501a17a25609e56
+```
+
+- **Pinned to a commit SHA** because upstream has **no tagged release yet**. When
+  NASA-IMPACT cuts one, change this to `@vX.Y.Z` — or to a plain `blackmarble==X.Y.Z`
+  if it reaches PyPI/conda. That is the whole upgrade: one line.
+- **A VCS URL is required.** The bare name `blackmarble` on PyPI is an *unrelated*
+  World Bank package — never depend on it by name.
+- **Do not vendor the package back into this repo.** An earlier iteration copied it to
+  `src/blackmarble/` (~19 MB, 18 MB of which was the WRS2 shapefile) from a personal
+  fork. It was removed because Black Marble has its own repo and release path, and a
+  private copy would silently drift from upstream while making Disasters responsible for
+  maintaining it.
+
+### Version floors are load-bearing
+
+`pip` only reinstalls a dependency it considers **unsatisfied** — and if it decided
+conda's `rasterio`/`geopandas` were too old it would install PyPI wheels over them,
+breaking the GDAL dylib match that the whole stack depends on (see CLAUDE.md "Critical
+Constraints"). To prevent that, the conda deps in `dps/environment.yml` carry `>=` floors
+**mirroring upstream's declared minimums**: `rasterio>=1.4.3`, `geopandas>=1.1.1`,
+`shapely>=2.1.0`, `numpy>=2`, `scipy>=1.15.3`, `matplotlib-base>=3.10.3`, `boto3>=1.38`,
+`tqdm>=4.67.1`, `duckdb>=1.0.0`. Keep them in sync when bumping the pin.
+
+Verify after any bump:
+
+```bash
+conda list -n disasters_dps | grep -E 'rasterio|geopandas|gdal|numpy|shapely|scipy'
+```
+
+Every row must show channel **conda-forge**. A `pypi` row means a floor is too low and
+pip replaced a conda build — raise that floor.
+
+blackmarble's **pip-only** deps (`earthaccess`, `osmnx`, `pystac-client`, `typer`,
+`obstore`) are no longer hand-listed; pip resolves them from upstream's own metadata.
+The `dps/Dockerfile` build-time smoke (`import blackmarble` + `blackmarble --help`) is
+the only gate proving the VCS install and its deps resolved — including that the WRS2
+shapefile (`blackmarble/data/WRS2_descending/*`, loaded via a plain `Path(__file__)…`
+lookup) came along; upstream ships it via its `[tool.hatch.build] artifacts`.
+
+What that smoke does **not** prove is that GDAL can read the data: `--help` and the
+import both pass with no raster drivers installed at all. Black Marble reads VIIRS
+`VNP46A2.*.h5`, which needs the separate **`libgdal-hdf5`** conda package — see the
+driver-plugin entries under [Gotchas](#gotchas). The same `RUN` block now also asserts
+the plugin `.so` files exist, so that gap fails the build rather than the job.
+
+### Other ways it deviates from the sensor pattern
+
+- **Called through upstream's own console script**, `blackmarble` (a single-command typer
+  app — no subcommand), with the flags exactly as its README documents them.
+- **Writes its own COG** — it does **not** route through `shared_utils.convert_to_cog`,
+  so there's no `-dst_crs`/`-compression`/`-nodata`/`--metadata-json` knob.
+  `activation_event` is used only for the S3 output path (`dps_output/<event>/`); the
+  pipeline embeds its own GeoTIFF metadata.
+- `build-env.sh` still runs `pip install "${repo_root}"` even though no Black Marble code
+  lives here — `_finalize.sh` imports `shared_utils.staging_upload` to publish the COG.
+
+**Earthdata token via MAAP secrets** — exactly the Sentinel-2 credential mechanism.
+The NASA Earthdata token is **never a job input** (it would land in the job log). Store
+it once from any MAAP notebook, then run.sh reads it at run time via
+`dps/_get_secret.py` and exports `EARTHDATA_TOKEN` (which the pipeline reads from the
+environment):
+
+```python
+from maap.maap import MAAP
+MAAP().secrets.add_secret("EARTHDATA_TOKEN", "<your-earthdata-token>")
+```
+
+Get a token at <https://urs.earthdata.nasa.gov/> (Profile → Generate Token). The
+`earthdata_secret_name` input only names *which* secret to read (default
+`EARTHDATA_TOKEN`; names are not sensitive) — unlike Sentinel-2's hardcoded
+`COP_USER`/`COP_PASS`, blackmarble exposes the secret name as an input so an operator
+can point at a differently-named secret without a re-register. The name matching the env
+var is a convention, not a requirement: run.sh exports the fetched value as
+`EARTHDATA_TOKEN` whatever the secret was called.
+
+**Never run the `blackmarble` CLI by hand without exporting a token first** — upstream's
+missing-token guard is inverted with respect to its own error message
+(`blackmarble/cli.py`, pinned SHA `20e7d78`):
+
+```python
+resolved_earthdata_token = earthdata_token or str(os.getenv("EARTHDATA_TOKEN")).strip()
+if resolved_earthdata_token:
+    os.environ["EARTHDATA_TOKEN"] = resolved_earthdata_token.strip()
+else:
+    typer.echo("Error: EARTHDATA_TOKEN env var not set or --earthdata-token not provided.", ...)
+```
+
+`str(None)` is the four-character string `"None"`, which is truthy — so an **unset**
+`EARTHDATA_TOKEN` sails past the guard and gets installed as the token. The error branch
+fires *only* when the variable is set-but-blank (`str("").strip() == ""`), the one case
+its message does not describe:
+
+```bash
+env -u EARTHDATA_TOKEN python -c \
+  'import os; print(repr(str(os.getenv("EARTHDATA_TOKEN")).strip()))'   # -> 'None'
+```
+
+Nothing downstream rejects the bogus value either. `earthaccess.login()` →
+`Auth._environment()` sees a truthy token so it never raises `LoginStrategyUnavailable`,
+and `_get_credentials(None, None, "None")` sets `token = {"access_token": "None"}` with
+`authenticated = True`. The failure therefore surfaces **late and mislabelled**: CMR
+search needs no auth, so `Searching for VIIRS data...` succeeds and reports granules, and
+only `earthaccess.download` 401s — while `cli.py` has already set
+`logging.getLogger("earthaccess").setLevel(WARNING)`, suppressing the one breadcrumb
+(`Using environment variables for EDL`). It reads like missing VIIRS coverage for the
+date, not a bad credential.
+
+**The DPS path is covered from both sides** — though by accident, not design, so don't
+remove either half. `_get_secret.py` exits 1 unless the secret is a non-empty `str` and
+run.sh's `|| die` catches that, so the variable is never *unset* when the CLI runs; and a
+whitespace-only secret (which `_get_secret.py`'s `if not value` check lets through) is
+exactly the case upstream *does* handle correctly. The exposure is interactive use — a
+hub terminal or notebook in the `disasters_dps` env with no token exported. Fixing the
+guard upstream (`os.getenv("EARTHDATA_TOKEN") or ""`) would retire this note.
+
+**Inputs** (all optional in the OGC descriptor; run.sh validates after parsing):
+`bbox` (WGS84, lat span ≥ 0.05° — enforced by `validate_bbox` in `dps/_validate.sh`),
+`activation_event`, `date` (YYYY-MM-DD, on or after the platform's mission start),
+`config` (`fast`|`default`|`high_quality`), `osm_source` (`overpass`|`layercake`),
+`wgs84` (also emit an EPSG:4326 COG), `earthdata_secret_name`. There is **no `basename`**
+input (see above). Output publishes to
+`nasa-disasters-staging/dps_output/<activation_event>/` via the shared `_finalize.sh`
+(same locked staging path as every other algorithm).
+
+## Black Marble on NOAA-20 (VJ146A2)
+
+`disasters-blackmarble-noaa-process` (`dps/blackmarble_noaa/`, OGC descriptor
+`dps/ogc/blackmarble_noaa.yml`) is the same pipeline running on the **NOAA-20 / JPSS-1**
+nighttime-lights product **VJ146A2** instead of Suomi-NPP's VNP46A2.
+
+**Why it exists.** [Suomi-NPP data product delivery ceases 2026-11-01][snpp-alert],
+taking VNP46A2 with it (disasters-portal#365). The archive stays readable — a historical
+activation still runs on the Suomi-NPP job — but there is no forward stream after that
+date. VJ146A2 is unaffected.
+
+[snpp-alert]: https://www.earthdata.nasa.gov/data/alerts-outages/suomi-npp-data-product-delivery-cease-november-1-2026
+
+**Why a product swap is sufficient.** The two collections are structural twins, verified
+against CMR and against real granules (`tests/e2e/test_blackmarble_noaa_e2e.py`):
+
+| | VNP46A2 | VJ146A2 |
+|---|---|---|
+| CMR concept-id | `C3365931269-LAADS` | `C3370789118-LAADS` |
+| Version | `2` | `2` |
+| Temporal start | 2012-01-19 | **2018-01-19** |
+| Tiling / grid | h`__`v`__`, 2400×2400 | identical |
+| NTL layer | `HDFEOS/GRIDS/VIIRS_Grid_DNB_2d/Data_Fields/Gap_Filled_DNB_BRDF-Corrected_NTL` | identical |
+
+### How it is wired
+
+**One engine, two entry points.** `dps/blackmarble/run.sh` is shared and selects the
+platform from the `BM_PLATFORM` environment variable (`snpp` default, `noaa20`);
+`dps/blackmarble_noaa/run.sh` is a four-line wrapper that exports `BM_PLATFORM=noaa20`
+and `exec`s it. Everything that differs lives in the sourced **`dps/blackmarble/platform.sh`**
+table — product token, product short name, date floor, `SOURCE` string — split out so the
+test suite can assert it, the same rationale as `naming.sh` and `_validate.sh`.
+
+**`BM_PLATFORM` is not a job input.** Which satellite ran is a property of the algorithm
+you submitted, not a checkbox to get wrong at submit time. Both algorithms expose an
+*identical* input form.
+
+**The retarget itself: `dps/blackmarble/bm_noaa.py`.** Upstream **hardcodes** the product
+(`BM_SHORT_NAME = "VNP46A2"` in `blackmarble/acquire/viirs.py`, and a literal
+`"product": "VNP46A2"` in `pipeline.py`'s metadata dict) and exposes **no** flag, config
+field or env var for it. `bm_noaa.py` sets the module constant and then invokes upstream's
+own typer app, unmodified — so every CLI option, default and behavior is still upstream's.
+It is *not* a fork: the package stays pip-installed from the SHA pin in
+`dps/environment.yml` (re-vendoring it is what the repo deliberately undid — see "How it's
+installed" above). When NASA-IMPACT adds a real product option, delete the shim and pass
+their flag.
+
+> **The failure mode this guards is a no-op, not a crash.** If upstream renamed the
+> constant, a naive patch would silently keep downloading Suomi-NPP granules, write them
+> into `hdnightlightsnoaa20/`, tag them `VJ146A2 (VIIRS/NOAA-20)`, publish, and exit 0 —
+> undetectable downstream. So `apply_noaa20_patch()` validates upstream's shape first and
+> raises, and `bm_noaa.py --self-check` runs that validation offline in **dps/Dockerfile's
+> build-time smoke gate**. Drift breaks an image build, never an activation.
+
+### Outputs
+
+Its own product folder and stem, so a NOAA-20 run **never overwrites** a Suomi-NPP run for
+the same event and date:
+
+```
+dps_output/<event>/<YYYYMMDD>/hdnightlights/hdnightlights_<NW><SE>_<date>_day.tif
+dps_output/<event>/<YYYYMMDD>/hdnightlightsnoaa20/hdnightlightsnoaa20_<NW><SE>_<date>_day.tif
+```
+
+Every COG carries `VIIRS_PRODUCT` (`VNP46A2`/`VJ146A2`) and `VIIRS_PLATFORM`
+(`Suomi-NPP`/`NOAA-20`) alongside the usual activation-event tags — which satellite
+produced a raster is **not** recoverable from its pixels, so it is recorded explicitly.
+
+### Guard rails
+
+- **Date floor.** `date` must be on or after the platform's mission start (2018-01-19 for
+  NOAA-20, 2012-01-19 for Suomi-NPP), via `validate_date_not_before` in `dps/_validate.sh`.
+  An earlier date returns *zero* granules from Earthdata, which otherwise surfaces long
+  after a successful login as an obscure failure.
+- **Sunset warning.** The Suomi-NPP job **warns** (never fails — the archive is still
+  served) when `date` is past 2026-11-01, and names this algorithm as the alternative.
+- **Token escape hatch.** If `EARTHDATA_TOKEN` is already in the environment, run.sh uses
+  it and skips the MAAP secret lookup. A DPS job never sets it (MAAP passes named CWL
+  flags, not env), so this is inert in production — it exists so the pipeline can be run
+  end to end outside MAAP. The token is still never a job input, and never echoed.
+
+### Testing it
+
+```bash
+# offline: shim logic, platform table, naming, tags, config consistency, run.sh
+# orchestration (conda stubbed)
+python -m pytest tests/unit tests/integration
+
+# the real pinned upstream still has the shape the patch reaches into
+conda run -n disasters_dps python dps/blackmarble/bm_noaa.py --self-check
+conda run -n disasters_dps python -m pytest tests/unit/test_blackmarble_noaa_upstream_contract.py
+
+# VIIRS layer, end to end against live NASA Earthdata (needs ONLY a token; minutes)
+export EARTHDATA_TOKEN='<token>'          # environment only — never a file in this repo
+DPS_E2E=1 conda run -n disasters_dps python -m pytest -v -ra -m 'not slow' tests/e2e/
+
+# whole pipeline, both run.sh scripts (ALSO needs ambient AWS credentials — see below)
+DPS_E2E=1 conda run -n disasters_dps python -m pytest -v -ra tests/e2e/
+```
+
+`tests/e2e` downloads real VJ146A2 *and* VNP46A2 granules, compares their HDF5 structure,
+runs both `run.sh` scripts for one bbox/date, and asserts the finished COGs are
+**structurally identical** while their **pixels differ** — the pair of checks that proves
+the swap both worked and changed nothing it shouldn't. It needs the `disasters_dps` env
+(upstream `blackmarble` + the `libgdal-hdf5` driver plugin) and skips everywhere else,
+including CI. `DPS_DRY_RUN=1` is what lets it run a real `run.sh` without publishing to
+`nasa-disasters-staging` or deleting the products it then inspects.
+
+> **The `slow` (whole-pipeline) tier needs AWS credentials, the rest does not.** Black
+> Marble fuses VIIRS with Landsat and OSM, and Landsat comes from the **requester-pays**
+> bucket `s3://usgs-landsat`, which upstream reads via `obstore`. On a machine with no
+> ambient AWS credentials, obstore falls back to the EC2 instance metadata service
+> (`169.254.169.254`) and the job fails there — *after* the VIIRS download has already
+> succeeded. The `job_runs` fixture recognises that exact signature and **skips with an
+> explanation** rather than reporting it as a code failure; run that tier on a DPS worker
+> or the MAAP hub. The VIIRS-layer tier (`-m 'not slow'`) covers everything the NOAA-20
+> change actually touches and needs only `EARTHDATA_TOKEN`.
+
+### Registering it
+
+New name, so the first registration cannot 409. Dispatch
+`.github/workflows/register-dps.yml` from the unprotected `deploy-algorithm` branch with
+`algorithm: blackmarble_noaa` and `register_to_maap` checked, then confirm the deploy step
+reported `{"status": "accepted"}` — a green run alone is not proof (see "Re-registering an
+existing name+version returns HTTP 409"). The Suomi-NPP algorithm's **schema is unchanged**
+by this work, so `disasters-blackmarble-process` does *not* need re-registering.
 
 ## Deploying a code change (push → re-register)
 
@@ -659,3 +1297,20 @@ ls -la "$HOME/drcs_outputs/202511_Flood_TX/" output/
   skipped → 0 files uploaded. It's pinned in `dps/environment.yml`. The hub image gets
   JP2 for free from the MAAP base, so this only ever bites the DPS worker env. Confirm
   from a worker/job log: `grep -i jp2 _stderr.txt`.
+- **Black Marble `RasterioIOError` on a `.h5` = missing HDF5 driver.** Same plugin-split
+  cause as the JP2 entry above: VIIRS `VNP46A2.*.h5` granules need `libgdal-hdf5`, now
+  pinned in `dps/environment.yml`. Unlike the Sentinel-2 case this fails **loudly** —
+  upstream's `blackmarble/acquire/viirs.py::convert_to_tiff` calls
+  `rasterio.open(<granule>.h5).subdatasets`, which raises on the first granule and
+  `permanentFail`s the job. It fails *after* a successful Earthdata download, so the
+  log looks healthy right up to the traceback. Confirm from the job log:
+  `grep -i "gdal_.*\.so is not available" _stderr.txt`.
+- **Any new conda-forge GDAL driver is a separate `libgdal-*` package.** `gdal` alone
+  carries only the core drivers; everything else must be named explicitly in
+  `dps/environment.yml` (float the version — the plugin ABI is pinned to the resolved
+  `libgdal-core` build, so never hard-pin one). `dps/Dockerfile`'s build-time smoke
+  check now asserts the plugin `.so` files for the two drivers we depend on, so a
+  missing one fails the image build instead of a live job — **add any new driver to
+  that loop as well as to `environment.yml`**. Note the check asserts on the file, not
+  `gdal.GetDriverByName(...)`: deferred plugin loading registers a proxy driver even
+  when the `.so` is absent, so the Python lookup succeeds either way.

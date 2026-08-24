@@ -12,6 +12,85 @@ ADD --chown=${NB_USER}:${NB_USER} image/environment.yml /tmp/environment.yml
 RUN conda env update --prefix /srv/conda/envs/notebook --file /tmp/environment.yml \
     && rm /tmp/environment.yml
 
+# === Scope + relax MAAP's `.lm-Widget { overflow: scroll !important }` ===
+# maap-dps-jupyter-extension and maap_algorithms_jupyter_extension both ship
+# leftover placeholder CSS from the JupyterLab extension cookiecutter that sets
+# `overflow: scroll !important` on `.lm-Widget` -- Lumino's base class, present
+# on EVERY widget. `scroll` (not `auto`) paints a scrollbar even with nothing to
+# scroll, and `!important` beats Lab's own per-widget overflow, so all of Lab's
+# few-px-tall chrome renders as bare scrollbar stepper arrows: the "chevron
+# icons everywhere" bug (2i2c-org/infrastructure#8770).
+#
+# The script rewrites `scroll` -> `auto` AND narrows the selector to exclude
+# Lumino's layout widgets; it does NOT delete the declaration. Both halves are
+# load-bearing:
+#   - NOT deleted: an earlier version deleted it and broke the MAAP panels.
+#     Lumino's base is `overflow: hidden` and the Submit Jobs form is taller
+#     than its panel, so it became impossible to scroll to the Submit button.
+#     The extensions rely on this rule for their own scrolling -- they just
+#     scoped it to every widget in the app instead of their own.
+#   - Scoped: `auto` alone still broke the main dock area. DockPanel/TabBar/
+#     SplitPanel/... position children absolutely and are sized to exactly the
+#     space available, so sub-pixel rounding leaves a fractional overflow that
+#     `hidden` clips silently and `auto` turns into a real scrollbar -- which
+#     ate ~15px of the ~30px tab bar and clipped the tab row out of view.
+#     Excluding them restores Lab's own overflow for those elements only.
+#
+# These come from the MAAP base image, so environment.yml can't remove them, and
+# disabling the extensions would cost the Register Algorithm / Submit Jobs GUI
+# tiles. Runs AFTER Layer 1 in case a conda env update reinstates the files.
+# Deliberately NOT --require: if a future base image ships the fix upstream,
+# this becomes a no-op instead of a build failure. Idempotent.
+# See .clinerules.md rule 39.
+COPY --chown=${NB_USER}:${NB_USER} image/scripts/fix_lm_widget_overflow.py \
+     /tmp/fix_lm_widget_overflow.py
+RUN /srv/conda/envs/notebook/bin/python /tmp/fix_lm_widget_overflow.py \
+      --root /srv/conda/envs/notebook/share/jupyter/labextensions \
+    && rm /tmp/fix_lm_widget_overflow.py
+
+# === Make MAAP Settings stick across logins (issue #88) ===
+# maap-jupyter-server-extension writes all five of its settings back into
+# ~/.jupyter/lab/user-settings/... on EVERY page load, unconditionally, from
+# values its server handler reads out of the environment (src/index.ts +
+# handlers.py::GetMaapParamsHandler, v3.0.0 -- the version the base image pins).
+# Unset env var -> the handler returns "" -> the plugin writes "" over whatever
+# the operator typed into Settings -> MAAP Settings. MAAP injects those vars from
+# the ADE devfile; the Disasters hub is not a MAAP-managed hub, so nothing does.
+# That is the "re-paste the PGT every login" loop.
+#
+# Two halves, because the two fields differ in kind:
+#
+#   MAAP_API_HOST is the same for every operator, so just set it. The handler's
+#   format_api_url() turns it into https://api.maap-project.org/ and the
+#   consuming extensions' joinUrl() strips the trailing slash, so the write now
+#   lands the CORRECT url instead of "". This also gives the field a working
+#   default for a brand-new user (previously blank, and the PGT prompt only
+#   appears once a url exists), and maap-py reads the same var -- so a bare
+#   MAAP() in a notebook stops depending on ambient config. NOTE the value is a
+#   bare hostname with no scheme and no /api suffix: the extensions append the
+#   path, and maap-py adds the scheme (MAAP_API_HOST_SCHEME, default https).
+#
+#   MAAP_PGT is per-user and secret, so it cannot be baked into an image -- it
+#   has to survive in the settings file instead. The script below rewrites the
+#   bundle's unconditional set() calls to skip empty values, so a saved token is
+#   left alone while env-provided values still auto-populate.
+#
+# STRICT BY DEFAULT, unlike fix_lm_widget_overflow.py above: a silent miss here
+# is invisible in the UI and costs operators their token on every login, so it
+# fails the build instead of no-op'ing. A base-image bump that restructures (or
+# fixes) this upstream is expected to trip it -- re-read the bundle, then update
+# the pattern or delete this layer. The real fix belongs upstream in
+# MAAP-Project/jupyter-server-extension; this retires when it lands there.
+# Runs AFTER Layer 1 in case a conda env update reinstates the bundle.
+# See .clinerules.md rule 41.
+ENV MAAP_API_HOST=api.maap-project.org
+
+COPY --chown=${NB_USER}:${NB_USER} image/scripts/fix_maap_settings_clobber.py \
+     /tmp/fix_maap_settings_clobber.py
+RUN /srv/conda/envs/notebook/bin/python /tmp/fix_maap_settings_clobber.py \
+      --root /srv/conda/envs/notebook/share/jupyter/labextensions \
+    && rm /tmp/fix_maap_settings_clobber.py
+
 # === JupyterLab Help-menu customization ===
 # Bake the "Disasters Resources" submenu into Help (Report a Bug -> GitHub
 # Issues, Community Forum -> GitHub Discussions, Email Support -> mailto).

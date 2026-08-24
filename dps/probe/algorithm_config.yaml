@@ -1,0 +1,39 @@
+algorithm_name: disasters-iam-probe
+# TEMPORARY diagnostic algorithm -- register, run, read the log, then DELETE the
+# registration (dps/delete_algorithm.ipynb, by numeric processID) and remove
+# dps/probe/ from the repo. Not part of the product pipeline.
+algorithm_version: dev
+algorithm_description: >-
+  TEMPORARY IAM diagnostic. Prints the DPS worker's AWS identity (role ARN +
+  account) and, when secret_arn is supplied, attempts ONE Secrets Manager read and
+  reports only OK or the error code/message -- never the secret value. No data is
+  read, written, or published. Used to determine whether the DPS worker role can
+  read a cross-account Secrets Manager secret before building the KMS setup.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+# Reuses list_dates' build-env: every sensor's build-env.sh creates the SAME
+# shared `disasters_dps` env from dps/environment.yml, so there is nothing to
+# duplicate here (boto3 comes from that env).
+build_command: disasters-product-algorithms/dps/list_dates/build-env.sh
+run_command: disasters-product-algorithms/dps/probe/run.sh
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Minimal: two API calls and exit.
+ram_min: 2
+cores_min: 1
+outdir_max: 1
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: Temporary IAM/Secrets Manager reachability probe for the DPS worker role.
+citation: NASA Disasters Program
+keywords: diagnostic, iam, secrets-manager, temporary
+inputs:
+  - name: secret_arn
+    label: Secret ARN to probe
+    doc: "Full ARN of a us-west-2 Secrets Manager secret to attempt reading. The secret need NOT exist -- a made-up ARN in your own account still distinguishes 'no identity-based policy allows secretsmanager:GetSecretValue' (role cannot read secrets at all) from ResourceNotFoundException (action permitted). Leave blank to print identity only."
+    type: string
+    default: ""
+outputs:
+  - name: output
+    type: Directory

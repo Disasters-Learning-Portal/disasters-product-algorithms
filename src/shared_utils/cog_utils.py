@@ -26,6 +26,77 @@ _INTEGER_DTYPE_DEFAULTS = {
     'int64': -9999,
 }
 
+# 8-bit imagery band counts that carry NO alpha/mask band. A 1- or 3-band
+# 8-bit file has no mask at all, and the dtype default (0 for uint8) would mask
+# legitimately-black imagery, so it must not declare a numeric nodata -- see
+# is_bare_8bit_imagery. A file that DOES carry alpha must not declare one
+# either (the scalar shadows the alpha band), but that is a dtype-independent
+# question answered by colour interpretation, not by band count -- see
+# carries_alpha_band.
+_BARE_8BIT_BAND_COUNTS = frozenset({1, 3})
+
+_EIGHT_BIT_DTYPES = frozenset({'uint8', 'int8'})
+
+
+def is_bare_8bit_imagery(dtype, band_count) -> bool:
+    """True for an 8-bit raster with 1 or 3 bands (i.e. no alpha band).
+
+    These must not auto-declare a nodata value. In an 8-bit product every
+    in-range value is a legitimate sample -- dark water, shadow, burn scar and
+    deep shade are all genuinely 0 -- so `set_nodata_value('uint8')`'s `0`
+    masks real imagery rather than fill. Validity for 8-bit products belongs in
+    an alpha band (making the file 2- or 4-band); a 1- or 3-band file has no
+    such band, and is better off declaring nothing than declaring 0.
+
+    Deliberately keyed on band count, not on colour interpretation: the
+    colorinterp of a freshly written GTiff is not reliable until reopen, but
+    band count always is.
+
+    Scope note: this predicate answers "8-bit, no alpha" only. Whether a raster
+    carries an alpha band is a separate, dtype-independent question — see
+    `carries_alpha_band`.
+    """
+    return (
+        str(dtype).lower() in _EIGHT_BIT_DTYPES
+        and band_count in _BARE_8BIT_BAND_COUNTS
+    )
+
+
+def carries_alpha_band(colorinterp) -> bool:
+    """True when the raster's LAST band is tagged as an alpha band.
+
+    A raster that carries alpha must not declare a scalar nodata **at any bit
+    depth**: the two are mutually exclusive ways to express validity, and the
+    scalar wins. rasterio says so outright —
+
+        NodataShadowWarning: The dataset's nodata attribute is shadowing the
+        alpha band. All masks will be determined by the nodata attribute.
+
+    — so the alpha band is silently ignored and every pixel that happens to
+    equal the sentinel reads as fill, however legitimate it is.
+
+    That shadowing has nothing to do with dtype, which is why keying the
+    carve-out on "8-bit" alone (`is_bare_8bit_imagery`) is too narrow: a uint16
+    RGBA — the shape Satellogic's source rasters arrive in — would otherwise
+    auto-detect the uint16 default of 0 and shadow its own alpha band.
+
+    Takes the colorinterp tuple rather than a dataset so it stays pure and
+    directly testable. Read it from a dataset opened on a closed, on-disk file
+    (`rasterio.open(path).colorinterp`), NOT from a freshly created dataset
+    before close — that is the unreliability `is_bare_8bit_imagery` avoids.
+
+    Checks the LAST band only, deliberately, rather than inferring alpha from a
+    band count of 2 or 4. Band count is not evidence: a 4-band multispectral
+    stack (e.g. Satellogic's own uint16 B/G/R/NIR TOA) has four bands and no
+    alpha, and must keep its normal nodata behaviour. TIFF's ExtraSamples and
+    every GDAL writer put alpha last, so the last band is where it lives.
+    """
+    if not colorinterp:
+        return False
+    from rasterio.enums import ColorInterp
+    return colorinterp[-1] == ColorInterp.alpha
+
+
 # Matches a trailing ISO 8601 Zulu datetime, e.g. "...2025-09-22T18:56:17Z".
 # Its presence at the end of a filename is itself the "already renamed"
 # marker for the new convention - no _day suffix needed alongside it.
@@ -266,7 +337,7 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
 def convert_to_cog(
     input_tif: str,
     output_cog: Optional[str] = None,
-    nodata: Optional[Union[int, float]] = None,
+    nodata: Optional[Union[int, float, bool]] = None,
     dst_crs: Optional[str] = 'EPSG:3857',
     resampling_method: Optional[str] = None,
     clip_to_webmerc: Optional[bool] = None,
@@ -284,7 +355,36 @@ def convert_to_cog(
     Args:
         input_tif: Path to input GeoTIFF file
         output_cog: Path to output COG file (if None, replaces input file)
-        nodata: No-data value (if None, auto-detects from file or data type)
+        nodata: No-data value. `None` (default) auto-detects from the file's
+            existing tag, else from the data type — **except for two carve-outs,
+            both of which resolve to no nodata tag and strip an existing tag off
+            the source**:
+
+            1. The raster **carries an alpha band** (`carries_alpha_band`, i.e.
+               its last band's colour interpretation is alpha) — at **any** bit
+               depth, uint16 RGBA included. A scalar nodata declared alongside
+               an alpha band shadows it: rasterio raises NodataShadowWarning
+               ("All masks will be determined by the nodata attribute"),
+               rio-cogeo warns "Nodata value will be prioritized", and the alpha
+               band is silently ignored. Detection is by colour interpretation,
+               never by band count — a 4-band multispectral stack has no alpha
+               and keeps its normal nodata behaviour.
+            2. The raster is **8-bit with 1 or 3 bands** and so carries no mask
+               at all (`is_bare_8bit_imagery`). Every uint8 value is a
+               legitimate sample — dark water, shadow, burn scar — so the old
+               dtype default of 0 masked real black imagery.
+
+            A number is used as-is, after `validate_nodata_for_dtype`, and still
+            wins over both carve-outs. **`False` is an explicit opt-out**:
+            declare no nodata at all, for an input that carries its own alpha or
+            mask band. It remains the right call for a producer that knows it
+            wrote alpha (e.g. `geotools.dump_geotiff_rgb(..., alpha=...)`); the
+            carve-out above is the safety net for everything else.
+
+            Net effect: validity is expressed exactly once per raster — by an
+            alpha band where one exists, by a scalar sentinel where the dtype
+            makes one meaningful (uint16 classified/quality rasters, float
+            -9999), and by nothing at all for bare 8-bit imagery.
         dst_crs: Target CRS (default: 'EPSG:3857', None to preserve native CRS).
             Web Mercator avoids the WGS 84 ensemble / lat-first axis bug that
             breaks rio_stac.get_dataset_geom in veda-data-airflow build_stac.
@@ -369,6 +469,8 @@ def convert_to_cog(
 
     # Read input file metadata and check if reprojection is needed
     warped_file = None
+    nodata_stripped_vrt = None
+    strip_source_nodata = False
     input_for_cog = input_tif
 
     from shared_utils.reprojection import (
@@ -380,10 +482,85 @@ def convert_to_cog(
         existing_nodata = src.nodata
         src_crs = src.crs
 
-        # Determine no-data value
-        if nodata is None:
+        # Determine no-data value.
+        #
+        # `bool` is checked BEFORE the numeric branch and with isinstance, not
+        # `is False`, for two reasons:
+        #   - bool subclasses int, so a bare `True`/`False` would otherwise sail
+        #     through validate_nodata_for_dtype as 1/0 and silently declare the
+        #     wrong sentinel.
+        #   - np.bool_ is NOT the `False` singleton (`np.False_ is False` is
+        #     False), so an `is False` check would miss a numpy-derived flag.
+        if isinstance(nodata, (bool, np.bool_)):
+            if nodata:
+                raise ValueError(
+                    "nodata=True is not a no-data value. Use False to declare "
+                    "no nodata (for inputs that carry their own alpha/mask "
+                    "band), None to auto-detect from the file or dtype, or a "
+                    "number for an explicit sentinel."
+                )
+            # Explicit opt-out: caller's file already carries an alpha/mask band
+            # (e.g. RGB composites where 0 is a legitimate data value, not nodata).
+            # Declaring a scalar nodata alongside an alpha band SHADOWS it
+            # (rasterio NodataShadowWarning) — an RGB read then masks every
+            # legitimately-black pixel. Leaving nodata unset lets consumers use
+            # the mask the file already carries.
+            nodata = None
+            # Passing nodata=None downstream is NOT enough on its own: both
+            # `rio cogeo create` and cog_translate fall back to the source's
+            # own nodata tag when none is supplied, so an opt-out on a file
+            # that already declares one would be silently ignored. Strip it
+            # first (see the VRT step below).
+            strip_source_nodata = existing_nodata is not None
+            if not quiet:
+                print("  No nodata value will be set; preserving existing alpha/mask band.")
+                if strip_source_nodata:
+                    print(f"  Dropping the source's existing nodata tag ({existing_nodata}).")
+        elif nodata is None:
             from shared_utils.compression import is_extreme_float_nodata
-            if existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
+            if carries_alpha_band(src.colorinterp):
+                # An alpha band already expresses validity, and a scalar nodata
+                # declared alongside it SHADOWS it -- rasterio raises
+                # NodataShadowWarning and then determines every mask from the
+                # nodata attribute, so the alpha band is silently ignored.
+                # Dtype-independent, hence checked before the 8-bit rule: a
+                # uint16 RGBA would otherwise auto-detect the uint16 default of
+                # 0 and shadow its own alpha. An existing source tag is stripped
+                # for the same reason it is under nodata=False.
+                nodata = None
+                strip_source_nodata = existing_nodata is not None
+                if not quiet:
+                    print(
+                        f"  {src.count}-band {dtype} raster carries an alpha "
+                        f"band: no nodata will be set (a scalar nodata would "
+                        f"shadow the alpha band)."
+                    )
+                    if strip_source_nodata:
+                        print(
+                            f"  Dropping the source's existing nodata tag "
+                            f"({existing_nodata})."
+                        )
+            elif is_bare_8bit_imagery(dtype, src.count):
+                # 8-bit imagery never auto-declares a nodata value; 0 is a real
+                # sample, not fill. Reached only when the file carries no alpha
+                # band (the branch above), i.e. the 1- and 3-band shapes, which
+                # have no mask at all. Strips a source tag that was written
+                # under the old dtype-default behaviour. Explicit numeric
+                # nodata= from the caller still wins (that lands in the else
+                # branch below), as does nodata=False.
+                nodata = None
+                strip_source_nodata = existing_nodata is not None
+                if not quiet:
+                    print(
+                        f"  8-bit {src.count}-band imagery: no nodata will be set "
+                        f"(every uint8 value is a legitimate sample)."
+                    )
+                    if strip_source_nodata:
+                        print(
+                            f"  Dropping the source's existing nodata tag "
+                            f"({existing_nodata})."
+                        )
+            elif existing_nodata is not None and is_extreme_float_nodata(existing_nodata):
                 # Known FLT_MAX corruption pattern — remap before it
                 # propagates to gdalwarp / veda-data-airflow.
                 remapped = set_nodata_value(dtype)
@@ -445,6 +622,33 @@ def convert_to_cog(
     # Default overview resampling (may be overridden during reprojection)
     overview_resampling = 'average'
 
+    # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
+    # already declares one. A VRT is a lazy XML header — no pixel copy — so this
+    # costs nothing but makes the opt-out actually stick: without it both
+    # `rio cogeo create` and cog_translate re-read the source's nodata tag.
+    if strip_source_nodata:
+        nodata_stripped_vrt = os.path.join(
+            tempfile.gettempdir(), os.path.basename(input_tif) + '.nonodata.tmp.vrt'
+        )
+        translate_cmd = [
+            'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
+            input_tif, nodata_stripped_vrt,
+        ]
+        try:
+            subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
+            )
+        # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
+        # at the real file because its BASENAME is load-bearing downstream —
+        # resolve_metadata() parses the activation event out of it, and
+        # determine_resampling_method() reads it.
+        input_for_cog = nodata_stripped_vrt
+
+    # Pixel source for the warp step (the nodata-stripped VRT when opting out).
+    warp_source = input_for_cog
+
     # Step 1: Reproject if needed (warp to dst_crs)
     if needs_reprojection:
         warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
@@ -490,7 +694,7 @@ def convert_to_cog(
             warp_cmd.extend(['-srcnodata', str(nodata)])
             warp_cmd.extend(['-dstnodata', str(nodata)])
 
-        warp_cmd.extend([input_tif, warped_file])
+        warp_cmd.extend([warp_source, warped_file])
 
         try:
             result = subprocess.run(
@@ -608,6 +812,8 @@ def convert_to_cog(
         # Clean up warped temp file if it was created
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
 
         if not quiet:
             print(f"  ✓ COG created: {os.path.basename(output_cog)}")
@@ -622,12 +828,16 @@ def convert_to_cog(
             os.remove(temp_output)
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
         raise RuntimeError(error_msg)
     except Exception:
         if os.path.exists(temp_output):
             os.remove(temp_output)
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
+        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
+            os.remove(nodata_stripped_vrt)
         raise
 
 

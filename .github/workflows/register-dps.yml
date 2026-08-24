@@ -53,6 +53,8 @@ on:
           - list_dates
           - landsat
           - sentinel2
+          - blackmarble
+          - blackmarble_noaa
         default: capella
       register_to_maap:
         # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless
@@ -98,7 +100,7 @@ jobs:
     environment: ${{ inputs.register_to_maap && 'maap-registration' || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Stamp algorithm_version into the OGC config
         # Overwrite the config's algorithm_version with the dispatch input so the
@@ -112,13 +114,20 @@ jobs:
           echo "algorithm_version stamped:"; grep -E '^algorithm_version:' "${CONFIG}"
 
       - name: Build image + generate CWL + (optionally) register
-        # Our FORK of MAAP's generator, pinned to a SHA — it patches the ONE-BEHIND
-        # deploy so a single run registers its OWN CWL (upstream deploys the CWL at
-        # github.sha = the CHECKOUT commit, which is the PREVIOUS run's CWL because
-        # the CWL filename is branch-based and overwritten each run). Fork main =
-        # upstream main + that one-line fix. Re-pin this SHA when pulling upstream
-        # updates into the fork. Upstream: MAAP-Project/ogc-app-pack-generator.
-        uses: Disasters-Learning-Portal/ogc-app-pack-generator@3c95ec1ee5b737a9be0e6fb2449a7fd1686f5259
+        # Our FORK of MAAP's generator, pinned to a SHA. Fork main = upstream main +
+        # TWO patches (both marked "# FORK PATCH #N" in its action.yml):
+        #   #1 the ONE-BEHIND deploy fix, so a single run registers its OWN CWL
+        #      (upstream deploys the CWL at github.sha = the CHECKOUT commit, which is
+        #      the PREVIOUS run's CWL because the CWL filename is branch-based and
+        #      overwritten each run).
+        #   #2 its four JS actions bumped to their node24 majors (checkout@v7,
+        #      setup-python@v7, docker/login-action@v4, docker/build-push-action@v7).
+        #      Upstream's v4/v5/v3/v5 all target Node 20, so every run here logged
+        #      "Node.js 20 is deprecated ... forced to run on Node.js 24" and would
+        #      break outright once the runner drops the node20 shim.
+        # Re-pin this SHA when pulling upstream updates into the fork.
+        # Upstream: MAAP-Project/ogc-app-pack-generator.
+        uses: Disasters-Learning-Portal/ogc-app-pack-generator@4b473d3ef654ab2bacd8793f2d9985124f056357
         with:
           algorithm-configuration-path: dps/ogc/${{ inputs.algorithm }}.yml
           # Build the worker image in-workflow from this Dockerfile and push to

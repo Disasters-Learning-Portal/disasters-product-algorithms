@@ -58,6 +58,22 @@ validate_regex() {
   [[ "$2" =~ $3 ]] || die "$1 '$2' is invalid: expected $4."
 }
 
+# validate_date_not_before NAME VALUE MIN_YYYY-MM-DD -- VALUE must be a
+# well-formed YYYY-MM-DD on or after MIN. Used for satellite-mission start dates:
+# a date before a product's CMR TemporalExtents.BeginningDateTime returns ZERO
+# granules, which surfaces much later as an obscure downstream failure (or an
+# empty-success) rather than "that satellite wasn't flying yet". Lexicographic
+# string comparison is exact for zero-padded ISO dates, so no date parsing is
+# needed -- but the shape is checked first so a malformed value can't compare
+# "greater" by accident (e.g. "9/9/2020" > "2018-01-19" as a string).
+validate_date_not_before() {
+  local name="$1" value="$2" min="$3"
+  [[ "$value" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]] || \
+    die "$name '$value' is invalid: expected YYYY-MM-DD."
+  [[ "$value" > "$min" || "$value" == "$min" ]] || \
+    die "$name '$value' is before $min, the first date this product exists. Pick a later date."
+}
+
 # validate_granule NAME PATH "EXT1 EXT2 ..." -- exists, is a regular file, and
 # has one of the allowed extensions (case-insensitive).
 validate_granule() {
@@ -97,4 +113,32 @@ validate_in_set() {
     [[ "$value" == "$tok" ]] && return 0
   done
   die "$name '$value' is invalid. Allowed: ${allowed// /, }."
+}
+
+# validate_bbox VALUE -- WGS84 bounding box "min_lon,min_lat,max_lon,max_lat".
+# Used by the Black Marble DPS job. Enforces: exactly 4 comma-separated numbers,
+# lon in [-180,180] / lat in [-90,90], min < max on both axes, and a lat span of
+# at least 0.05 deg (blackmarble.crs rejects a thinner box -- the processing grid
+# needs a minimum height). bash can't compare floats, so the numeric checks run in
+# a single awk pass; awk exit 1 -> the message here fires.
+validate_bbox() {
+  local v="$1"
+  [[ "$v" =~ ^[-+0-9.,\ ]+$ ]] || \
+    die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)."
+  awk -v s="$v" 'BEGIN {
+    n = split(s, a, /[, ]+/);
+    if (n != 4) exit 1;
+    for (i = 1; i <= 4; i++) if (a[i] !~ /^[-+]?[0-9]*\.?[0-9]+$/) exit 1;
+    minlon=a[1]+0; minlat=a[2]+0; maxlon=a[3]+0; maxlat=a[4]+0;
+    if (minlon < -180 || maxlon > 180 || minlat < -90 || maxlat > 90) exit 2;
+    if (minlon >= maxlon || minlat >= maxlat) exit 3;
+    if (maxlat - minlat < 0.05) exit 4;
+    exit 0;
+  }' && return 0
+  case $? in
+    2) die "bbox '$v' is out of range (lon in [-180,180], lat in [-90,90])." ;;
+    3) die "bbox '$v' must have min_lon<max_lon and min_lat<max_lat." ;;
+    4) die "bbox '$v' latitude span is < 0.05 deg; widen it (blackmarble needs a taller box)." ;;
+    *) die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)." ;;
+  esac
 }

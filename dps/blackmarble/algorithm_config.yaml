@@ -1,0 +1,75 @@
+algorithm_name: disasters-blackmarble-process
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  VEDA Black Marble nighttime-lights pipeline. For a WGS84 bbox + date it downloads
+  VIIRS VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and OSM
+  road networks, then fuses them into an urban-focused Cloud Optimized GeoTIFF
+  (inferno-colormap RGB). The NASA Earthdata token is read from a MAAP secret at run
+  time (default name EARTHDATA_TOKEN) -- it is NOT a job input, so it never appears
+  in the job parameters or log. Products publish to nasa-disasters-staging.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/blackmarble/build-env.sh
+run_command: disasters-product-algorithms/dps/blackmarble/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements (OGC/CWL schema; replaces the old queue + disk_space).
+# ~8 GB RAM for a typical 100x100 km box (README); 16 gives headroom.
+ram_min: 16
+cores_min: 4
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: DPS integration for VEDA Black Marble nighttime-lights COG generation (vendored pipeline; Earthdata token via MAAP secrets).
+citation: NASA Disasters Program
+keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
+# Inputs: flat list, each {name, label, doc, type, default}. Booleans arrive as a
+# true/false control; primitives as --name <value>. run.sh maps these onto
+# the upstream `blackmarble` CLI. The Earthdata token is NOT an input -- run.sh pulls
+# it from MAAP secrets by the name in earthdata_secret_name at run time (store it
+# once with maap.secrets.add_secret; see docs/DPS.md).
+inputs:
+  - name: bbox
+    label: Bounding box (WGS84)
+    doc: 'min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81. Latitude span must be >= 0.05 deg. Pre-filled with a known-good San Francisco test box; change it for a real activation.'
+    type: string
+    default: "-122.55,37.69,-122.32,37.81"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX -- used for the S3 output path (dps_output/<event>/). Pre-filled with a test value so a bare Submit runs; set a REAL event for a real activation (the placeholder YYYYMM_Hazard_Location is rejected at run time)."
+    type: string
+    default: "202601_KyleWx_US"
+  - name: date
+    label: Target date
+    doc: "Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date. Pre-filled with a known-good test date."
+    type: string
+    default: "2023-06-15"
+  - name: config
+    label: Quality preset
+    doc: "Processing preset: fast (quick smoke, minimal enhancements) | default | high_quality. Default fast."
+    type: string
+    default: "fast"
+  - name: osm_source
+    label: OSM road source
+    doc: "OpenStreetMap road backend: overpass (Overpass API via OSMnx) | layercake (OSM-US parquet, faster on large/dense areas, experimental). Default overpass."
+    type: string
+    default: "overpass"
+  - name: wgs84
+    label: Also export EPSG:4326
+    doc: "Also write an EPSG:4326 (WGS84) COG next to the native output (for web mapping)."
+    type: boolean
+    default: false
+  - name: earthdata_secret_name
+    label: Earthdata secret name
+    doc: "NAME of the MAAP secret holding your NASA Earthdata token (not the token value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN', '<token>')."
+    type: string
+    default: "EARTHDATA_TOKEN"
+outputs:
+  - name: output
+    type: Directory

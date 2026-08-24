@@ -160,6 +160,28 @@ is the guard that catches when that drift breaks a code path. This closes the ga
 stale naming tests and the Sentinel-2 merge defects (rules 26–27) sit red/undetected: the merge/COG
 suite now runs on every push + PR to `dev`/`main`.
 
+### What CI deliberately does NOT execute
+
+The `pytest` job runs `tests/`, which now includes **`tests/e2e/`** — but every test there is
+gated on an opt-in env var **and** a live credential, so the job collects them and skips:
+
+| Tier | Gate | Also needs | Where it can run |
+|---|---|---|---|
+| `tests/unit`, `tests/integration` | — | real GDAL | CI, laptop, dev image |
+| `tests/e2e -m 'not slow'` | `DPS_E2E=1` + `EARTHDATA_TOKEN` | `disasters_dps` env (upstream `blackmarble` + `libgdal-hdf5`), network | laptop, hub |
+| `tests/e2e -m slow` | same | **ambient AWS credentials** | DPS worker, MAAP hub |
+
+The `slow` tier runs whole `run.sh` pipelines. Black Marble fuses VIIRS with Landsat from the
+**requester-pays** bucket `s3://usgs-landsat`, read via `obstore`; with no credentials obstore
+falls back to the EC2 metadata service (`169.254.169.254`) and fails *after* the VIIRS download
+has already succeeded. Its fixture recognises that signature and skips with an explanation rather
+than reporting a code failure — see `.clinerules.md` rule 44.
+
+**Rule for anything added here: a test that loops over a glob must assert the glob is non-empty
+first.** The first version of the e2e suite reported COG-validity and provenance as *passed* over
+zero files while the jobs had actually failed — a `for` loop (or `any()`/`all()`) over an empty
+list asserts nothing, and silence is indistinguishable from success.
+
 The **faithful local runtime is the dev hub image** — `klesinger/disasters-jupyterhub-docker-image-dev:latest`
 (the exact deployment: **GDAL 3.12.3 / PROJ 9.7.1 / Python 3.13 / rio-cogeo 7.0.2**). `tests/` is
 `.dockerignore`'d from the image, so mount the working tree and run against the current source:

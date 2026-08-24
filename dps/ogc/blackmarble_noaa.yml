@@ -1,0 +1,116 @@
+# =============================================================================
+# OGC Application Package config for VEDA Black Marble on NOAA-20 (VJ146A2)
+# — CLI/GitHub-Action registration.
+# =============================================================================
+# Registered via MAAP-Project/ogc-app-pack-generator (.github/workflows/register-dps.yml)
+# instead of the Register Algorithm GUI. What this buys us over the GUI:
+#
+#   1. Every input is OGC-optional (the `?` type-suffix -> minOccurs:0). The GUI
+#      cannot express optional (its Type dropdown rejects `?`), so on a
+#      GUI-registered algorithm the Submit Job form errors "Valid value required"
+#      on any falsy value (a toggle left off, a blank box). Here nothing blocks
+#      Submit — you can submit with the defaults untouched. run.sh remains the
+#      real enforcement point (it rejects a bad bbox/date, a placeholder
+#      activation_event, a date before the VJ146A2 mission start, and an
+#      unreadable Earthdata secret). See docs/DPS.md.
+#
+#   2. No prebuilt image to maintain. register-dps.yml passes `dockerfile-path:
+#      dps/Dockerfile`, so the Action BUILDS the DPS worker image from the branch
+#      it runs on and pushes it to ghcr.io, then injects that image into the
+#      generated CWL. There is therefore NO algorithm_container_url field here.
+#      `run_command` is an ABSOLUTE path inside that image (the Dockerfile bakes
+#      the repo at /app/disasters-product-algorithms); the CWL baseCommand runs
+#      from the ADES job CWD, so a repo-relative path would not resolve.
+#
+# WHY THIS ALGORITHM EXISTS: Suomi-NPP data product delivery ceases 2026-11-01
+# (disasters-portal#365), taking VNP46A2 — the product disasters-blackmarble-process
+# runs on — with it. VJ146A2 is the NOAA-20 / JPSS-1 twin and is unaffected: same CMR
+# version (2), same LAADS provider, same h5v/h5h tiling, same HDF-EOS5 grid path, same
+# Gap_Filled_DNB_BRDF-Corrected_NTL layer. Upstream `blackmarble` hardcodes VNP46A2 and
+# exposes no flag for it, so dps/blackmarble/bm_noaa.py sets the product and then runs
+# upstream's own CLI unmodified. Everything else — inputs, validation, naming, event
+# bake, S3 publish — is shared with the Suomi-NPP job via BM_PLATFORM.
+#
+# It is a SEPARATE algorithm rather than an input on the existing one because the two
+# products have different coverage windows (VNP46A2 from 2012-01-19, VJ146A2 from
+# 2018-01-19) and outputs land in distinct product folders (hdnightlightsnoaa20/), so
+# which satellite an activation ran on is part of its identity, not a submit-time toggle.
+#
+# algorithm_name: like sentinel2 and blackmarble, this does NOT use a "<sensor>-ogc-test"
+# name. This OGC config is the canonical registration, named
+# "disasters-blackmarble-noaa-process"; dps/blackmarble_noaa/algorithm_config.yaml (the
+# GUI path) carries the SAME name on purpose, so whichever path you register from targets
+# the one process. Lowercase is mandatory — MAAP requires ^[a-z0-9_-]+$.
+# =============================================================================
+algorithm_name: disasters-blackmarble-noaa-process
+algorithm_version: dev
+algorithm_description: >-
+  VEDA Black Marble nighttime-lights pipeline on NOAA-20 (VJ146A2): for a WGS84 bbox +
+  date, download VIIRS nighttime lights (Earthdata), Landsat (STAC), and OSM roads, then
+  fuse into an urban-focused Cloud Optimized GeoTIFF. Use this when the target date has no
+  Suomi-NPP coverage — Suomi-NPP product delivery ceases 2026-11-01, NOAA-20 is
+  unaffected. VJ146A2 exists from 2018-01-19 onward; for earlier dates use
+  disasters-blackmarble-process. Outputs go to their own hdnightlightsnoaa20/ product
+  folder, so they never overwrite a Suomi-NPP run for the same event and date. Every input
+  is optional in the schema so the Submit form never blocks; run.sh enforces the real
+  requirements (valid bbox/date, date not before 2018-01-19, non-placeholder
+  activation_event, readable Earthdata secret). The Earthdata token comes from MAAP
+  secrets, never the job inputs.
+keywords: black-marble, viirs, vj146a2, noaa-20, jpss-1, nighttime-lights, landsat, osm, cog, disasters, veda
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: NOAA-20 (VJ146A2) variant of the Black Marble job for dates without Suomi-NPP coverage; shares the Suomi-NPP engine via BM_PLATFORM, image built in-workflow from dps/Dockerfile.
+# Absolute path INSIDE the built image (Dockerfile bakes the repo at
+# /app/disasters-product-algorithms). Not repo-relative.
+run_command: /app/disasters-product-algorithms/dps/blackmarble_noaa/run.sh
+ram_min: 16
+cores_min: 4
+outdir_max: 20
+
+# INPUTS — ALL optional (`?`), so no falsy value can trip the Submit form's
+# "Valid value required" check. IDENTICAL to dps/ogc/blackmarble.yml: the platform is not
+# an input, it is fixed by which algorithm you submit. NO Earthdata token VALUE input —
+# only the NAME of the MAAP secret that holds it (names are not sensitive).
+inputs:
+  - name: bbox
+    label: Bounding box (WGS84)
+    doc: 'min_lon,min_lat,max_lon,max_lat in WGS84, e.g. -122.55,37.69,-122.32,37.81. Latitude span must be >= 0.05 deg. Pre-filled with a known-good San Francisco test box; change it for a real activation.'
+    type: string?
+    default: "-122.55,37.69,-122.32,37.81"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX -- used for the S3 output path (dps_output/<event>/). Pre-filled with a test value so a bare Submit runs; set a REAL event for a real activation (the placeholder YYYYMM_Hazard_Location is rejected at run time)."
+    type: string?
+    default: "202601_KyleWx_US"
+  - name: date
+    label: Target date
+    doc: "Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date. Must be 2018-01-19 or later -- NOAA-20 VJ146A2 does not exist before then (use disasters-blackmarble-process for earlier dates). Pre-filled with a known-good test date."
+    type: string?
+    default: "2023-06-15"
+  - name: config
+    label: Quality preset
+    doc: "Processing preset: fast (quick smoke, minimal enhancements) | default | high_quality. Default fast."
+    type: string?
+    default: "fast"
+  - name: osm_source
+    label: OSM road source
+    doc: "OpenStreetMap road backend: overpass (Overpass API via OSMnx) | layercake (OSM-US parquet, faster on large/dense areas, experimental). Default overpass."
+    type: string?
+    default: "overpass"
+  - name: wgs84
+    label: Also export EPSG:4326
+    doc: "Also write an EPSG:4326 (WGS84) COG next to the native output (for web mapping)."
+    type: boolean?
+    default: false
+  - name: earthdata_secret_name
+    label: Earthdata secret name
+    doc: "NAME of the MAAP secret holding your NASA Earthdata token (not the token value). Default EARTHDATA_TOKEN. Store it once with maap.secrets.add_secret('EARTHDATA_TOKEN', '<token>')."
+    type: string?
+    default: "EARTHDATA_TOKEN"
+
+outputs:
+  - name: output
+    type: Directory

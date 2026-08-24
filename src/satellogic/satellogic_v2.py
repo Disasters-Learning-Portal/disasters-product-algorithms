@@ -13,6 +13,107 @@ from shared_utils.geotools import *
 DEFAULT_SCALE_FACTOR = 0.0001
 NODATA_FLOAT = -9999.0
 
+# Cloud-mask class values, verified against real vendor scenes:
+#   0 = outside the imagery footprint (the band's own declared nodata)
+#   1 = clear
+#   3 = cloud -- on an L1B scene the class-3 regions line up exactly with the
+#       clouds visible in the vendor's own VISUAL product
+#   2 = seen, rare (<0.01% of a scene), unidentified; treated as not-clear
+#
+# apply_mask keeps ONLY class 1, so anything else inside the footprint is
+# unusable. The encoding is NOT constant across scenes -- one L1D scene was
+# observed whose entire valid footprint was class 3 with zero class-1 pixels,
+# making every index product 100% nodata. That is why cover is REPORTED rather
+# than assumed.
+CLOUD_NODATA_CLASS = 0
+CLOUD_CLEAR_CLASS = 1
+
+# Decimate the cloud band to at most this many pixels on its long edge when
+# summarising. A full read of an 864 Mpx scene's mask costs ~860 MB in a
+# pipeline that is already memory-bound; a decimated estimate of a percentage
+# is accurate to well under 1%.
+CLOUD_SUMMARY_MAX_DIM = 2048
+
+# Clear-fraction thresholds (fractions OF THE IMAGERY FOOTPRINT).
+# CLOUD_EFFECTIVELY_NONE is deliberately a small non-zero number rather than an
+# `== 0` test: a genuinely 100%-cloud scene still carried 63 stray class-1
+# pixels in a 1.3M-pixel sample (0.005%), which an exact check would miss.
+CLOUD_EFFECTIVELY_NONE = 0.005
+CLOUD_MOSTLY_OBSCURED = 0.30
+
+
+def summarize_cloud_cover(cloud_file, max_dim=CLOUD_SUMMARY_MAX_DIM):
+    """Report how much of a scene is usable, BEFORE any product is generated.
+
+    Exists because the two product families fail differently and neither one
+    says "this scene is unusable":
+
+      * indices (ndvi/ndwi/evi) ARE cloud-masked, so a fully-clouded scene
+        yields 100% nodata -- a blank product that reads as a broken pipeline
+      * composites (truecolor/colorir) are NEVER cloud-masked (ticket #320),
+        so the same scene yields a picture of cloud tops -- which also reads
+        as a broken product
+
+    Returns a dict with ``footprint_frac``, ``clear_frac``, ``cloud_frac`` and
+    ``classes`` (value -> fraction of the whole raster), or ``None`` if the
+    file could not be read. ``clear_frac``/``cloud_frac`` are fractions OF THE
+    IMAGERY FOOTPRINT, not of the whole raster, since the off-swath fill is
+    not a data-quality property of the scene.
+    """
+    try:
+        ds = gdal.Open(cloud_file)
+        if ds is None:
+            raise RuntimeError(f"gdal.Open returned None for {cloud_file}")
+        W, H = ds.RasterXSize, ds.RasterYSize
+        scale = min(1.0, max_dim / max(W, H))
+        bw, bh = max(1, int(W * scale)), max(1, int(H * scale))
+        arr = ds.GetRasterBand(1).ReadAsArray(buf_xsize=bw, buf_ysize=bh)
+        ds = None
+    except Exception as e:
+        # Never let a cosmetic report break a run.
+        print(f"  WARNING: could not summarize cloud cover: {type(e).__name__}: {e}")
+        return None
+
+    total = arr.size
+    values, counts = np.unique(arr, return_counts=True)
+    classes = {int(v): int(c) / total for v, c in zip(values, counts)}
+
+    footprint = int((arr != CLOUD_NODATA_CLASS).sum())
+    if footprint == 0:
+        print("  WARNING: cloud mask is entirely nodata - the scene has no imagery.")
+        return {"footprint_frac": 0.0, "clear_frac": 0.0, "cloud_frac": 0.0,
+                "classes": classes}
+
+    clear = int((arr == CLOUD_CLEAR_CLASS).sum())
+    clear_frac = clear / footprint
+    cloud_frac = 1.0 - clear_frac
+
+    print(f"  Cloud mask ({W}x{H}, sampled {bw}x{bh}): "
+          + ", ".join(f"class {v}={f:.1%}" for v, f in sorted(classes.items())))
+    print(f"  Imagery footprint: {footprint / total:.1%} of raster | "
+          f"of that, CLEAR {clear_frac:.1%} / NOT-CLEAR {cloud_frac:.1%}")
+
+    # Threshold, not `== 0.0`. A real 100%-cloud scene still had 63 stray
+    # class-1 pixels out of a 1.3M-pixel footprint (0.005%), so exact float
+    # equality silently missed it and downgraded the alarm to the mild branch.
+    if clear_frac < CLOUD_EFFECTIVELY_NONE:
+        print("  " + "!" * 68)
+        print(f"  WARNING: THIS SCENE IS EFFECTIVELY CLOUD-COVERED "
+              f"({clear_frac:.3%} clear).")
+        print(f"    Cloud mask keeps only class {CLOUD_CLEAR_CLASS}; this "
+              f"footprint is class "
+              f"{sorted(v for v in classes if v != CLOUD_NODATA_CLASS)}.")
+        print("    -> indices (ndvi/ndwi/evi) will be effectively EMPTY (all nodata)")
+        print("    -> composites (truecolor/colorir) will show only cloud tops")
+        print("    Neither product will be meaningful. Pick another date.")
+        print("  " + "!" * 68)
+    elif clear_frac < CLOUD_MOSTLY_OBSCURED:
+        print(f"  WARNING: only {clear_frac:.1%} of this scene is clear; "
+              f"index products will be mostly nodata.")
+
+    return {"footprint_frac": footprint / total, "clear_frac": clear_frac,
+            "cloud_frac": cloud_frac, "classes": classes}
+
 # Retieving satellogic data from S3
 def retrieve_satellogic_resources(date, level, bucket="csda-data-vendor-satellogic", prefix="disasters"):
     files = retrieve_s3_file_list(bucket, prefix)
@@ -189,7 +290,11 @@ def apply_solar_correction(arrays, sunzen):
 
 # Applying cloud mask
 def apply_mask(arrays, cloud):
-    mask = cloud != 1
+    # Keeps ONLY the clear class; everything else (cloud, the rare class 2, and
+    # the off-swath 0 fill) becomes NaN. Shares CLOUD_CLEAR_CLASS with
+    # summarize_cloud_cover so the reported "clear %" always matches what this
+    # actually keeps -- if the two drifted, the report would be a lie.
+    mask = cloud != CLOUD_CLEAR_CLASS
     return [np.where(mask, np.nan, a) for a in arrays]
 
 
@@ -246,26 +351,38 @@ def prepare_scene(paths, meta, use_mask=True):
     in_file = download_s3_file(image_files[0])
     ds = gdal.Open(in_file)
 
-    # Only fetch + open the cloud band when it will actually be applied.
-    # Color composites (truecolor/colorir) pass use_mask=False and never touch
-    # `cloud`, so skip the download/open entirely. When masking is requested but
-    # no cloud tif exists, `cloud` stays None (never gdal.Open(None)).
-    cloud = None
-    if use_mask:
-        cloud_files = [
-            x for x in paths
-            if (
-                x.lower().endswith("_cloud.tif")
-                or x.lower().endswith("_cloud_0.tif")
-            )
-        ]
+    cloud_files = [
+        x for x in paths
+        if (
+            x.lower().endswith("_cloud.tif")
+            or x.lower().endswith("_cloud_0.tif")
+        )
+    ]
 
-        if cloud_files:
-            cloud_file = download_s3_file(cloud_files[0])
+    # The cloud band is fetched for EVERY product, not just the masked ones.
+    #
+    # This used to be skipped entirely for composites (use_mask=False) to avoid
+    # the download. But a composite is never cloud-masked, so on a fully-clouded
+    # scene it silently renders a picture of cloud tops, while an index on the
+    # SAME pixels comes out 100% nodata. Both look like a broken pipeline and
+    # neither reports the actual cause, so the operator cannot tell a bad scene
+    # from a bug. The report is what distinguishes them.
+    #
+    # The extra cost is small and worth it: the cloud band is ~0.2% of the TOA
+    # it accompanies (5.8 MB against 2.6 GB on a real L1D scene). The FULL read
+    # into memory still only happens when the mask is actually applied -- the
+    # summary itself works off a decimated overview.
+    cloud = None
+    if cloud_files:
+        cloud_file = download_s3_file(cloud_files[0])
+        summarize_cloud_cover(cloud_file)
+
+        if use_mask:
             dc = gdal.Open(cloud_file)
             cloud = dc.GetRasterBand(1).ReadAsArray()
-        else:
-            print("No cloud tif found for this scene; proceeding without a mask.")
+    else:
+        print("No cloud tif found for this scene; cloud cover unknown"
+              + ("; proceeding without a mask." if use_mask else "."))
 
     return (ds, cloud, in_file, level, scale_factor, sunzen)
 
@@ -365,20 +482,32 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
 
+    # NaN means nodata (load_reflectance_band does arr[arr == 0] = np.nan).
+    # Take the mask from the SOURCE bands, not from the post-normalize stack:
+    # normalize_band returns np.zeros_like(band) for a degenerate band (no
+    # finite samples, or hi <= lo), which silently destroys the NaN and would
+    # leave the whole scene opaque.
+    valid_mask = np.isfinite(red) & np.isfinite(green) & np.isfinite(blue)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
     if visualize:
         r = normalize_band(red)
         g = normalize_band(green)
         b = normalize_band(blue)
         rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-
     else:
         rgb = np.clip(np.dstack([red, green, blue]), 0, 1)
 
-    out_img = (rgb * 255).astype(np.uint8)
+    # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
+    out_img = np.nan_to_num(rgb, nan=0.0)
+    out_img = (out_img * 255).astype(np.uint8)
 
     outfile = build_output_name(in_file, out, "truecolor")
 
-    dump_geotiff_rgb(outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2], ds.GetProjection(), ds.GetGeoTransform())
+    dump_geotiff_rgb(
+        outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2],
+        ds.GetProjection(), ds.GetGeoTransform(), alpha=alpha,
+    )
 
     return outfile
 
@@ -393,20 +522,28 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
 
+    # Mask from the SOURCE bands — see genTrueColor for why not from `rgb`.
+    valid_mask = np.isfinite(nir) & np.isfinite(red) & np.isfinite(green)
+    alpha = (valid_mask * 255).astype(np.uint8)
+
     if visualize:
         r = normalize_band(nir)
         g = normalize_band(red)
         b = normalize_band(green)
         rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-
     else:
         rgb = np.clip(np.dstack([nir, red, green]), 0, 1)
 
-    out_img = (rgb * 255).astype(np.uint8)
+    # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
+    out_img = np.nan_to_num(rgb, nan=0.0)
+    out_img = (out_img * 255).astype(np.uint8)
 
     outfile = build_output_name(in_file, out, "colorir")
 
-    dump_geotiff_rgb(outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2], ds.GetProjection(), ds.GetGeoTransform())
+    dump_geotiff_rgb(
+        outfile, out_img[..., 0], out_img[..., 1], out_img[..., 2],
+        ds.GetProjection(), ds.GetGeoTransform(), alpha=alpha,
+    )
 
     return outfile
 

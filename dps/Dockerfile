@@ -90,9 +90,57 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # is broken. `conda run --name disasters_dps` is the exact invocation run.sh
 # uses, so this proves the runtime contract holds. --help exits 0 without doing
 # real work; the import line proves every sensor package + shared_utils resolves.
+# The last two lines cover the UPSTREAM blackmarble package (pip-installed from
+# github.com/NASA-IMPACT/veda-black-marble by dps/environment.yml, not vendored here):
+# the import proves the VCS install landed with its WRS2 package data, and the --help
+# proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
+# obstore) all resolved. This is the only build-time gate on that install.
+#
+# `bm_noaa.py --self-check` is the gate on the NOAA-20 variant. That script retargets the
+# pinned upstream package from VNP46A2 to VJ146A2 by setting a MODULE CONSTANT
+# (blackmarble.acquire.viirs.BM_SHORT_NAME) -- upstream has no flag for it. If upstream
+# renames that constant or moves the HDF5 layer path, a naive patch would silently do
+# NOTHING: the job would download Suomi-NPP granules, publish them under a NOAA-20 product
+# name, and exit 0. --self-check applies the patch offline (no token, no network) and
+# fails if the contract moved, so that drift breaks THIS BUILD rather than an activation.
+#
+# `bm_georef.py --self-check` is the same kind of gate on the LANDSAT GEOREFERENCING patch,
+# which applies to BOTH platforms. Upstream renders band tiles at mosaic coordinates into a
+# window-sized array and then pastes them at the window offset, applying that offset twice
+# and putting every product ~3.6 km north-west of truth. A stale patch fails silently in the
+# worst way -- the job publishes a misregistered COG that passes cog_validate, has a correct
+# transform, and lands over the right city, so nothing downstream notices. --self-check
+# validates upstream's shape AND pushes markers at known coordinates through the patched
+# path offline, asserting they land within 200 m (unpatched puts them ~3600 m out, or off
+# the grid entirely).
+#
+# The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
+# non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
+# does NOT pull in, and nothing above notices: `blackmarble --help` and every
+# `process_* --help` pass fine without them, so a missing driver only surfaces at DPS
+# job time as `plugin gdal_<DRV>.so is not available`. That has now bitten twice --
+# JP2OpenJPEG (Sentinel-2 .jp2 bands, silent empty-success) and HDF5 (Black Marble
+# VIIRS .h5 granules, permanentFail). Assert on the plugin FILE, not on
+# `gdal.GetDriverByName("HDF5")`: GDAL's deferred plugin loading registers a PROXY
+# driver even when the .so is absent (that proxy is what emits the "could have been
+# recognized by driver HDF5, but plugin ... is not available" message), so
+# GetDriverByName returns non-None either way and gates nothing. The glob tolerates
+# any version suffix conda-forge adds. Adding a driver dep to dps/environment.yml?
+# Add it here too.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
     && conda run --name disasters_dps python -c \
-        "import shared_utils, capella, umbra, satellogic, landsat, sentinel2"
+        "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
+    && conda run --name disasters_dps python -c "import blackmarble" \
+    && conda run --name disasters_dps blackmarble --help >/dev/null \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_georef.py --self-check \
+    && conda run --name disasters_dps bash -c '\
+        for drv in HDF5 JP2OpenJPEG; do \
+          ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \
+            || { echo "MISSING GDAL plugin gdal_${drv}.so - add the matching libgdal-* package to dps/environment.yml"; exit 1; }; \
+        done'
 
 # MAAP's OGC runtime invokes the CWL baseCommand
 # (disasters-product-algorithms/dps/<sensor>/run.sh) from /app. Match that CWD.

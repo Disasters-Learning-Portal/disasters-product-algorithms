@@ -66,11 +66,17 @@ def resolve_authorized_path(resp, target_bucket):
     )
 
 
-def iter_upload_keys(out_home, base_prefix):
+def iter_upload_keys(out_home, base_prefix, include=None):
     """Yield ``(local_path, s3_key)`` for every product COG/PNG under ``out_home``.
 
     ``s3_key = base_prefix + relpath(local_path, out_home)`` so the sub-path under
     ``out_home`` is preserved. Mirrors ``dps/_finalize.sh`` (``*.tif`` + ``*.png``).
+
+    ``include`` is an optional predicate taking the local path; only files it
+    returns truthy for are yielded. It defaults to None (publish everything),
+    which is what a DPS job wants -- ``run.sh`` writes nothing but products into
+    ``OUT_HOME``. Operator notebooks share their output tree with intermediates
+    (per-tile merge inputs, water-extent scratch), so they pass a predicate.
     """
     base = base_prefix.strip("/")
     files = sorted(
@@ -78,6 +84,8 @@ def iter_upload_keys(out_home, base_prefix):
         + glob.glob(os.path.join(out_home, "**", "*.png"), recursive=True)
     )
     for f in files:
+        if include is not None and not include(f):
+            continue
         rel = os.path.relpath(f, out_home)
         yield f, (f"{base}/{rel}" if base else rel)
 
@@ -102,19 +110,22 @@ def _workspace_s3_client():
     return session.client("s3"), resp
 
 
-def upload_dir_to_staging(out_home, target_bucket, dest_prefix):
+def upload_dir_to_staging(out_home, target_bucket, dest_prefix, include=None):
     """Upload every product under ``out_home`` to ``s3://target_bucket/<prefix>/``.
 
     ``<prefix>`` = the MAAP-granted read_write prefix for ``target_bucket`` (often "")
     joined with ``dest_prefix`` (e.g. ``dps_output/<activation_event>``). Returns the
     number of files uploaded. Raises on any failure so a ``set -e`` run.sh aborts.
+
+    ``include`` is forwarded to :func:`iter_upload_keys` to skip non-product files;
+    None (the default, and what every ``run.sh`` uses) publishes everything.
     """
     s3, resp = _workspace_s3_client()
     entry_prefix = resolve_authorized_path(resp, target_bucket)
     base_prefix = _join_prefix(entry_prefix, dest_prefix)
 
     n = 0
-    for local_path, key in iter_upload_keys(out_home, base_prefix):
+    for local_path, key in iter_upload_keys(out_home, base_prefix, include=include):
         s3.upload_file(local_path, target_bucket, key)
         print(f"Uploaded: s3://{target_bucket}/{key}")
         n += 1

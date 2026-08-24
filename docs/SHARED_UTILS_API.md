@@ -867,6 +867,13 @@ Write float32 GeoTIFF.
 
 Write uint8 GeoTIFF.
 
-#### `dump_geotiff_rgb(filename, r, g, b, projref, in_geo)`
+#### `dump_geotiff_rgb(filename, r, g, b, projref, in_geo, alpha=None)`
 
-Write 3-band RGB GeoTIFF.
+Write an 8-bit RGB GeoTIFF. `alpha=None` (default) writes the legacy 3-band
+output unchanged. Pass a uint8 array (`0` = transparent/nodata, `255` = valid)
+to write a 4-band RGBA whose band 4 is tagged `GCI_AlphaBand`.
+
+Use alpha instead of a scalar nodata whenever `0` is a legitimate sample — for
+an 8-bit composite it always is. Callers must then pass `nodata=False` to
+`convert_to_cog`; a scalar nodata declared alongside an alpha band shadows it
+(rasterio `NodataShadowWarning`) and masks real black pixels.

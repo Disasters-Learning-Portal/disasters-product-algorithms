@@ -1,974 +1,502 @@
 """
 process_sentinel2.py
 
-Name:           Kaylee Sharp
-Edited:         Aaron Serre
+Command-line interface for processing Sentinel-2 imagery.
 
-Date Created:   February 2025
-Date Edited:    July 2026       
+This script handles:
+    - Sentinel-2 STAC searches
+    - Algorithm selection
+    - Index generation
+    - Composite generation
+    - Tile merging (optional)
+    - COG creation
+    - S3 upload
 
+The actual Sentinel-2 processing functions are contained in
+sentinel2.sentinel2_functions.
 """
 
-from datetime import datetime
-from datetime import date
-import glob
-import os
-import time
 import argparse
-from pathlib import Path
-from sentinel2.sentinel2_functions import *
-from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
+import os
+
+from sentinel2.sentinel2_functions import (
+    search_sentinel2,
+    get_algorithm,
+    generate_index,
+    generate_composite,
+    merge_products,
+    _build_output_filename,
+)
+
+from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
-from tqdm import tqdm
-import traceback
-import sys
 
-# Force unbuffered output for real-time display in JupyterHub/subprocess
-# Flush stdout/stderr after every write
-class Unbuffered(object):
-    def __init__(self, stream):
-        self.stream = stream
-    def write(self, data):
-        self.stream.write(data)
-        self.stream.flush()
-    def writelines(self, datas):
-        self.stream.writelines(datas)
-        self.stream.flush()
-    def __getattr__(self, attr):
-        return getattr(self.stream, attr)
 
-sys.stdout = Unbuffered(sys.stdout)
-sys.stderr = Unbuffered(sys.stderr)
+# ---------------------------------------------------------------------
+# Fixed Sentinel-2 processing parameters
+# ---------------------------------------------------------------------
 
-then = datetime.now()
+SENTINEL2_BUCKET = "nasa-disasters"
+SENTINEL2_PREFIX = "drcs_activations_new"
 
-parser=argparse.ArgumentParser(
-        description='''This script unzips and processes Sentinel-2 L2A data\
-                     and produces true color, natural color, color infrared\
-                     NDWI, MNDWI, NDVI, NBR, or Water Extent.''',
-        usage='process_sentinel2.py input [-h] [-p [P ...]] [-we_nstd [WE_NSTD ...]] [-date [DATE ...]] [-tile [TILE ...]] [-merge] [-mask] [-force] [-unzip_only] [-tif_only] [-nodata NODATA] [-compression COMPRESSION] [-compression_level LEVEL] [-event EVENT]')
-parser.add_argument('input', nargs=1, help= 'Path to directory containing the .zip files (e.g.\
-                    /data/esops/eventData/2023/TurkeyEarthquake/sentinel2).')
-parser.add_argument('-p', nargs='*', default=['true'], help='List of products to produce (all = everything, true = true color,\
-                     nat = natural, colorIR = color infrared, swir = shortwave infrared, ndwi = NDWI, mndwi = MNDWI, ndvi = NDVI, \
-                    nbr = NBR, we = water extent')
-parser.add_argument('-we_nstd', nargs='*', default=[1], help='Produce water extents with given number(s) of standard deviations (default is 1).\
-                    More standard deviations = higher NIR threshold = more pixels classified as water.')
-parser.add_argument('-date', nargs='*', default = False, help='Date(s) (e.g. 20230116). If no date(s) or tile(s) is entered,\
-                    all dates found will be processed.')
-parser.add_argument('-tile', nargs ='*', default=False, help='Identifier (e.g. T36SYD) for specific tile(s),\
-                    If no tile(s) or date(s) is entered, all tiles found will be processed.')
-parser.add_argument('-merge', default=False, action='store_true', help='Merge all images by date and product.')
-parser.add_argument('-mask', default=False, action='store_true', help='Generate cloud mask and mask all images (non-masked version \
-                    preserved as well).')
-parser.add_argument('-force', default=False, action="store_true", help='Force overwrite existing products.')
-parser.add_argument('-unzip_only', default=False, action="store_true", help='Just unzip all .zip files. Do not process.')
-parser.add_argument('-tif_only', default=False, action="store_true", help='Skip COG conversion and keep regular GeoTIFF format (COG is default).')
-parser.add_argument('-nodata', type=float, default=None, help='No-data value for COG outputs (auto-detected if not specified).')
-parser.add_argument('-compression', type=str, default='ZSTD', help='Compression type for COG (default: ZSTD).')
-parser.add_argument('-compression_level', type=int, default=22, help='Compression level for COG (default: 22 for ZSTD).')
-parser.add_argument('-dst_crs', type=str, default='native', help='Target CRS for COG output. "native" (default) preserves the source projection (no warp); pass "EPSG:3857" (Web Mercator) for optimal VEDA titiler-pgstac tiling (also required by veda-data-airflow build_stac).')
-parser.add_argument('-event', type=str, default=None, help='Event name for filename prefix (e.g., 202512_Flood_WA). Adds formatted date suffix.')
-parser.add_argument('--metadata-json', type=str, default=None, help='Path to a JSON file of activation-event metadata (ACTIVATION_EVENT, SOURCE, PROCESSOR, ...) to embed as GeoTIFF tags on every output COG.')
-args=parser.parse_args()
-metadata = load_metadata_json(args.metadata_json)
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 1
 
-# Handle dst_crs argument (convert "native" to None)
-dst_crs_value = None if args.dst_crs.lower() == 'native' else args.dst_crs
+# Keep the native Sentinel-2 projection.
+DST_CRS = None
 
-print('\nInput:', args.input[0], flush=True)
-input_dir = args.input[0]
+# Default Sentinel-2 STAC collection.
+SENTINEL2_COLLECTION_L1C = "sentinel-2-l1c"
+SENTINEL2_COLLECTION_L2A = "sentinel-2-c1-l2a"
 
-# Create input directory if it doesn't exist
-if not os.path.exists(input_dir):
-    print(f'Creating input directory: {input_dir}', flush=True)
-    os.makedirs(input_dir, exist_ok=True)
+# Default STAC API.
+SENTINEL2_STAC_API = (
+    "https://earth-search.aws.element84.com/v1"
+)
 
-if not args.unzip_only:
-  if 'all' in args.p:
-    products = ['true', 'nat', 'swir', 'colorIR', 'ndwi', 'mndwi', 'ndvi', 'nbr', 'we']
-  else:
-    # check for valid product types
-    products = args.p
-    product_variants = ['true', 'tc', 'truecolor', 'colorir', 'cir', 'colorinfrared', 'nat', 'natural', 'naturalcolor',\
-                        'swir', 'shortwaveir', 'shortwaveinfrared', 'ndwi', 'mndwi', 'ndvi', 'nbr', 'we', 'waterextent']
-    invalid_products = [p for p in products if p.lower() not in product_variants]
-    if invalid_products:
-        print('Invalid product type(s): ', invalid_products)
-        print('Please enter a product from the following list (not case sensitive): true (tc, truecolor),\
-                nat (natural, naturalcolor), swir (shortwaveir, shortwaveinfrared), colorIR (cir, colorinfrared),\
-                ndwi, mndwi, ndvi, nbr.')
-        quit()
-  print('Product(s) to produce:', products)
+# No data setting
+INDEX_NODATA = -9999
+COMPOSITE_NODATA = False
 
-  # display and store inputted dates
-  if args.date:
-    print('Processing date(s):', args.date)
-    dates = args.date
-  else:
-    print('Processing all dates')
-  
-  # display and store inputted tiles
-  if args.tile:
-    tiles = args.tile
-    print('Processing tile(s):', tiles)
-  else:
-    print('Processing all tiles')
 
-# gather .zip files
-zips = glob.glob(os.path.join(input_dir, '*.zip'))
-unpacked_dir = os.path.join(input_dir, 'unpacked')
-if zips:
-    # create unpacked directory
-    print('\nNumber of .zip files:', len(zips))
-    if not os.path.isdir(unpacked_dir):
-        os.mkdir(unpacked_dir)
-else:
-    print('No .zip files found. Looking for .SAFE directories in: ', unpacked_dir)
-    if not unpacked_dir:
-        print(f'{unpacked_dir} does not exist! Check input path.')
-        quit()
+# ---------------------------------------------------------------------
+# Sentinel-2 product categories
+# ---------------------------------------------------------------------
+
+INDEX_PRODUCTS = {
+    "ndvi",
+    "ndwi",
+    "mndwi",
+    "nbr",
+}
+
+COMPOSITE_PRODUCTS = {
+    "true_color",
+    "natural_color",
+    "color_infrared",
+    "swir",
+}
+
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        description="Process Sentinel-2 imagery"
+    )
+
+    # -----------------------------------------------------------------
+    # Product
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--product",
+        required=True,
+        choices=[
+            "ndvi",
+            "ndwi",
+            "mndwi",
+            "nbr",
+            "true_color",
+            "natural_color",
+            "color_infrared",
+            "swir",
+        ],
+        help="Sentinel-2 product to generate",
+    )
+
+    # -----------------------------------------------------------------
+    # Date / spatial search
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--start-date",
+        required=True,
+        help="Search start date (YYYY-MM-DD)",
+    )
+
+    parser.add_argument(
+        "--end-date",
+        required=True,
+        help="Search end date (YYYY-MM-DD)",
+    )
+
+    parser.add_argument(
+        "--bbox",
+        nargs=4,
+        type=float,
+        required=True,
+        metavar=(
+            "MIN_LON",
+            "MIN_LAT",
+            "MAX_LON",
+            "MAX_LAT",
+        ),
+        help=(
+            "Bounding box in the form: "
+            "MIN_LON MIN_LAT MAX_LON MAX_LAT"
+        ),
+    )
+
+    parser.add_argument(
+        "--cloud-cover",
+        type=float,
+        default=50,
+        help=(
+            "Maximum allowed cloud cover percentage "
+            "(default: 50)"
+        ),
+    )
+
+    parser.add_argument(
+        "--cloud-mask",
+        action="store_true",
+        help=(
+            "Mask cloud, cloud-shadow, and thin-cirrus pixels using the "
+            "Sentinel-2 L2A Scene Classification Layer (SCL). Only valid "
+            "with --level 2; L1C has no SCL asset."
+        ),
+    )
+
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help=(
+            "Mosaic all matched Sentinel-2 tiles into a single output "
+            "product instead of writing one file per tile."
+        ),
+    )
+
+    # -----------------------------------------------------------------
+    # STAC configuration
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--stac-api",
+        default=SENTINEL2_STAC_API,
+        help=(
+            "STAC API endpoint "
+            "(default: Earth Search)"
+        ),
+    )
+
+    parser.add_argument(
+        "--level",
+        required=True,
+        choices=["1", "2"],
+        help=(
+            "Sentinel-2 processing level: "
+            "1 = Level-1C, 2 = Level-2A"
+        ),
+    )
+
+    # -----------------------------------------------------------------
+    # Algorithm configuration
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--algorithm-file",
+        default="/home/jovyan/disasters-product-algorithms/src/sentinel2/algorithms-sentinel2.json",
+        help=(
+            "Path to Sentinel-2 algorithm JSON file "
+            "(default: algorithms-sentinel2.json)"
+        ),
+    )
+
+    # -----------------------------------------------------------------
+    # Local output
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--output",
+        default="/tmp/s3_temp",
+        help=(
+            "Local directory for intermediate GeoTIFFs "
+            "and COGs (default: /tmp/s3_temp)"
+        ),
+    )
+
+    # -----------------------------------------------------------------
+    # Metadata
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--metadata-json",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file containing activation-event "
+            "metadata to embed as GeoTIFF tags on the output COG."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.level == "1":
+        collection_id = SENTINEL2_COLLECTION_L1C
+    
+    elif args.level == "2":
+        collection_id = SENTINEL2_COLLECTION_L2A
+    
     else:
-        # checking for .SAFE files
-        safe_dirs_l1 = glob.glob(os.path.join(unpacked_dir, '*/*SAFE'))
-        safe_dirs_l2 = glob.glob(os.path.join(unpacked_dir, '*/*/*SAFE'))
-        safe_dirs = safe_dirs_l1 + safe_dirs_l2
-        if safe_dirs:
-           print('.SAFE directories found!')
-        else:
-           print('No .SAFE directories found!')
-           quit()
-
-if zips:
-    for zip_file in zips:
-        zip_base = os.path.basename(zip_file)
-        zip_base_parts = zip_base.split('_')
-
-        # files from Copernicus browser/download script
-        if zip_base[0:2] == 'S2':
-            # format output .SAFE file
-            date = zip_base_parts[2][0:8]
-            tile = zip_base_parts[5]
-            safe = os.path.join(unpacked_dir, date, zip_base.replace('.SAFE.zip', '.SAFE'))
-
-            if os.path.isdir(safe):
-                # check for existing .SAFE file
-                print(f'\t{zip_base} already unzipped.')
-            else:
-                # make date directory
-                date_dir = os.path.join(unpacked_dir, date)
-                if not os.path.isdir(date_dir):
-                    os.mkdir(date_dir)
-                
-                # unzip
-                print("\nUnzipping:", zip_base)
-                cmd = f'7z x {zip_file} -o{date_dir}'
-                os.system(cmd)
-        
-        # files from HDDS
-        elif zip_base[0:2] == 'SN':
-            # format output filename
-            outname = zip_base.replace('.zip', '')
-            check = glob.glob(os.path.join(unpacked_dir, '*', outname))
-            
-            if check:
-               # check if already unzipped
-               print(f'\t{zip_base} already unzipped.')
-            else:
-               # unzip file to a temporary directory
-               temp = os.path.join(unpacked_dir, outname)
-               print('\nUnzipping:', zip_base)
-               cmd = f'7z x {zip_file} -o{temp}'
-               os.system(cmd)
-
-               # find the .SAFE directory within the temporary directory
-               safe = glob.glob(os.path.join(temp, '*.SAFE'))
-               
-               if not safe:
-                  print('Data missing! No .SAFE directory found.')
-                  continue
-               else:
-                  # create date directory
-                  date = os.path.basename(safe[0]).split('_')[2][0:8]
-                  date_dir = os.path.join(unpacked_dir, date)
-                  if not os.path.isdir(date_dir):
-                      os.mkdir(date_dir)
-
-                  # move temporary directory to the date directory
-                  shutil.move(temp, date_dir)
-        else:
-           print('Filename format unrecognized. Expecting S2*.SAFE.zip or SN*.zip.')
-                  
-# Gather directories mathcing inputted date and/or tile
-if not args.unzip_only:
-  prod_dirs = []    # store product directory paths; used for merging later
-  data_dirs = []    # store data directory paths; used for processing
-  if args.date and args.tile:
-    for date in dates:
-      for tile in tiles:
-        try:
-          data_dir = glob.glob(os.path.join(unpacked_dir, date, f'*{date}_{tile}'))[0]
-        except:
-          data_dir = glob.glob(os.path.join(unpacked_dir, date, f'*/*{date}_{tile}'))[0]
-        finally:
-          data_dirs.append(data_dir)
-  elif args.date:
-    for date in dates:
-      data_dir1 = glob.glob(os.path.join(unpacked_dir, date, f'*{date}*SAFE'))
-      data_dir2 = glob.glob(os.path.join(unpacked_dir, date, f'*/*{date}*SAFE'))
-      data_dirs = data_dirs + data_dir1 + data_dir2
-  elif args.tile:
-    for tile in tiles:
-      data_dir1 = glob.glob(os.path.join(unpacked_dir, '*' , f'*{tile}*SAFE'))
-      data_dir2 = glob.glob(os.path.join(unpacked_dir, '*' , f'*/*{tile}*SAFE'))
-      data_dirs = data_dirs + data_dir1 + data_dir2
-  else:
-    data_dirs1 = glob.glob(os.path.join(unpacked_dir, '*', 'S2*SAFE'))
-    data_dirs2 = glob.glob(os.path.join(unpacked_dir, '*', 'SN*/S2*SAFE'))
-    data_dirs = data_dirs1 + data_dirs2
-
-else:
-   quit()
-
-# check for data directories
-num_dirs = len(data_dirs)
-if num_dirs == 0:
-  # Make the date/tile mismatch obvious. The common footgun: PROCESS_DATE points
-  # at a day with no downloaded scene (e.g. you downloaded a multi-day window but
-  # asked to process a single day that isn't in it). Show requested vs. on-disk,
-  # and exit non-zero so this can't be mistaken for a successful no-op.
-  avail_dates = sorted(d for d in os.listdir(unpacked_dir)
-                       if os.path.isdir(os.path.join(unpacked_dir, d)))
-  all_safe = (glob.glob(os.path.join(unpacked_dir, '*', 'S2*SAFE')) +
-              glob.glob(os.path.join(unpacked_dir, '*', 'SN*/S2*SAFE')))
-  avail_tiles = sorted({p for s in all_safe for p in os.path.basename(s).split('_')
-                        if len(p) == 6 and p[0] == 'T' and p[1:3].isdigit()})
-  print('\n' + '=' * 72)
-  print('  NO SCENES MATCHED YOUR FILTER -- nothing was processed.')
-  print('=' * 72)
-  if args.date:
-    print(f'  Requested date(s) [-date / PROCESS_DATE]: {dates}')
-  if args.tile:
-    print(f'  Requested tile(s) [-tile / PROCESS_TILE]: {tiles}')
-  print(f'  Dates available on disk:  {avail_dates or "(none)"}')
-  print(f'  Tiles available on disk:  {avail_tiles or "(none)"}')
-  print('  Fix: set PROCESS_DATE / PROCESS_TILE to one of the available values')
-  print('       above, or set it to None to process everything downloaded.')
-  print('=' * 72)
-  sys.exit(1)
-else:
-  # create output directory
-  out_dir = os.path.join(input_dir, 'output')
-  if not os.path.isdir(out_dir):
-      os.mkdir(out_dir)
-
-  # Initialize error tracking
-  processing_errors = []  # List of (scene, product, error_message) tuples
-  processing_success = []  # List of (scene, product) tuples
-
-  # Create log file path
-  log_file = os.path.join(out_dir, f'processing_log_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
-
-  print('\nNumber of directories to process:', num_dirs)
-  for i,ddir in enumerate(tqdm(data_dirs, desc="Processing scenes", unit="scene")):
-    print(f'\nWorking on: {os.path.basename(ddir)}')
-
-    # parse filename for metadata
-    ddir_parts = os.path.basename(ddir).split('_')
-    date_time = ddir_parts[2].split('T')
-    date = date_time[0]
-    time = date_time[1]
-    tile = ddir_parts[5]
-    sat = ddir_parts[0]
-    level = ddir_parts[1]
-    if level == 'MSIL1C':
-       # will perform Rayleigh correction for true color image
-       ray = True
-    else:
-       ray = False
-
-    # create date directory within the output directory
-    out_date_dir = os.path.join(out_dir, date)
-    if not os.path.isdir(out_date_dir):
-        os.mkdir(out_date_dir)
-
-    water_variants = ['we', 'waterextent']
-    if next((True for p in products if p.lower() in water_variants), False) or args.mask:
-      if level != 'MSIL2A':
-         print('\n* Cloud Mask can only be produced from Level-2 data!')
-         cloudMask = None
-      else:
-        # check for cloud mask
-        prod_dir = os.path.join(out_date_dir, 'cloudMask')
-        prod_dirs.append(prod_dir)
-        if not os.path.isdir(prod_dir):
-            os.mkdir(prod_dir)
-        timestamp = (
-            f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-            f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-        )
-        
-        prod_name = os.path.join(
-            prod_dir,
-            f"{sat}_{level}_cloudMask_{tile}_{timestamp}.tif"
+        raise ValueError(
+            f"Unsupported Sentinel-2 level: {args.level}"
         )
 
-        # Check if final output file already exists
-        final_name = get_final_filename(prod_name, args.event, args.tif_only)
-        if os.path.exists(final_name) and not args.force:
-            print(f'\n* Cloud Mask already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-            cloudMask = final_name
-            processing_success.append((os.path.basename(ddir), 'Cloud Mask', 'Skipped - already exists'))
-        else:
-            try:
-                # produce cloud mask
-                print('\n* Producing Cloud Mask')
-                cloudMask = gen_cloudMask(ddir, prod_name, level)
+    if args.cloud_mask and args.level == "1":
+        raise ValueError(
+            "--cloud-mask requires Sentinel-2 L2A (--level 2); the Scene "
+            "Classification Layer (SCL) needed for cloud masking does not "
+            "exist for L1C products."
+        )
 
-                # Convert to COG (default) and optionally rename with event
-                # Skip COG conversion if merging - will convert merged file instead
-                if not args.tif_only and not args.merge:
-                    cog_path = convert_to_cog(
-                        prod_name,
-                        nodata=args.nodata,
-                        dst_crs=dst_crs_value,
-                        metadata=metadata,
-                        compression=args.compression,
-                        compression_level=args.compression_level
-                    )
-                    if args.event:
-                        rename_with_event(cog_path, args.event)
-                elif args.event and not args.merge:
-                    # Rename TIF without COG conversion
-                    rename_with_event(prod_name, args.event)
+    # -----------------------------------------------------------------
+    # Determine product type
+    # -----------------------------------------------------------------
 
-                processing_success.append((os.path.basename(ddir), 'Cloud Mask', 'Success'))
-            except Exception as e:
-                error_msg = f"{type(e).__name__}: {str(e)}"
-                processing_errors.append((os.path.basename(ddir), 'Cloud Mask', error_msg))
-                print(f'\n  ✗ ERROR processing Cloud Mask: {error_msg}')
-                print(f'  Continuing with next product...')
-                cloudMask = None  # Set to None so other products can continue
+    if args.product in INDEX_PRODUCTS:
+        algorithm_type = "index"
+        nodata = INDEX_NODATA
+
+    elif args.product in COMPOSITE_PRODUCTS:
+        algorithm_type = "composite"
+        nodata = COMPOSITE_NODATA
+
     else:
-       cloudMask = None
+        raise ValueError(
+            f"Unsupported Sentinel-2 product: {args.product}"
+        )
 
-    true_variants = ['true','tc', 'truecolor'] 
-    if next((True for p in products if p.lower() in true_variants), False):
-      # check for true color image
-      prod_dir = os.path.join(out_date_dir, 'trueColor')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_trueColor_{tile}_{timestamp}.tif"
-      )
+    # -----------------------------------------------------------------
+    # Load metadata
+    # -----------------------------------------------------------------
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* True color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'True Color', 'Skipped - already exists'))
-      else:
-        try:
-            # produce true color image
-            print('\n* Processing true color')
-            gen_true_color(ddir, prod_name, level, None, ray)
+    metadata = load_metadata_json(
+        args.metadata_json
+    )
 
-            # Convert to COG (default) and optionally rename with event
-            # Skip COG conversion if merging - will convert merged file instead
-            if not args.tif_only and not args.merge:
-                cog_path = convert_to_cog(
-                    prod_name,
-                    nodata=args.nodata,
-                    dst_crs=dst_crs_value,
-                    metadata=metadata,
-                    compression=args.compression,
-                    compression_level=args.compression_level
-                )
-                if args.event:
-                    rename_with_event(cog_path, args.event)
-            elif args.event and not args.merge:
-                # Rename TIF without COG conversion
-                rename_with_event(prod_name, args.event)
+    # -----------------------------------------------------------------
+    # Print configuration
+    # -----------------------------------------------------------------
 
-            processing_success.append((os.path.basename(ddir), 'True Color', 'Success'))
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            processing_errors.append((os.path.basename(ddir), 'True Color', error_msg))
-            print(f'\n  ✗ ERROR processing True Color: {error_msg}')
-            print(f'  Continuing with next product...')
-    
-    nat_variants = ['nat', 'natural', 'naturalcolor']
-    if next((True for p in products if p.lower() in nat_variants), False):
-      # check for natural color image
-      prod_dir = os.path.join(out_date_dir, 'naturalColor')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_naturalColor_{tile}_{timestamp}.tif"
-      )
+    print()
+    print("=" * 70)
+    print("Sentinel-2 Processing")
+    print("=" * 70)
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* Natural color already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'Natural Color', 'Skipped - already exists'))
-      else:
-        try:
-            # produce natural color image
-            print('\n* Processing natural color')
-            gen_natural_color(ddir, prod_name, level, None, ray)
+    print(f"Product:        {args.product}")
+    print(f"Product type:   {algorithm_type}")
+    print(f"Start date:     {args.start_date}")
+    print(f"End date:       {args.end_date}")
+    print(f"Bounding box:   {args.bbox}")
+    print(f"Cloud cover:    {args.cloud_cover}%")
+    print(f"STAC API:       {args.stac_api}")
+    print(f"Processing level: {args.level}")
+    print(f"STAC collection:  {collection_id}")
+    print(f"Algorithm file: {args.algorithm_file}")
+    print(f"Output:         {args.output}")
+    print(f"NoData:         {nodata}")
+    print(f"S3 bucket:      {SENTINEL2_BUCKET}")
+    print(f"S3 prefix:      {SENTINEL2_PREFIX}")
+    print(f"Compression:    {COMPRESSION}")
+    print(f"Compression lvl: {COMPRESSION_LEVEL}")
+    print(f"Cloud mask:     {args.cloud_mask}")
+    print(f"Merge tiles:    {args.merge}")
+    print()
 
-            # Convert to COG (default) and optionally rename with event
-            # Skip COG conversion if merging - will convert merged file instead
-            if not args.tif_only and not args.merge:
-                cog_path = convert_to_cog(
-                    prod_name,
-                    nodata=args.nodata,
-                    dst_crs=dst_crs_value,
-                    metadata=metadata,
-                    compression=args.compression,
-                    compression_level=args.compression_level
-                )
-                if args.event:
-                    rename_with_event(cog_path, args.event)
-            elif args.event and not args.merge:
-                # Rename TIF without COG conversion
-                rename_with_event(prod_name, args.event)
+    # -----------------------------------------------------------------
+    # Load algorithm
+    # -----------------------------------------------------------------
 
-            processing_success.append((os.path.basename(ddir), 'Natural Color', 'Success'))
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            processing_errors.append((os.path.basename(ddir), 'Natural Color', error_msg))
-            print(f'\n  ✗ ERROR processing Natural Color: {error_msg}')
-            print(f'  Continuing with next product...')
-    
-    swir_variants = ['swir', 'shortwaveir', 'shortwaveinfrared']
-    if next((True for p in products if p.lower() in swir_variants), False):
-      # check for SWIR image
-      prod_dir = os.path.join(out_date_dir, 'shortwaveInfrared')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_shortwaveInfrared_{tile}_{timestamp}.tif"
-      )
+    print("Loading Sentinel-2 algorithm...")
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* Short wave infrared already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'SWIR', 'Skipped - already exists'))
-      else:
-        try:
-          # produce SWIR image
-          print('\n* Porcessing short wave infrared')
-          gen_swir(ddir, prod_name, level, None, ray)
+    algorithm = get_algorithm(
+        algorithm_type=algorithm_type,
+        algorithm_name=args.product,
+        algorithm_file=args.algorithm_file,
+    )
 
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
+    print(
+        f"Algorithm '{args.product}' loaded successfully."
+    )
 
-          processing_success.append((os.path.basename(ddir), 'SWIR', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'SWIR', error_msg))
-          print(f'\n  ✗ ERROR processing SWIR: {error_msg}')
-          print(f'  Continuing with next product...')
-    
-    cir_variants = ['cir', 'colorir', 'colorinfrared']
-    if next((True for p in products if p.lower() in cir_variants), False):
-      # check for color infrared image
-      prod_dir = os.path.join(out_date_dir, 'colorInfrared')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_colorInfrared_{tile}_{timestamp}.tif"
-      )
+    # -----------------------------------------------------------------
+    # Search Sentinel-2
+    # -----------------------------------------------------------------
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* Color infrared already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Skipped - already exists'))
-      else:
-        try:
-          # produce color infrared image
-          print('\n* Processing color infrared')
-          gen_color_infrared(ddir, prod_name, level, None, ray)
+    print()
+    print("Searching for Sentinel-2 imagery...")
 
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
+    items = search_sentinel2(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        bbox=args.bbox,
+        cloud_cover=args.cloud_cover,
+        stac_api_url=args.stac_api,
+        collection_id=collection_id,
+    )
 
-          processing_success.append((os.path.basename(ddir), 'Color Infrared', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'Color Infrared', error_msg))
-          print(f'\n  ✗ ERROR processing Color Infrared: {error_msg}')
-          print(f'  Continuing with next product...')
-    
-    if next((True for p in products if p.lower() == 'ndwi'), False):
-      # check for NDWI
-      prod_dir = os.path.join(out_date_dir, 'NDWI')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NDWI_{tile}_{timestamp}.tif"
-      )
+    if not items:
+        raise FileNotFoundError(
+            "No Sentinel-2 scenes found for the requested "
+            "date range, bounding box, and cloud-cover threshold."
+        )
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* NDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'NDWI', 'Skipped - already exists'))
-      else:
-        try:
-          # produce NDWI image
-          print('\n* Processing NDWI')
-          gen_ndwi(ddir, prod_name, level, cloudMask, ray)
+    print(
+        f"Found {len(items)} Sentinel-2 scene(s)."
+    )
 
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
+    # -----------------------------------------------------------------
+    # Generate product GeoTIFF(s), one per scene
+    # -----------------------------------------------------------------
 
-          processing_success.append((os.path.basename(ddir), 'NDWI', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'NDWI', error_msg))
-          print(f'\n  ✗ ERROR processing NDWI: {error_msg}')
-          print(f'  Continuing with next product...')
-    
-    if next((True for p in products if p.lower() == 'mndwi'), False):
-      # check for mNDWI image
-      prod_dir = os.path.join(out_date_dir, 'MNDWI')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_MNDWI_{tile}_{timestamp}.tif"
-      )
+    local_paths = []
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* MNDWI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'MNDWI', 'Skipped - already exists'))
-      else:
-        try:
-          # produce mNDWI image
-          print('\n* Processing MNDWI')
-          gen_mndwi(ddir, prod_name, level, cloudMask, ray)
+    for i, item in enumerate(items, start=1):
 
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
+        print()
+        print("=" * 70)
+        print(
+            f"Generating scene {i}/{len(items)}: "
+            f"{item.id}"
+        )
+        print("=" * 70)
 
-          processing_success.append((os.path.basename(ddir), 'MNDWI', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'MNDWI', error_msg))
-          print(f'\n  ✗ ERROR processing MNDWI: {error_msg}')
-          print(f'  Continuing with next product...')
-    
-    if next((True for p in products if p.lower() == 'ndvi'), False):
-      # check for NDVI
-      prod_dir = os.path.join(out_date_dir, 'NDVI')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NDVI_{tile}_{timestamp}.tif"
-      )
+        if algorithm_type == "index":
 
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* NDVI already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'NDVI', 'Skipped - already exists'))
-      else:
-        try:
-          # produce for NDVI image
-          print('\n* Processing NDVI')
-          gen_ndvi(ddir, prod_name, level, cloudMask, ray)
-
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
-
-          processing_success.append((os.path.basename(ddir), 'NDVI', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'NDVI', error_msg))
-          print(f'\n  ✗ ERROR processing NDVI: {error_msg}')
-          print(f'  Continuing with next product...')
-    
-    if next((True for p in products if p.lower() == 'nbr'), False):
-      # check for NBR image
-      prod_dir = os.path.join(out_date_dir, 'NBR')
-      prod_dirs.append(prod_dir)
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      timestamp = (
-          f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-          f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-      )
-      
-      prod_name = os.path.join(
-          prod_dir,
-          f"{sat}_{level}_NBR_{tile}_{timestamp}.tif"
-      )
-
-      # Check if final output file already exists
-      final_name = get_final_filename(prod_name, args.event, args.tif_only)
-      if os.path.exists(final_name) and not args.force:
-        print(f'\n* NBR already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-        processing_success.append((os.path.basename(ddir), 'NBR', 'Skipped - already exists'))
-      else:
-        try:
-          # produce NBR image
-          print('\n* Processing NBR')
-          gen_nbr(ddir, prod_name, level, cloudMask)
-
-          # Convert to COG (default) and optionally rename with event
-          # Skip COG conversion if merging - will convert merged file instead
-          if not args.tif_only and not args.merge:
-              cog_path = convert_to_cog(
-                  prod_name,
-                  nodata=args.nodata,
-                  dst_crs=dst_crs_value,
-                  metadata=metadata,
-                  compression=args.compression,
-                  compression_level=args.compression_level
-              )
-              if args.event:
-                  rename_with_event(cog_path, args.event)
-          elif args.event and not args.merge:
-              # Rename TIF without COG conversion
-              rename_with_event(prod_name, args.event)
-
-          processing_success.append((os.path.basename(ddir), 'NBR', 'Success'))
-        except Exception as e:
-          error_msg = f"{type(e).__name__}: {str(e)}"
-          processing_errors.append((os.path.basename(ddir), 'NBR', error_msg))
-          print(f'\n  ✗ ERROR processing NBR: {error_msg}')
-          print(f'  Continuing with next product...')
-
-    # update permissions
-    print(f'\nProgress: {i+1}/{num_dirs}')
-    cmd = '/bin/chmod -f -R ug+rwx '+ out_dir
-    os.system(cmd)
-
-  if next((True for p in products if p.lower() in water_variants), False):
-    # compile unique date directories
-    date_dirs = set([Path(ddir).parent for ddir in data_dirs if 'MSIL2A' in ddir])
-
-    # a water extent is produced for each date
-    for date_dir in date_dirs:
-      date = os.path.basename(date_dir)
-
-      # create water extent directory
-      prod_dir = os.path.join(out_dir, date, 'waterExtent')
-      if not os.path.isdir(prod_dir):
-          os.mkdir(prod_dir)
-      
-      # check for merged cloud mask
-      cloud_dir = os.path.join(out_dir, date, 'cloudMask')
-      cloudMask_check = glob.glob(os.path.join(cloud_dir,'*merged.tif'))
-      if not cloudMask_check:
-         # merge all cloud masks for a given daye
-         print('\n* Merging Cloud Masks.')
-         cloudMask = s2_merge(cloud_dir, False)
-      else:
-         cloudMask = cloudMask_check[0]
-      
-      # a water extent can be produced for several inputted numbers of standard deviation
-      for nstd in args.we_nstd:
-          # format output filename
-          nstd_str = str(nstd).replace('.', '_')
-          timestamp = (
-              f"{date[:4]}-{date[4:6]}-{date[6:8]}"
-              f"T{time[:2]}:{time[2:4]}:{time[4:6]}Z"
-          )
-          
-          prod_name = os.path.join(
-              prod_dir,
-              f"{sat}_{level}_waterExtent_NSTD_{tile}_{timestamp}.tif"
-          )
-
-          # Check if final output file already exists
-          final_name = get_final_filename(prod_name, args.event, args.tif_only)
-          if os.path.exists(final_name) and not args.force:
-            print(f'\n* Water Extent already exists: {os.path.basename(final_name)}. Use "-force" to overwrite.')
-            processing_success.append((date, f'Water Extent (NSTD: {nstd})', 'Skipped - already exists'))
-          else:
-            try:
-              # produce water extent
-              print(f'\n* Processing Water Extent (NSTD: {nstd})')
-              gen_water_extent(date_dir, float(nstd), prod_name, cloudMask)
-
-              # Convert to COG (default) and optionally rename with event
-              # Skip COG conversion if merging - will convert merged file instead
-              if not args.tif_only and not args.merge:
-                  cog_path = convert_to_cog(
-                      prod_name,
-                      nodata=args.nodata,
-                      dst_crs=dst_crs_value,
-                      metadata=metadata,
-                      compression=args.compression,
-                      compression_level=args.compression_level
-                  )
-                  if args.event:
-                      rename_with_event(cog_path, args.event)
-              elif args.event and not args.merge:
-                  # Rename TIF without COG conversion
-                  rename_with_event(prod_name, args.event)
-
-              processing_success.append((date, f'Water Extent (NSTD: {nstd})', 'Success'))
-            except Exception as e:
-              error_msg = f"{type(e).__name__}: {str(e)}"
-              processing_errors.append((date, f'Water Extent (NSTD: {nstd})', error_msg))
-              print(f'\n  ✗ ERROR processing Water Extent (NSTD: {nstd}): {error_msg}')
-              print(f'  Continuing with next product...')
-
-  if args.merge:
-     print('\n')
-     dirs_to_merge = list(set(prod_dirs))
-     cm_dirs = [prod_dir for prod_dir in dirs_to_merge if 'cloud' in prod_dir]
-     for cm_dir in cm_dirs:
-        # merge cloud masks separately so that they are not masked themselves
-        # need to merge cloud masks first b/c this mask can be used
-        # to mask the merged product below
-        dirs_to_merge.remove(cm_dir)  # always drop from the product list
-        # Skip the (re-)merge if a merged cloud-mask COG already exists (unless -force).
-        existing_merged = glob.glob(os.path.join(cm_dir, '*merged*.tif'))
-        if existing_merged and not args.force:
-            print(f'\n* Merged cloud mask already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
-            continue
-        # Skip a product dir that generated no output (e.g. band extraction raised
-        # and was caught above): s2_merge would raise FileNotFoundError on the empty
-        # dir and abort the whole merge. Let one failed product not kill the rest.
-        if not [im for im in glob.glob(os.path.join(cm_dir, '*tif')) if 'merged' not in os.path.basename(im)]:
-            print(f'\n* Skipping {os.path.basename(os.path.normpath(cm_dir))} -- no output generated (see errors above).')
-            continue
-        print('Merging:', cm_dir)
-        merged_file = s2_merge(cm_dir, mask=False)
-
-        # Convert merged file to COG and optionally rename with event
-        if not args.tif_only:
-            cog_path = convert_to_cog(
-                merged_file,
-                nodata=args.nodata,
-                dst_crs=dst_crs_value,
-                metadata=metadata,
-                compression=args.compression,
-                compression_level=args.compression_level
+            outfile = generate_index(
+                item=item,
+                algorithm=algorithm,
+                algorithm_name=args.product,
+                output_dir=args.output,
+                nodata=nodata,
+                cloud_mask=args.cloud_mask,
             )
-            if args.event:
-                rename_with_event(cog_path, args.event)
-        elif args.event:
-            rename_with_event(merged_file, args.event)
 
-     for prod_dir in dirs_to_merge:
-        # Skip the (re-)merge if a merged COG already exists for this product (unless -force).
-        existing_merged = glob.glob(os.path.join(prod_dir, '*merged*.tif'))
-        if existing_merged and not args.force:
-            print(f'\n* Merged product already exists: {os.path.basename(existing_merged[0])}. Use "-force" to overwrite.')
-            continue
-        # Skip a product dir that generated no output (e.g. band extraction raised
-        # and was caught above): s2_merge would raise FileNotFoundError on the empty
-        # dir and abort the whole merge. Let one failed product not kill the rest.
-        if not [im for im in glob.glob(os.path.join(prod_dir, '*tif')) if 'merged' not in os.path.basename(im)]:
-            print(f'\n* Skipping {os.path.basename(os.path.normpath(prod_dir))} -- no output generated (see errors above).')
-            continue
-        # Determine if this product should be masked (indices only)
-        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
-        mask_status = args.mask if is_index else False
+        else:
 
-        # merge products of the same date
-        print(f'Merging: {prod_dir} (Masking: {mask_status})')
-        merged_file = s2_merge(prod_dir, mask_status)
-
-        # Convert merged file to COG and optionally rename with event
-        if not args.tif_only:
-            cog_path = convert_to_cog(
-                merged_file,
-                nodata=args.nodata,
-                dst_crs=dst_crs_value,
-                metadata=metadata,
-                compression=args.compression,
-                compression_level=args.compression_level
+            outfile = generate_composite(
+                item=item,
+                algorithm=algorithm,
+                algorithm_name=args.product,
+                output_dir=args.output,
+                cloud_mask=args.cloud_mask,
             )
-            if args.event:
-                rename_with_event(cog_path, args.event)
-        elif args.event:
-            rename_with_event(merged_file, args.event)
 
-  print("\nCompleted Sentinel-2 processing and product generation\n")
+        if not outfile:
+            print(
+                "No output was generated for this scene."
+            )
+            continue
 
-  # Write processing summary and log file
-  total_processed = len(processing_success) + len(processing_errors)
+        print(f"Product GeoTIFF created: {outfile}")
 
-  print("="*70)
-  print("PROCESSING SUMMARY")
-  print("="*70)
-  print(f"Total products processed: {total_processed}")
-  print(f"✓ Successful: {len(processing_success)}")
-  print(f"✗ Failed: {len(processing_errors)}")
+        local_paths.append((item, outfile))
 
-  if processing_errors:
-      print("\n" + "="*70)
-      print("ERRORS ENCOUNTERED:")
-      print("="*70)
-      for scene, product, error in processing_errors:
-          print(f"  ✗ {scene} - {product}")
-          print(f"     Error: {error}")
+    if not local_paths:
+        raise RuntimeError(
+            "No product GeoTIFFs were generated for any scene."
+        )
 
-  # Write detailed log file
-  with open(log_file, 'w') as f:
-      f.write("SENTINEL-2 PROCESSING LOG\n")
-      f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-      f.write("="*70 + "\n\n")
+    # -----------------------------------------------------------------
+    # Merge, if requested
+    # -----------------------------------------------------------------
 
-      f.write(f"Total products processed: {total_processed}\n")
-      f.write(f"Successful: {len(processing_success)}\n")
-      f.write(f"Failed: {len(processing_errors)}\n\n")
+    if args.merge:
 
-      if processing_success:
-          f.write("="*70 + "\n")
-          f.write("SUCCESSFUL PROCESSING:\n")
-          f.write("="*70 + "\n")
-          for scene, product, status in processing_success:
-              f.write(f"✓ {scene} - {product}: {status}\n")
-          f.write("\n")
+        print()
+        print("=" * 70)
+        print(f"Merging {len(local_paths)} tile(s)")
+        print("=" * 70)
 
-      if processing_errors:
-          f.write("="*70 + "\n")
-          f.write("FAILED PROCESSING:\n")
-          f.write("="*70 + "\n")
-          for scene, product, error in processing_errors:
-              f.write(f"✗ {scene} - {product}\n")
-              f.write(f"   Error: {error}\n\n")
+        # Sort by item id for a deterministic merge order and a
+        # deterministic choice of "first" item for the merged filename.
+        items_sorted, paths_sorted = zip(
+            *sorted(local_paths, key=lambda pair: pair[0].id)
+        )
 
-  print(f"\n📄 Detailed log written to: {log_file}")
-  print("="*70 + "\n")
+        merged_name = _build_output_filename(
+            items_sorted[0],
+            args.product,
+            masked=args.cloud_mask,
+            merged=True,
+        )
+        merged_path = os.path.join(args.output, merged_name)
 
-# update permissions
-cmd = f"chmod -R -f ug+rwx {input_dir}"
-os.system(cmd)
+        merge_products(list(paths_sorted), merged_path)
 
-now = datetime.now()
-print('Processing Time (s): ', (now-then).total_seconds())
-print('Processing Time (m): ', (now-then)/60.)
+        print(f"Merged product created: {merged_path}")
 
-print('\n✓ Processing completed successfully!')
+        # Remove the pre-merge per-tile GeoTIFFs now that the mosaic
+        # exists; only the merged file proceeds to COG conversion.
+        for _, path in local_paths:
+            if path != merged_path and os.path.exists(path):
+                os.remove(path)
+
+        files_to_cog = [merged_path]
+
+    else:
+        files_to_cog = [path for _, path in local_paths]
+
+    # -----------------------------------------------------------------
+    # Convert to COG(s)
+    # -----------------------------------------------------------------
+
+    cog_paths = []
+
+    for outfile in files_to_cog:
+
+        print("\nConverting to COG...")
+
+        cog_path = convert_to_cog(
+            outfile,
+            nodata=nodata,
+            dst_crs=DST_CRS,
+            compression=COMPRESSION,
+            compression_level=COMPRESSION_LEVEL,
+            metadata=metadata,
+        )
+
+        if not cog_path:
+            raise RuntimeError(
+                f"COG conversion failed for {outfile}"
+            )
+
+        print(f"COG created: {cog_path}")
+
+        cog_paths.append(cog_path)
+
+        # ---------------------------------------------------------
+        # Cleanup intermediate GeoTIFF
+        # ---------------------------------------------------------
+
+        if (
+            os.path.exists(outfile)
+            and outfile != cog_path
+        ):
+            os.remove(outfile)
+
+            print(
+                f"Removed source GeoTIFF: {outfile}"
+            )
+
+    # -----------------------------------------------------------------
+    # Summary
+    # -----------------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("Sentinel-2 processing complete")
+    print("=" * 70)
+
+    print(
+        f"Created {len(cog_paths)} COG(s)."
+    )
+
+    for cog_path in cog_paths:
+        print(f"  {cog_path}")
+
+    print()
+
+
+if __name__ == "__main__":
+    main()

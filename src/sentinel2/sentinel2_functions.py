@@ -1,1100 +1,1330 @@
-#!/usr/local/anaconda3/bin/python
-
 """
 sentinel2_functions.py
 
-Name:           Kaylee Sharp
-Edited:         Aaron Serre
+Sentinel-2 processing functions.
 
-Date Created:   February 2024
-Date Edited:    July 2026       
-
+This module contains the processing logic used by the Sentinel-2
+ODR notebooks. The CLI and notebooks should call these functions
+rather than containing the processing logic themselves.
 """
 
+import json
+import math
 import os
-import glob
-import numpy as np
-from PIL import Image, ImageEnhance
-from xml.dom import minidom
-from shared_utils.geotools import *
-import rasterio as rio
-from rasterio.merge import merge
-from rasterio.warp import calculate_default_transform, reproject
-from rasterio.enums import Resampling
-from pathlib import Path
-import requests
 import shutil
 import tempfile
-from scipy.signal import medfilt2d
-from pyproj import Transformer
-import geopandas as gpd
-from shapely.geometry import box
+from pathlib import Path
+
 import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
-from tqdm import tqdm
+import numpy as np
+import rasterio as rio
 
-def dump_geotiff(data_array, crs, trans, nodata_val, outfile):
-    # write geotiff with inputted CRS, transform, and no data value
-    # data_array should be n x m array
-    with rio.open(
-        outfile, "w", 
-        driver = 'GTiff', 
-        count = 1,
-        dtype = data_array.dtype,
-        height = data_array.shape[0],
-        width = data_array.shape[1],
-        crs = crs, 
-        nodata = nodata_val,
-        transform = trans) as dest:
+from pystac_client import Client
+from rio_cogeo.cogeo import cog_translate
+from rasterio.enums import Resampling
+from rasterio.merge import merge
+from rasterio.warp import calculate_default_transform, reproject
+from rasterio.session import AWSSession
 
-        dest.write(data_array, 1)
+_aws_session = AWSSession(
+    boto3.Session(),
+    requester_pays=True,
+)
 
-def extract_band_geotiffs(band, safe, level, res):
-  if level == 'MSIL2A':
-    # find .jp2 file matching band/resolution
-    jp2_matches = glob.glob(safe + f'/GRANULE/*/IMG_DATA/R{res}m/*{band}*.jp2')
-    if not jp2_matches:
-      raise FileNotFoundError(f'band {band} ({res}m) not found in {safe} (GRANULE/*/IMG_DATA/R{res}m/)')
-    jp2_file = jp2_matches[0]
+_aws_unsigned_session = AWSSession(
+    boto3.Session(),
+    aws_unsigned=True,
+)
 
-    # create output filename
-    outname = os.path.basename(safe).replace('.SAFE', f'_{band}_{res}m.tif')
-    outfile = os.path.join(safe, outname)
+# ---------------------------------------------------------------------
+# Algorithm configuration
+# ---------------------------------------------------------------------
 
-    # open band file
-    band_file = rio.open(jp2_file)
-    band_geo = band_file.profile
+def load_algorithms(
+    algorithm_file="algorithms-sentinel2.json",
+):
+    """
+    Load Sentinel-2 algorithm definitions from JSON.
 
-    # quality file gets special treatment
-    if band == 'SCL':
-      band_array=band_file.read(1).astype('uint16')
-      # no data value of 999
-      nd_val = 999
-    else:
-      # convert from DN to reflectance
-      band_array = band_file.read(1) / 10000
-      nd_val = 0
-    
-    # write band to file
-    dump_geotiff(band_array, band_geo['crs'], band_geo['transform'], nd_val, outfile)
+    Parameters
+    ----------
+    algorithm_file : str
+        Path to algorithms-sentinel2.json.
 
-  elif level == 'MSIL1C':
-    # find .jp2 file matching band
-    jp2_matches = glob.glob(safe + f'/GRANULE/*/IMG_DATA/*{band}*.jp2')
-    if not jp2_matches:
-      raise FileNotFoundError(f'band {band} ({res}m) not found in {safe} (GRANULE/*/IMG_DATA/) -- verify the L1C product contains this band')
-    jp2_file = jp2_matches[0]
+    Returns
+    -------
+    dict
+        Dictionary containing the configured Sentinel-2 algorithms.
+    """
 
-    # create output filename
-    outname = os.path.basename(safe).replace('.SAFE', f'_{band}_{res}m.tif')
-    outfile = os.path.join(safe, outname)
+    with open(algorithm_file, "r") as f:
+        algorithms = json.load(f)
 
-    # convert from native resolution to desired resolution
-    native_res = rio.open(jp2_file).transform[0]
-    if int(native_res) != int(res):
-      scale_factor = int(native_res)/int(res)
-      with rio.open(jp2_file) as dataset:
-        band_array = dataset.read(1,
-          out_shape=(dataset.count,
-                    int(dataset.height * scale_factor),
-                    int(dataset.width * scale_factor)
-          ),
-          resampling=Resampling.bilinear
+    return algorithms
+
+
+def get_algorithm(
+    algorithm_type,
+    algorithm_name,
+    algorithm_file="algorithms-sentinel2.json",
+):
+    """
+    Retrieve a specific algorithm from the Sentinel-2 algorithm catalog.
+
+    Parameters
+    ----------
+    algorithm_type : str
+        Algorithm category, such as "index" or "composite".
+
+    algorithm_name : str
+        Name of the algorithm, such as "ndvi" or "swir".
+
+    algorithm_file : str
+        Path to algorithms-sentinel2.json.
+
+    Returns
+    -------
+    dict
+        Algorithm configuration.
+    """
+
+    algorithms = load_algorithms(algorithm_file)
+
+    if algorithm_type not in algorithms:
+        raise ValueError(
+            f"Algorithm type '{algorithm_type}' was not found in "
+            f"{algorithm_file}."
         )
-        transform = dataset.transform * dataset.transform.scale(
-          (dataset.width / band_array.shape[-1]),
-          (dataset.height / band_array.shape[-2])
+
+    algorithm = algorithms[algorithm_type][0].get(algorithm_name)
+
+    if algorithm is None:
+        raise ValueError(
+            f"Algorithm '{algorithm_name}' was not found under "
+            f"algorithm type '{algorithm_type}'."
         )
-        band_array = band_array / 10000
-        dump_geotiff(band_array, dataset.crs, transform, 0, outfile)
 
+    return algorithm
+
+
+# ---------------------------------------------------------------------
+# STAC
+# ---------------------------------------------------------------------
+
+def connect_to_stac(
+    stac_api_url="https://earth-search.aws.element84.com/v1",
+):
+    """
+    Connect to the Sentinel-2 STAC catalog.
+
+    Parameters
+    ----------
+    stac_api_url : str
+        STAC API endpoint.
+
+    Returns
+    -------
+    pystac_client.Client
+        Connected STAC catalog.
+    """
+
+    print(f"Connecting to STAC catalog: {stac_api_url}")
+
+    catalog = Client.open(stac_api_url)
+
+    return catalog
+
+
+def search_sentinel2(
+    start_date,
+    end_date,
+    bbox,
+    cloud_cover=50,
+    stac_api_url="https://earth-search.aws.element84.com/v1",
+    collection_id="sentinel-2-c1-l2a",
+):
+    """
+    Search the Sentinel-2 STAC catalog.
+
+    Parameters
+    ----------
+    start_date : str
+        Search start date.
+
+    end_date : str
+        Search end date.
+
+    bbox : list
+        Bounding box in the form:
+        [xmin, ymin, xmax, ymax]
+
+    cloud_cover : float
+        Maximum allowed cloud cover percentage.
+
+    stac_api_url : str
+        STAC API endpoint.
+
+    collection_id : str
+        Sentinel-2 STAC collection.
+
+    Returns
+    -------
+    list
+        List of STAC Items.
+    """
+
+    catalog = connect_to_stac(stac_api_url)
+
+    query = {
+        "eo:cloud_cover": {
+            "lt": cloud_cover
+        }
+    }
+
+    print("Searching Sentinel-2 STAC catalog...")
+    print(f"  Collection: {collection_id}")
+    print(f"  Start date: {start_date}")
+    print(f"  End date:   {end_date}")
+    print(f"  Bounding box: {bbox}")
+    print(f"  Cloud cover < {cloud_cover}%")
+
+    search = catalog.search(
+        collections=[collection_id],
+        datetime=[start_date, end_date],
+        bbox=bbox,
+        query=query,
+    )
+
+    items = list(search.items())
+
+    print(f"Found {len(items)} Sentinel-2 items.")
+
+    for item in items:
+        print(f"  {item.id}")
+
+    return items
+
+
+def search_sentinel2_with_catalog(
+    start_date,
+    end_date,
+    bbox,
+    cloud_cover=50,
+    stac_api_url="https://earth-search.aws.element84.com/v1",
+    collection_id="sentinel-2-c1-l2a",
+):
+    """
+    Search Sentinel-2 and return both the catalog search result and items.
+
+    This is useful when the caller needs item_collection_as_dict()
+    for GeoDataFrame processing or visualization.
+
+    Returns
+    -------
+    search
+        STAC search object.
+
+    items : list
+        List of STAC Items.
+
+    stac_json : dict
+        STAC ItemCollection as a dictionary.
+    """
+
+    catalog = connect_to_stac(stac_api_url)
+
+    query = {
+        "eo:cloud_cover": {
+            "lt": cloud_cover
+        }
+    }
+
+    search = catalog.search(
+        collections=[collection_id],
+        datetime=[start_date, end_date],
+        bbox=bbox,
+        query=query,
+    )
+
+    items = list(search.items())
+    stac_json = search.item_collection_as_dict()
+
+    print(f"Found {len(items)} Sentinel-2 items.")
+
+    for item in items:
+        print(f"  {item.id}")
+
+    return search, items, stac_json
+
+
+# ---------------------------------------------------------------------
+# STAC asset handling
+# ---------------------------------------------------------------------
+
+def get_asset_metadata(asset):
+    """
+    Extract useful metadata from a STAC asset.
+
+    Parameters
+    ----------
+    asset : pystac.Asset or dict
+        STAC asset.
+
+    Returns
+    -------
+    tuple
+        href, scale, offset, gsd
+    """
+
+    if hasattr(asset, "href"):
+        # PySTAC Asset
+        href = asset.href
+        band_metadata = asset.extra_fields.get("raster:bands", [{}])[0]
+        gsd = asset.extra_fields.get("gsd")
     else:
-      band_file = rio.open(jp2_file)
-      band_geo = band_file.profile
-      band_array = band_file.read(1) / 10000
-      dump_geotiff(band_array, band_geo['crs'], band_geo['transform'], 0, outfile)
+        # Dictionary
+        href = asset.get("href")
+        band_metadata = asset.get("raster:bands", [{}])[0]
+        gsd = asset.get("gsd")
 
-  return outfile
+    scale = band_metadata.get("scale")
+    offset = band_metadata.get("offset")
 
-def get_rayleigh_correction(band_file, band_name):
-  try:
-    # required package
-    # create a conda environment and install pyspectral>=0.12.5
-    from pyspectral.rayleigh import Rayleigh
-  except:
-    print('\t* Rayleigh correction error. Pyspectral package must be >=0.12.5')
-    return 0
-  else:
-    if band_name in ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07']:
-      print('\t* Applying Rayleigh correction to:', band_name)
+    return href, scale, offset, gsd
 
-      # initialize rayleigh correction class for Sentinel-2
-      s2 = Rayleigh('Sentinel-2A', 'msi')
-      
-      # parse metadata for mean sun angle
-      safe = os.path.dirname(band_file)
-      gran_xml = glob.glob(os.path.join(safe, 'GRANULE', '*', 'MTD_*.xml'))[0]
-      xmldoc = minidom.parse(gran_xml)
-      nodes = xmldoc.getElementsByTagName('Mean_Sun_Angle')
-      for node in nodes:
-        sunz = node.getElementsByTagName('ZENITH_ANGLE')[0].firstChild.data
-        sunaz = node.getElementsByTagName('AZIMUTH_ANGLE')[0].firstChild.data
-      sunz = np.asarray(float(sunz))
-      sunaz = np.asarray(float(sunaz))
 
-      # parse metadata for mean viewing incidence angle
-      nodes = xmldoc.getElementsByTagName('Mean_Viewing_Incidence_Angle')
-      for node in nodes:
-        satz = node.getElementsByTagName('ZENITH_ANGLE')[0].firstChild.data
-        sataz = node.getElementsByTagName('AZIMUTH_ANGLE')[0].firstChild.data
-      satz = np.asarray(float(satz))
-      sataz = np.asarray(float(sataz))
+def get_item_assets(item):
+    """
+    Return the assets dictionary from a STAC Item.
 
-      # compute rayleigh contribution
-      ssadiff = np.asarray(np.abs(sunaz-sataz))
-      ray = 0.01*s2.get_reflectance(sunz, satz, ssadiff, band_name)
-      return ray
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 STAC item.
+
+    Returns
+    -------
+    dict
+        Asset dictionary.
+    """
+
+    return item.assets
+
+
+# ---------------------------------------------------------------------
+# Output naming convention
+# ---------------------------------------------------------------------
+
+def _to_camel_case(snake_str):
+    """
+    Convert a snake_case algorithm name (e.g. 'true_color') to
+    camelCase (e.g. 'trueColor') for use in output filenames.
+    """
+    parts = snake_str.split("_")
+    return parts[0] + "".join(p.title() for p in parts[1:])
+
+
+def _get_sat_level_tile(item):
+    """
+    Parse SAT, LEVEL, and TILE tokens from a Sentinel-2 STAC item id.
+
+    Handles both Earth Search item-id formats currently in use across
+    collections:
+        Older style (sentinel-2-l1c):
+            SAT_TILE_DATE_SEQ_LEVELTOKEN
+            e.g. "S2A_16SED_20260423_1_L1C"  (tile has no leading "T")
+        Collection 1 style (sentinel-2-c1-l2a):
+            SAT_TTILE_DATETIME_LEVELTOKEN
+            e.g. "S2A_T16SED_20260423T163857_L2A"  (tile already has "T")
+
+    Only relies on the first token (SAT) and the last token (LEVEL),
+    which are stable across both formats -- everything in between
+    (date, optional sequence number) is ignored, so this doesn't
+    depend on a fixed total token count.
+
+    Returns
+    -------
+    sat : str
+        e.g. "S2A"
+    level : str
+        e.g. "MSIL1C" or "MSIL2A"
+    tile : str
+        e.g. "T16SED"
+    """
+    parts = item.id.split("_")
+    if len(parts) < 4:
+        raise ValueError(
+            f"Unexpected Sentinel-2 item id format: '{item.id}'"
+        )
+
+    sat = parts[0]
+    level = f"MSI{parts[-1]}"
+
+    tile_raw = parts[1]
+    tile = tile_raw if tile_raw.startswith("T") else f"T{tile_raw}"
+
+    return sat, level, tile
+
+
+def _build_output_filename(item, algorithm_name, masked=False, merged=False):
+    """
+    Build a Sentinel-2 output filename matching the project naming
+    convention:
+
+        Plain:              SAT_LEVEL_product_TILE_TIMESTAMP.tif
+        Masked:              SAT_LEVEL_product_TILE_masked_TIMESTAMP.tif
+        Merged:              SAT_LEVEL_product_merged_TIMESTAMP.tif
+        Merged and masked:   SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
+
+    Parameters
+    ----------
+    item : pystac.Item
+        The STAC item supplying SAT/LEVEL/timestamp. When merged=True,
+        pass the first item (by sort order) among the tiles being
+        merged.
+
+    algorithm_name : str
+        Algorithm/product name as used in the algorithm catalog, e.g.
+        "true_color", "ndvi". Converted to camelCase for the filename.
+
+    masked : bool
+        Whether cloud masking was applied to this output.
+
+    merged : bool
+        Whether this output is a mosaic of multiple tiles. When True,
+        the tile token is omitted (a mosaic spans multiple tiles, so
+        no single TILE token applies).
+
+    Returns
+    -------
+    str
+        Filename, e.g. "S2A_MSIL1C_trueColor_T16SED_2026-04-23T16:15:59Z.tif"
+    """
+    sat, level, tile = _get_sat_level_tile(item)
+    product = _to_camel_case(algorithm_name)
+    timestamp = item.datetime.replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    tile_token = "" if merged else f"_{tile}"
+    merged_token = "_merged" if merged else ""
+    masked_token = "_masked" if masked else ""
+
+    return (
+        f"{sat}_{level}_{product}{tile_token}"
+        f"{merged_token}{masked_token}_{timestamp}.tif"
+    )
+
+
+# ---------------------------------------------------------------------
+# Raster processing
+# ---------------------------------------------------------------------
+
+def resample_array(
+    src,
+    resample_ratio,
+    resampling=Resampling.bilinear,
+):
+    """
+    Resample a raster band.
+
+    This is based on the resampling logic used in the notebooks.
+
+    Parameters
+    ----------
+    src : rasterio DatasetReader
+        Open raster dataset.
+
+    resample_ratio : float
+        Ratio between the source GSD and requested GSD.
+
+    resampling : rasterio.enums.Resampling
+        Resampling method.
+
+    Returns
+    -------
+    band : numpy.ndarray
+        Resampled raster.
+
+    profile : dict
+        Updated rasterio profile.
+    """
+
+    if resample_ratio <= 0:
+        raise ValueError(
+            f"resample_ratio must be greater than zero. "
+            f"Received {resample_ratio}."
+        )
+
+    profile = src.profile.copy()
+
+    width = int(profile["width"] / resample_ratio)
+    height = int(profile["height"] / resample_ratio)
+
+    band = src.read(
+        1,
+        out_shape=(height, width),
+        resampling=resampling,
+    )
+
+    dst_transform = (
+        src.transform
+        * rio.Affine.scale(
+            resample_ratio,
+            resample_ratio,
+        )
+    )
+
+    profile.update(
+        {
+            "height": height,
+            "width": width,
+            "transform": dst_transform,
+        }
+    )
+
+    return band, profile
+
+
+def read_algorithm_band(
+    asset,
+    target_gsd=None,
+    resample=True,
+    apply_scale=True,
+):
+    href, scale, offset, gsd = get_asset_metadata(asset)
+
+    if scale is None:
+        scale = 1.0
+    if offset is None:
+        offset = 0.0
+    if gsd is None:
+        raise ValueError(f"STAC asset does not contain a GSD: {href}")
+
+    # Sentinel-2 L1C assets are publicly accessible from the
+    # sentinel-s2-l1c bucket. Use anonymous access so the
+    # disasters-prod IAM role is not used for these reads.
+    if href.startswith("s3://sentinel-s2-l1c/"):
+        aws_session = _aws_unsigned_session
+        print("Using anonymous S3 access for Sentinel-2 L1C asset.")
     else:
-      return 0
-
-def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
-  # open RGB bands
-  r, in_geo, projref = get_geo(r_file)
-  r_band = r_file.split('_')[-2]
-  g, in_geo, projref = get_geo(g_file)
-  g_band = g_file.split('_')[-2]
-  b, in_geo, projref = get_geo(b_file)
-  b_band = b_file.split('_')[-2]
-
-  # determine shape
-  rows, cols = np.shape(b)
-
-  # apply rayleigh correction 
-  if rayleigh:
-    ray_blue = get_rayleigh_correction(b_file, b_band)
-    ray_green = get_rayleigh_correction(g_file, g_band)
-    ray_red = get_rayleigh_correction(r_file, r_band)
-    b = b-ray_blue
-    g = g-ray_green
-    r = r-ray_red
-
-  # clip each band
-  b = np.clip(b, 0, 1)
-  g = np.clip(g, 0, 1)
-  r = np.clip(r, 0, 1)
-
-  # bytescale bands
-  rgb_min = 0.04
-  rgb_max = 1
-  b_enhanced = ((b - rgb_min) / (rgb_max - rgb_min))*255
-  g_enhanced = ((g - rgb_min) / (rgb_max - rgb_min))*255
-  r_enhanced = ((r - rgb_min) / (rgb_max - rgb_min))*255
-
-  # determine no data locations
-  b_no_data = np.where(b == 0.0)
-  g_no_data = np.where(g == 0.0)
-  r_no_data = np.where(r == 0.0)
-
-  # increase brightness
-  print('\t* Enhancing image')
-  rgbArray = np.zeros( (rows,cols,3), 'uint8' )
-  rgbArray[...,0] = r_enhanced
-  rgbArray[...,1] = g_enhanced
-  rgbArray[...,2] = b_enhanced
-  rgb = Image.fromarray(rgbArray)
-  rgb_enhanced = ImageEnhance.Brightness(rgb).enhance(enhance)
-  r = np.reshape(rgb_enhanced.getdata(band=0), (rows,cols))
-  g = np.reshape(rgb_enhanced.getdata(band=1), (rows,cols))
-  b = np.reshape(rgb_enhanced.getdata(band=2), (rows,cols))
-
-  # assign a value of 0 to each no data location
-  r[r_no_data] = 0
-  g[g_no_data] = 0
-  b[b_no_data] = 0
-
-  # return bands and geographic information
-  return r,g,b,projref,in_geo
-
-def gen_cloudMask(safe, outname, level):
-  # check for quality file
-  scl_check = glob.glob(os.path.join(safe, '*SCL_20m.tif'))
-  if scl_check:
-    # open quality file
-    scl_file = scl_check[0]
-    print('\t* Opening SCL file')
-  else:
-    # extract quality data from .jp2 file
-    print('\t* Extracting SCL')
-    scl_file = extract_band_geotiffs('SCL', safe, level, '20')
-
-  # read quality file
-  print('\t* Generating Cloud Mask geotiff')
-  scl_rst = rio.open(scl_file)
-  scl = scl_rst.read(1)
-
-  # cloud = 1, no cloud = 0, no data = 999
-  bin_map = {0:999, 1:0, 2:0, 3:1, 4:0, 5:0, 6:0, 7:0, 8:1, 9:1, 10:1, 11:0}
-  clouds_bin = np.vectorize(bin_map.get)(scl).astype('uint16')
-
-  # write cloud mask to file
-  dump_geotiff(clouds_bin, scl_rst.crs, scl_rst.transform, 999, outname)
-
-  return outname
-
-def apply_cloud_mask(tif_to_mask, cloud_mask):
-  # create masked directory within product directory 
-  masked_dir = os.path.join(Path(tif_to_mask).parent, 'masked')
-  if not os.path.isdir(masked_dir):
-    os.mkdir(masked_dir)
-  
-  # masked output filename
-  base = os.path.splitext(os.path.basename(tif_to_mask))[0]
-  parts = base.split("_") 
-  timestamp = parts[-1]
-  prefix = "_".join(parts[:-1])
-  masked_out_file = f"{prefix}_masked_{timestamp}.tif"
-
-  masked_path = os.path.join(masked_dir, masked_out_file)
-  
-  # open geotiff to mask and cloud mask file
-  tif_to_mask_rst = rio.open(tif_to_mask)
-  mask_rst = rio.open(cloud_mask)
-
-  # check that resolutions match
-  tif_to_mask_res = tif_to_mask_rst.transform[0]
-  mask_res = mask_rst.transform[0]
-  if tif_to_mask_res != mask_res:
-    # resample cloud mask (in memory) to match geotiff to mask
-    with rio.open(cloud_mask) as dataset:
-      mask_array = dataset.read(1,
-          out_shape=(dataset.count,
-                    int(dataset.height * 2),
-                    int(dataset.width * 2)
-          ),
-          resampling=Resampling.nearest
-      )
-  else:
-    mask_array = mask_rst.read(1)
-
-  # The source raster may have no nodata set (nodata is None) -- common for the
-  # 8-bit true-color product. NumPy can't assign None into an int array, so use
-  # a concrete fill (0) for the masked / transparent pixels in that case.
-  nd = tif_to_mask_rst.nodata if tif_to_mask_rst.nodata is not None else 0
-
-  if tif_to_mask_rst.count == 1:
-    # mask images with one band (e.g., NDVI, EVI, etc.)
-    tif_to_mask_array = tif_to_mask_rst.read(1)
-    tif_to_mask_array[mask_array == 1] = nd
-    dump_geotiff(tif_to_mask_array, tif_to_mask_rst.crs, tif_to_mask_rst.transform, nd, masked_path)
-  else:
-    # mask images with three bands (e.g., true color, color infrared, etc.)
-    # outputs a 4-band image with the fourth band being an alpha band
-
-    # create alpha band array
-    band1_array = tif_to_mask_rst.read(1)
-    nodata_array = np.full(band1_array.shape, 255)
-    # Only flag existing-nodata pixels when the source actually defines a nodata
-    # value; otherwise there are none to flag (don't mistakenly treat 0 as nodata).
-    if tif_to_mask_rst.nodata is not None:
-      nodata_array[band1_array == tif_to_mask_rst.nodata] = nd
-    nodata_array[mask_array == 1] = nd
-
-    # write new file with the addition of the alpha band
-    with rio.open(masked_path, mode="w", 
-                  driver='GTiff', 
-                  width=nodata_array.shape[1],
-                  height=nodata_array.shape[0],
-                  count=4,
-                  crs=tif_to_mask_rst.crs,
-                  transform=tif_to_mask_rst.transform,
-                  dtype=band1_array.dtype) as dest:
-      dest.write(tif_to_mask_rst.read(1), 1)
-      dest.write(tif_to_mask_rst.read(2), 2)
-      dest.write(tif_to_mask_rst.read(3), 3)
-      dest.write(nodata_array, 4)
-  
-def gen_true_color(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  b_check = glob.glob(os.path.join(safe, '*B02_10m.tif'))
-  if b_check:
-    b_file = b_check[0]
-    print('\t* Opening B2 file')
-  else:
-    print('\t* Extracting B2')
-    b_file = extract_band_geotiffs('B02', safe, level, '10')
-  g_check = glob.glob(os.path.join(safe, '*B03_10m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B3 file')
-  else:
-    print('\t* Extracting B3')
-    g_file = extract_band_geotiffs('B03', safe, level, '10')
-  r_check = glob.glob(os.path.join(safe, '*B04_10m.tif'))
-  if r_check:
-    r_file = r_check[0]
-    print('\t* Opening B4 file')
-  else:
-    print('\t* Extracting B4')
-    r_file = extract_band_geotiffs('B04', safe, level, '10')
-
-  # different enhancement level if applying rayleigh correction
-  if rayleigh:
-    enhance_level = 3.5
-  else:
-    enhance_level = 3
-
-  # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
-
-  # write true color image to file
-  print('\t* Generating true color geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_natural_color(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  r_check = glob.glob(os.path.join(safe, '*B11_20m.tif'))
-  if r_check:
-    r_file = r_check[0]
-    print('\t* Opening B11 file')
-  else:
-    print('\t* Extracting B11')
-    r_file = extract_band_geotiffs('B11', safe, level, 20)
-  g_check = glob.glob(os.path.join(safe, '*B8A_20m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B8A file')
-  else:
-    print('\t* Extracting B8A')
-    g_file = extract_band_geotiffs('B8A', safe, level, 20)
-  b_check = glob.glob(os.path.join(safe, '*B04_20m.tif'))
-  if b_check:
-    b_file = b_check[0]
-    print('\t* Opening B4 file')
-  else:
-    print('\t* Extracting B4')
-    b_file = extract_band_geotiffs('B04', safe, level, 20)
-
-  # set enhancement level
-  enhance_level = 2
-
-  # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh, enhance_level)
-  
-  # write natural color image to file
-  print('\t* Generating natural color geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_swir(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  r_check = glob.glob(os.path.join(safe, '*B12_20m.tif'))
-  if r_check:
-    r_file = r_check[0]
-    print('\t* Opening B12 file')
-  else:
-    print('\t* Extracting B12')
-    r_file = extract_band_geotiffs('B12', safe, level,'20')
-  g_check = glob.glob(os.path.join(safe, '*B8A_20m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B8A file')
-  else:
-    print('\t* Extracting B8A')
-    g_file = extract_band_geotiffs('B8A', safe, level, '20')
-  b_check = glob.glob(os.path.join(safe, '*B04_20m.tif'))
-  if b_check:
-    b_file = b_check[0]
-    print('\t* Opening B4 file')
-  else:
-    print('\t* Extracting B4')
-    b_file = extract_band_geotiffs('B04', safe, level, '20')
-
-  # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
-
-  # write short wave infrared image to file
-  print('\t* Generating short wave infrared geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  r_check = glob.glob(os.path.join(safe, '*B08_10m.tif'))
-  if r_check:
-    r_file = r_check[0]
-    print('\t* Opening B8 file')
-  else:
-    print('\t* Extracting B8')
-    r_file = extract_band_geotiffs('B08', safe, level, '10')
-  g_check = glob.glob(os.path.join(safe, '*B04_10m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B4 file')
-  else:
-    print('\t* Extracting B4')
-    g_file = extract_band_geotiffs('B04', safe, level,'10')
-  b_check = glob.glob(os.path.join(safe, '*B03_10m.tif'))
-  if b_check:
-    b_file = b_check[0]
-    print('\t* Opening B3 file')
-  else:
-    print('\t* Extracting B3')
-    b_file = extract_band_geotiffs('B03', safe, level, '10')
-
-  # process bands
-  r,g,b,projref,in_geo = gen_rgb(r_file, g_file, b_file, rayleigh)
-
-  # write color infrared image to file
-  print('\t* Generating color infrared geotiff')
-  result = dump_geotiff_rgb(outname, r, g, b, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  g_check = glob.glob(os.path.join(safe, '*B03_10m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B3 file')
-  else:
-    print('\t* Extracting B3')
-    g_file = extract_band_geotiffs('B03', safe, level, '10')
-  nir_check = glob.glob(os.path.join(safe, '*B08_10m.tif'))
-  if nir_check:
-    nir_file = nir_check[0]
-    print('\t* Opening B8 file')
-  else:
-    print('\t* Extracting B8')
-    nir_file = extract_band_geotiffs('B08', safe, level, '10')
-
-  # read NIR and green band files
-  nir, in_geo, projref = get_geo(nir_file)
-  g, in_geo, projref = get_geo(g_file)
-
-  # apply rayleigh correction to green band
-  if rayleigh:
-    g_ray = get_rayleigh_correction(g_file, 'B03')
-    g = g - g_ray
-
-  # determine shape
-  rows, cols = np.shape(g)
-
-  # clip green and NIR bands
-  g = np.clip(g, 0, 1)
-  nir = np.clip(nir, 0, 1)
-
-  # calculate NDWI
-  print('\t* Calculating NDWI')
-  ndwi = np.zeros((rows,cols))
-  ndwi[:] = 999
-  valid = np.where((g > 0) & (nir > 0))
-  ndwi[valid] = (g[valid] - nir[valid]) / (g[valid] + nir[valid])
-  
-  # write NDWI image to file
-  print('\t* Generating NDWI geotiff')
-  result = dump_geotiff_float(outname, ndwi, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  g_check = glob.glob(os.path.join(safe, '*B03_20m.tif'))
-  if g_check:
-    g_file = g_check[0]
-    print('\t* Opening B3 file')
-  else:
-    print('\t* Extracting B3')
-    g_file = extract_band_geotiffs('B03', safe, level, '20')
-  swir_check = glob.glob(os.path.join(safe, '*B11_20m.tif'))
-  if swir_check:
-    swir_file = swir_check[0]
-    print('\t* Opening B11 file')
-  else:
-    print('\t* Extracting B11')
-    swir_file = extract_band_geotiffs('B11', safe, level, '20')
- 
-  # read SWIR and green band
-  swir, in_geo, projref = get_geo(swir_file) 
-  g, in_geo, projref = get_geo(g_file)
-
-  # apply rayleigh correction to green band
-  if rayleigh:
-    g_ray = get_rayleigh_correction(g_file, 'B03')
-    g = g - g_ray
-
-  # determine shape
-  rows, cols = np.shape(g)
-
-  # clip bands
-  g = np.clip(g, 0, 1)
-  swir = np.clip(swir, 0, 1)
-
-  # calculate mNDWI
-  print('\t* Calculating MNDWI')
-  mndwi = np.zeros((rows,cols))
-  mndwi[:] = 999
-  valid = np.where((g > 0) & (swir >0))
-  mndwi[valid] = (g[valid] - swir[valid])/(g[valid] + swir[valid])
-
-  # write mNDWI image to file
-  print('\t* Generating MNDWI geotiff')
-  result = dump_geotiff_float(outname, mndwi, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  r_check = glob.glob(os.path.join(safe, '*B04_10m.tif'))
-  if r_check:
-    r_file = r_check[0]
-    print('\t* Opening B4 file')
-  else:
-    print('\t* Extracting B4')
-    r_file = extract_band_geotiffs('B04', safe, level, '10')
-  nir_check = glob.glob(os.path.join(safe, '*B08_10m.tif'))
-  if nir_check:
-    nir_file = nir_check[0]
-    print('\t* Opening B8 file')
-  else:
-    print('\t* Extracting B8')
-    nir_file = extract_band_geotiffs('B08', safe, level, '10')
-  
-  # read in NIR and red bands
-  nir, in_geo, projref = get_geo(nir_file)
-  r, in_geo, projref = get_geo(r_file)
-  
-  # apply rayleigh correction to red band
-  if rayleigh:
-    r_ray = get_rayleigh_correction(r_file, 'B04')
-    r = r - r_ray
-  
-  # determine shape
-  rows, cols = np.shape(r)
-  
-  # clip bands
-  r = np.clip(r, 0, 1)
-  nir = np.clip(nir, 0, 1)
-
-  # calculate NDVI
-  print('\t* Calculating NDVI')
-  ndvi = np.zeros((rows,cols))
-  ndvi[:] = 999
-  valid = np.where((r > 0) & (nir > 0))
-  ndvi[valid] = (nir[valid]-r[valid])/(nir[valid]+r[valid])
-  
-  # write NDVI image to file
-  print('\t* Generating NDVI geotiff')
-  result = dump_geotiff_float(outname, ndvi, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def gen_nbr(safe, outname, level, mask=None):
-  # check for band geotiffs
-  # extract bands from .jp2 file if necessary
-  nir_check = glob.glob(os.path.join(safe, '*B8A_20m.tif'))
-  if nir_check:
-    nir_file = nir_check[0]
-    print('\t* Opening B8A file')
-  else:
-    print('t* Extracting B8A')
-    nir_file = extract_band_geotiffs('B8A', safe, level, '20')
-  swir_check = glob.glob(os.path.join(safe, '*B12_20m.tif'))
-  if swir_check:
-    swir_file = swir_check[0]
-    print('\t* Opening B12 file')
-  else:
-    print('\t* Extracting B12')
-    swir_file = extract_band_geotiffs('B12', safe, level, '20')
-
-  # read in SWIR and NIR bands
-  swir, in_geo, projref = get_geo(swir_file)
-  nir, in_geo, projref = get_geo(nir_file)
-
-  # determine shape
-  rows, cols = np.shape(nir)
-
-  # clip bands
-  nir = np.clip(nir, 0, 1)
-  swir = np.clip(swir, 0, 1)
-
-  # calculate NBR
-  print('\t* Calculating NBR')
-  nbr = np.zeros((rows,cols))
-  nbr[:] = 999
-  valid = np.where((nir > 0) & (swir > 0))
-  nbr[valid] = (nir[valid] - swir[valid]) / (nir[valid] + swir[valid])
-
-  # write NBR image to file
-  print('\t* Generating NBR geotiff')
-  result = dump_geotiff_float(outname, nbr, projref, in_geo)
-
-  # apply cloud mask
-  if mask is not None:
-    print('\t* Applying cloud mask')
-    apply_cloud_mask(outname, mask)
-
-def download_cdl(image, year, outname):
-  ## Getting corners of image in Albers projection
-    im_rst = gdal.Open(image)
-    im_albers = image.replace('.tif', '_albers.tif')
-    warp = gdal.Warp(im_albers, im_rst, dstSRS='EPSG:5072')
-    warp = None
-    im_albers_rst = gdal.Open(im_albers)
-    ulx, xres, xskew, uly, yskew, yres  = im_albers_rst.GetGeoTransform()
-    lrx = ulx + (im_albers_rst.RasterXSize * xres)
-    lry = uly + (im_albers_rst.RasterYSize * yres)
-    os.remove(im_albers)
-
-    ## Getting CDL from Web Geo-Processing Service
-    cdl_file_request_url = f"https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile?year={year}&bbox={round(ulx)},{round(lry)},{round(lrx)},{round(uly)}"
-    tif_url_response = requests.get(cdl_file_request_url, stream=True)
-    response_content = tif_url_response.text
-    # get data URL returned from API
-    url_start = response_content.index("https")
-    url_end = response_content.index("tif")+3
-    tif_url = response_content[url_start : url_end]
-    del tif_url_response
-    # request actual CDL data
-    cdl_tif_request = requests.get(tif_url, stream = True)
-    
-    # write CDL data to file
-    with open(outname, 'wb') as out_file:
-        cdl_tif_request.raw.decode_content = True
-        shutil.copyfileobj(cdl_tif_request.raw, out_file)
-        del cdl_tif_request
-    
-    # reproject, resample CDL to match inputted image
-    match_geotiff(outname, image, outname)
-
-def reclass_cdl(cdl_path, no_data_locs):
-    # WARNING: AOIs that extend outside of the U.S. boundaries (ocean, Canada, Mexico) will have no data
-    # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-    codes_dict = {1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 10: 1, 11: 1, 12: 1, 13: 1, \
-    14: 1, 21: 1, 22: 1, 23: 1, 24: 1, 25: 1, 26: 1, 27: 1, 28: 1, 29: 1, 30: 1, \
-    31: 1, 32: 1, 33: 1, 34: 1, 35: 1, 36: 1, 37: 1, 38: 1, 39: 1, 41: 1, 42: 1, \
-    43: 1, 44: 1, 45: 1, 46: 1, 47: 1, 48: 1, 49: 1, 50: 1, 51: 1, 52: 1, 53: 1, \
-    54: 1, 55: 1, 56: 1, 57: 1, 58: 1, 59: 1, 60: 1, 61: 1, 66: 1, 67: 1, 68: 1, \
-    69: 1, 70: 1, 71: 1, 72: 1, 74: 1, 75: 1, 76: 1, 77: 1, 204: 1, 205: 1, 206: 1, \
-    207: 1, 208: 1, 209: 1, 210: 1, 211: 1, 212: 1, 213: 1, 214: 1, 215: 1, 216: 1, \
-    217: 1, 218: 1, 219: 1, 220: 1, 221: 1, 222: 1, 223: 1, 224: 1, 225: 1, 226: 1, \
-    227: 1, 228: 1, 229: 1, 230: 1, 231: 1, 232: 1, 233: 1, 234: 1, 235: 1, 236: 1, \
-    237: 1, 238: 1, 239: 1, 240: 1, 241: 1, 242: 1, 243: 1, 244: 1, 245: 1, 246: 1, \
-    247: 1, 248: 1, 249: 1, 250: 1, 254: 1, 176: 1, \
-    121: 2, 122: 2, 123: 2, 124: 2, \
-    131: 3, 141: 3, 142: 3, 143: 3, 152: 3, 190: 3, 195: 3, \
-    111: 4, 112: 4, 92: 4, \
-    0: 999, 81: 999, 88: 999}
-
-    # open full CDL file
-    cdl_rst = rio.open(cdl_path)
-    cdl_array = cdl_rst.read()[0]
-
-    # reclassify the CDL
-    translated_codes = np.vectorize(codes_dict.get)(cdl_array).astype('uint16')
-    translated_codes[no_data_locs] = 999
-
-    # write the reclassified CDL to file
-    cdl_reclass_out_file = cdl_path.replace('.tif', '_reclass.tif')
-    dump_geotiff(translated_codes, cdl_rst.crs, cdl_rst.transform, 999, cdl_reclass_out_file)
-    return cdl_reclass_out_file
-
-def download_worldcover(image, year, outname):
-  outdir = Path(outname).parent
-  
-  # convert image to WGS 84
-  im_rst = gdal.Open(image)
-  im_4326_path = image.replace('.tif', '_4326.tif')
-  warp = gdal.Warp(im_4326_path, im_rst, dstSRS='EPSG:4326')
-  del warp
-  im_4326 = gdal.Open(im_4326_path)
-
-  if year in ['2015','2016', '2017', '2018', '2019']:
-    print('\t* Incomplete. Mostly written though. Just needs a few tweaks probably.')
-    quit()
-    '''
-    # function for getting formatted longitude
-    def get_lon(x):
-        if x >= 0:
-            direction = 'E'
-        else: 
-            direction = 'W'
-        lon = direction + str(abs(x)).zfill(3)
-        return lon
-    
-    # function for getting formatted latitude
-    def get_lat(y):
-        if y >= 0:
-            direction = 'N'
+        aws_session = _aws_session
+
+    with rio.Env(aws_session):
+        print("Trying to open:", href)
+
+        with rio.open(href) as src:
+
+            if (
+                resample
+                and target_gsd is not None
+                and target_gsd / gsd > 1
+            ):
+                resample_ratio = target_gsd / gsd
+
+                print(
+                    f"Resampling band to {target_gsd} meters "
+                    f"with a resampling ratio of {resample_ratio}"
+                )
+
+                band, profile = resample_array(
+                    src,
+                    resample_ratio,
+                )
+
+            else:
+                band = src.read(1)
+                profile = src.profile.copy()
+
+    if apply_scale:
+        band = band * scale - offset
+
+    return band, profile
+
+
+def get_cloud_mask(item, out_shape, cloud_classes=(3, 8, 9, 10)):
+    """
+    Build a boolean cloud/cloud-shadow mask from the Sentinel-2 L2A Scene
+    Classification Layer (SCL) asset, resampled with nearest-neighbor
+    (SCL is categorical) to match out_shape.
+
+    cloud_classes defaults match the legacy SAFE-based pipeline's SCL
+    bin map: 3 = cloud shadow, 8 = cloud medium probability,
+    9 = cloud high probability, 10 = thin cirrus.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 L2A STAC item. Raises if no 'scl' asset is present
+        (i.e. this is an L1C item).
+
+    out_shape : tuple
+        (height, width) to resample the mask to, matching the array
+        it will be applied against.
+
+    Returns
+    -------
+    numpy.ndarray (bool)
+        True where the pixel is cloud, cloud shadow, or thin cirrus.
+    """
+
+    if "scl" not in item.assets:
+        raise KeyError(
+            f"Asset 'scl' not found in STAC item '{item.id}'. "
+            "Cloud masking requires the Sentinel-2 L2A Scene "
+            "Classification Layer, which does not exist for L1C products."
+        )
+
+    href, _, _, _ = get_asset_metadata(item.assets["scl"])
+
+    print(f"Building cloud mask from SCL asset: {href}")
+
+    with rio.open(href) as src:
+        scl = src.read(
+            1,
+            out_shape=out_shape,
+            resampling=Resampling.nearest,
+        )
+
+    return np.isin(scl, cloud_classes)
+
+
+# ---------------------------------------------------------------------
+# Index processing
+# ---------------------------------------------------------------------
+
+def calculate_normalized_difference(
+    band1,
+    band2,
+    minimum=-1.0,
+    maximum=1.0,
+    nodata=-9999,
+):
+    """
+    Calculate a normalized-difference index.
+
+    The calculation follows the implementation in the Sentinel-2
+    index notebook:
+
+        (band1 - band2) / (band1 + band2)
+
+    Values outside the configured range are assigned nodata.
+
+    Parameters
+    ----------
+    band1 : numpy.ndarray
+        First input band.
+
+    band2 : numpy.ndarray
+        Second input band.
+
+    minimum : float
+        Minimum valid index value.
+
+    maximum : float
+        Maximum valid index value.
+
+    nodata : float
+        Output nodata value.
+
+    Returns
+    -------
+    numpy.ndarray
+        Calculated index.
+    """
+
+    band1 = np.asarray(band1)
+    band2 = np.asarray(band2)
+
+    denominator = band1 + band2
+
+    array = np.full(
+        band1.shape,
+        nodata,
+        dtype=np.float32,
+    )
+
+    valid = (
+        np.isfinite(band1)
+        & np.isfinite(band2)
+        & (denominator != 0)
+    )
+
+    array[valid] = (
+        (band1[valid] - band2[valid])
+        / denominator[valid]
+    )
+
+    invalid_range = (
+        (array > maximum)
+        | (array < minimum)
+    )
+
+    array[invalid_range] = nodata
+
+    return array
+
+
+def generate_index(
+    item,
+    algorithm,
+    algorithm_name,
+    output_dir="./s3_temp",
+    nodata=999,
+    cloud_mask=False,
+):
+    """
+    Generate a Sentinel-2 index and save it as a GeoTIFF.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 STAC item.
+
+    algorithm : dict
+        Algorithm configuration (assets, min/max, etc.).
+
+    algorithm_name : str
+        Algorithm/product name as used in the algorithm catalog (e.g.
+        "ndvi"), used to build the output filename.
+
+    output_dir : str
+        Local directory to write the output GeoTIFF.
+
+    nodata : float
+        Output nodata value.
+
+    cloud_mask : bool
+        If True, mask cloud, cloud-shadow, and thin-cirrus pixels using
+        the Sentinel-2 L2A Scene Classification Layer (SCL), setting
+        them to `nodata`. Only valid for L2A items -- SCL does not
+        exist for L1C products (see get_cloud_mask).
+
+    Returns
+    -------
+    str
+        Path to the generated GeoTIFF.
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    algorithm_assets = algorithm["assets"]
+
+    if len(algorithm_assets) != 2:
+        raise ValueError(
+            "Normalized-difference indices require exactly two assets."
+        )
+
+    bands = []
+
+    for band_name in algorithm_assets:
+
+        if band_name not in item.assets:
+            raise KeyError(
+                f"Asset '{band_name}' not found in STAC item "
+                f"'{item.id}'."
+            )
+
+        band, profile = read_algorithm_band(
+            item.assets[band_name],
+            target_gsd=algorithm.get("gsd"),
+            resample=algorithm.get("resample", False),
+            apply_scale=True,
+        )
+
+        bands.append(band)
+
+    print("Calculating normalized-difference index...")
+
+    denominator = bands[0] + bands[1]
+
+    index = np.full(
+        bands[0].shape,
+        nodata,
+        dtype=np.float32,
+    )
+
+    valid = (
+        np.isfinite(bands[0])
+        & np.isfinite(bands[1])
+        & (denominator != 0)
+    )
+
+    index[valid] = (
+        (bands[0][valid] - bands[1][valid])
+        / denominator[valid]
+    )
+
+    minimum = algorithm.get("min", -1.0)
+    maximum = algorithm.get("max", 1.0)
+
+    invalid = (
+        (index < minimum)
+        | (index > maximum)
+    )
+
+    index[invalid] = nodata
+
+    if cloud_mask:
+        print("Applying cloud mask...")
+        mask = get_cloud_mask(item, out_shape=index.shape)
+        index[mask] = nodata
+
+    profile = profile.copy()
+
+    profile.update(
+        driver="GTiff",
+        count=1,
+        dtype="float32",
+        nodata=nodata,
+    )
+
+    output_name = _build_output_filename(
+        item, algorithm_name, masked=cloud_mask
+    )
+    outfile = os.path.join(output_dir, output_name)
+
+    print(f"Writing GeoTIFF: {outfile}")
+
+    with rio.open(outfile, "w", **profile) as dst:
+        dst.write(index, 1)
+
+    print(f"Generation completed: {outfile}")
+
+    return outfile
+
+
+# ---------------------------------------------------------------------
+# Composite processing
+# ---------------------------------------------------------------------
+
+def apply_log_scale(
+    array,
+    low=750,
+    high=7500,
+    output_min=0,
+    output_max=255,
+):
+    """
+    Apply the logarithmic display scaling used by the composite notebook.
+
+    The notebook uses log(750) and log(7500) as the low/high thresholds
+    and maps the values to 0-255.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Input image.
+
+    low : float
+        Lower logarithmic threshold.
+
+    high : float
+        Upper logarithmic threshold.
+
+    output_min : float
+        Minimum output value.
+
+    output_max : float
+        Maximum output value.
+
+    Returns
+    -------
+    numpy.ndarray
+        Log-scaled image.
+    """
+
+    array = np.asarray(array)
+
+    # Avoid warnings from log(0) and log(negative values).
+    safe_array = np.ma.masked_where(
+        array <= 0,
+        array,
+    )
+
+    rescaled = np.ma.log(
+        safe_array
+    )
+
+    low_log = math.log(low)
+    high_log = math.log(high)
+
+    diff = high_log - low_log
+
+    rescaled[
+        np.where(rescaled <= low_log)
+    ] = output_min
+
+    rescaled[
+        np.where(rescaled >= high_log)
+    ] = output_max
+
+    indices = np.where(
+        (rescaled > low_log)
+        & (rescaled < high_log)
+    )
+
+    rescaled[indices] = (
+        output_max
+        * (rescaled[indices] - low_log)
+        / diff
+    )
+
+    return rescaled
+
+
+def generate_composite(
+    item,
+    algorithm,
+    algorithm_name,
+    output_dir="./s3_temp",
+    cloud_mask=False,
+):
+    """
+    Generate a Sentinel-2 composite and save it as a GeoTIFF.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 STAC item.
+
+    algorithm : dict
+        Algorithm configuration (assets, gsd, resample, etc.).
+
+    algorithm_name : str
+        Algorithm/product name as used in the algorithm catalog (e.g.
+        "true_color"), used to build the output filename.
+
+    output_dir : str
+        Local directory to write the output GeoTIFF.
+
+    cloud_mask : bool
+        If True, mask cloud, cloud-shadow, and thin-cirrus pixels using
+        the Sentinel-2 L2A Scene Classification Layer (SCL), zeroing
+        them out in each source band before log scaling (they fall out
+        as nodata=0 in the output, same as true nodata/edge pixels).
+        Only valid for L2A items -- SCL does not exist for L1C products
+        (see get_cloud_mask).
+
+    Returns
+    -------
+    str
+        Path to the generated GeoTIFF.
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    algorithm_assets = algorithm["assets"]
+
+    bands = []
+
+    for band_name in algorithm_assets:
+
+        if band_name not in item.assets:
+            raise KeyError(
+                f"Asset '{band_name}' not found in STAC item "
+                f"'{item.id}'."
+            )
+
+        band, profile = read_algorithm_band(
+            item.assets[band_name],
+            target_gsd=algorithm.get("gsd"),
+            resample=algorithm.get("resample", False),
+            apply_scale=False,
+        )
+
+        bands.append(band)
+
+    if cloud_mask:
+        print("Applying cloud mask...")
+        mask = get_cloud_mask(item, out_shape=bands[0].shape)
+        for band in bands:
+            band[mask] = 0
+
+    print("Applying logarithmic display scaling...")
+
+    rgb = np.asarray(bands)
+
+    array = apply_log_scale(rgb)
+
+    array = np.asarray(array, dtype=np.uint8)
+
+    profile = profile.copy()
+
+    profile.update(
+        count=array.shape[0],
+        dtype="uint8",
+        nodata=0,
+    )
+
+    output_name = _build_output_filename(
+        item, algorithm_name, masked=cloud_mask
+    )
+    outfile = os.path.join(output_dir, output_name)
+
+    print(f"Writing GeoTIFF: {outfile}")
+
+    with rio.open(outfile, "w", **profile) as dst:
+        dst.write(array)
+
+    print(f"Generation completed: {outfile}")
+
+    return outfile
+
+
+# ---------------------------------------------------------------------
+# Merge processing
+# ---------------------------------------------------------------------
+
+def merge_products(tif_paths, output_path, method="first"):
+    """
+    Mosaic a list of local single-product GeoTIFFs (e.g. one true_color
+    composite or one NDVI index per Sentinel-2 tile) into a single output
+    GeoTIFF.
+
+    Adjacent Sentinel-2 tiles can fall in different UTM zones, so any
+    input not matching the dominant CRS is reprojected to a temp file
+    before merging.
+
+    Parameters
+    ----------
+    tif_paths : list of str
+        Local paths to per-tile product GeoTIFFs to merge.
+
+    output_path : str
+        Path to write the merged GeoTIFF.
+
+    method : str
+        rasterio.merge method. "first" means the first-listed tile's
+        valid (non-nodata) pixels win; nodata pixels (e.g. masked
+        clouds) are filled by later tiles where available.
+
+    Returns
+    -------
+    str
+        output_path
+    """
+
+    if len(tif_paths) == 1:
+        shutil.copy(tif_paths[0], output_path)
+        return output_path
+
+    crs_list = [rio.open(p).crs for p in tif_paths]
+    crs_list_unique = list(set(crs_list))
+
+    merge_inputs = list(tif_paths)
+    tmp_dir = None
+    crs_dom = crs_list_unique[0]
+
+    try:
+        if len(crs_list_unique) != 1:
+            crs_dom = max(crs_list, key=crs_list.count)
+            tmp_dir = tempfile.mkdtemp(prefix="s2_stac_merge_reproj_")
+
+            for idx, tif in enumerate(tif_paths):
+                with rio.open(tif) as src:
+                    if src.crs == crs_dom:
+                        continue
+
+                    transform, width, height = calculate_default_transform(
+                        src.crs, crs_dom, src.width, src.height, *src.bounds
+                    )
+                    kwargs = src.meta.copy()
+                    kwargs.update(
+                        {
+                            "crs": crs_dom,
+                            "transform": transform,
+                            "width": width,
+                            "height": height,
+                        }
+                    )
+
+                    reproj_path = os.path.join(
+                        tmp_dir, f"{idx}_{os.path.basename(tif)}"
+                    )
+
+                    with rio.open(reproj_path, "w", **kwargs) as dst:
+                        for i in range(1, src.count + 1):
+                            reproject(
+                                source=rio.band(src, i),
+                                destination=rio.band(dst, i),
+                                src_transform=src.transform,
+                                src_crs=src.crs,
+                                dst_transform=transform,
+                                dst_crs=crs_dom,
+                            )
+
+                    merge_inputs[idx] = reproj_path
+
+        with rio.open(merge_inputs[0]) as ref:
+            nodata_val = ref.nodata
+            count = ref.count
+            dtype = ref.dtypes[0]
+
+        array, transform = merge(merge_inputs, method=method)
+
+        profile = {
+            "driver": "GTiff",
+            "count": count,
+            "dtype": dtype,
+            "height": array.shape[1],
+            "width": array.shape[2],
+            "nodata": nodata_val,
+            "crs": crs_dom,
+            "transform": transform,
+        }
+
+        with rio.open(output_path, "w", **profile) as dst:
+            dst.write(array)
+
+    finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return output_path
+
+
+# ---------------------------------------------------------------------
+# High-level processing functions
+# ---------------------------------------------------------------------
+
+def process_index(
+    item,
+    algorithm,
+    algorithm_name,
+    bucket,
+    key,
+    tmpfile,
+    nodata=-9999,
+):
+    """
+    Generate an index and write it directly to S3 as a COG.
+
+    Returns
+    -------
+    str
+        S3 URI of the generated COG.
+    """
+
+    array, profile = generate_index(
+        item,
+        algorithm,
+        algorithm_name,
+        nodata=nodata,
+    )
+
+    return write_cog_to_s3(
+        array,
+        profile,
+        bucket,
+        key,
+        tmpfile,
+    )
+
+
+def process_composite(
+    item,
+    algorithm,
+    algorithm_name,
+    bucket,
+    key,
+    tmpfile,
+):
+    """
+    Generate a composite and write it directly to S3 as a COG.
+
+    Returns
+    -------
+    str
+        S3 URI of the generated COG.
+    """
+
+    array, profile = generate_composite(
+        item,
+        algorithm,
+        algorithm_name,
+    )
+
+    return write_cog_to_s3(
+        array,
+        profile,
+        bucket,
+        key,
+        tmpfile,
+    )
+
+
+def process_items(
+    items,
+    algorithm,
+    algorithm_name,
+    algorithm_type,
+    bucket,
+    output_prefix="test-cog-write",
+    tmp_dir=".",
+    nodata=-9999,
+    cloud_mask=False,
+    merge=False,
+    merge_method="first",
+):
+    """
+    Process every Sentinel-2 item returned from a STAC search.
+
+    Parameters
+    ----------
+    items : list
+        STAC Items.
+
+    algorithm : dict
+        Algorithm configuration.
+
+    algorithm_name : str
+        Algorithm/product name as used in the algorithm catalog (e.g.
+        "true_color", "ndvi"), used to build output filenames.
+
+    algorithm_type : str
+        Either "index" or "composite".
+
+    bucket : str
+        Destination S3 bucket.
+
+    output_prefix : str
+        S3 output prefix.
+
+    tmp_dir : str
+        Local directory used for temporary GeoTIFF/COG files.
+
+    nodata : float
+        Index nodata value. Ignored for composites.
+
+    cloud_mask : bool
+        If True, mask cloud/cloud-shadow/thin-cirrus pixels using the
+        Sentinel-2 L2A SCL asset on each tile before COGing (and before
+        merging, if merge=True). Only valid for L2A items.
+
+    merge : bool
+        If True, generate every item locally first, mosaic them into a
+        single product, and COG/upload once. If False (default), each
+        item is COG'd/uploaded individually, as before.
+
+    merge_method : str
+        rasterio.merge method used when merge=True. Default "first"
+        means an earlier tile's valid pixels win, and nodata gaps
+        (e.g. from cloud masking) are filled by later tiles.
+
+    Returns
+    -------
+    list
+        S3 URIs of generated products.
+    """
+
+    if algorithm_type not in (
+        "index",
+        "composite",
+    ):
+        raise ValueError(
+            "algorithm_type must be either "
+            "'index' or 'composite'."
+        )
+
+    os.makedirs(
+        tmp_dir,
+        exist_ok=True,
+    )
+
+    # -------------------------------------------------------------
+    # Phase 1: generate each tile's product locally
+    # -------------------------------------------------------------
+
+    local_paths = []
+
+    for item in items:
+
+        print()
+        print("=" * 70)
+        print(f"Generating tile: {item.id}")
+        print("=" * 70)
+
+        if algorithm_type == "index":
+
+            local_path = generate_index(
+                item,
+                algorithm,
+                algorithm_name,
+                output_dir=tmp_dir,
+                nodata=nodata,
+                cloud_mask=cloud_mask,
+            )
+
         else:
-            direction = 'S'
-        lat = direction + str(abs(y)).zfill(2)
-        return lat
-    # get bounds
-    ulx, xres, xskew, uly, yskew, yres  = im_4326.GetGeoTransform()
-    lrx = ulx + (im_4326.RasterXSize * xres)
-    lry = uly + (im_4326.RasterYSize * yres)
-    
-    # Get longitudes and latitudes
-    lon_values = list(range(math.floor(ulx/20) * 20, math.floor(lrx/20) * 20 + 1, 20))
-    lat_values = list(range(math.ceil(lry/20) * 20, math.ceil(uly/20) * 20 +1, 20))
 
-    # Grab all GLC tiles from S3 buckets
-    for x in lon_values:
-        for y in lat_values:
-            lat_lon = get_lon(x) + get_lat(y)
-            s3_url_base = f's3://vito.landcover.global/v3.0.1/{year}/{lat_lon}/'
-            sys_output = subprocess.check_output(f"aws s3 ls --no-sign-request {s3_url_base} | grep Discrete-Classification-map_EPSG-4326.tif", shell=True)
-            filename = sys_output.decode().split(" ")[-1].rstrip()
-            com = f"aws s3 cp --no-sign-request {s3_url_base}{filename} {outdir}"
-            os.system(com)
-            print('\t* ', lat_lon, "Done")
+            local_path = generate_composite(
+                item,
+                algorithm,
+                algorithm_name,
+                output_dir=tmp_dir,
+                cloud_mask=cloud_mask,
+            )
 
-    print("All available GLC tiles downloaded.")
-    glc_tiles = glob.glob(os.path.join(outdir, "*LC100*.tif"))
-    '''
+        local_paths.append(local_path)
 
-  elif year in ['2020', '2021']:
-    
-    # load worldcover grid
-    s3_url_prefix = "https://esa-worldcover.s3.eu-central-1.amazonaws.com"
-    grid_url = f'{s3_url_prefix}/v100/2020/esa_worldcover_2020_grid.geojson'
-    grid = gpd.read_file(grid_url)
-    
-    # get bounds of image
-    bounds = rio.open(im_4326_path).bounds
-    geom = box(*bounds)
-    
-    # find where SAR image bounds intersect worldcover grid
-    tiles = grid[grid.intersects(geom)]
-    
-    # set algorithm version
-    versions = {'2020': 'v100', '2021': 'v200'}
-    version = versions[year]
-    
-    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
-    # download each GLC tile that intersects the SAR image
-    for tile in tiles.ll_tile:
-        bucket = 'esa-worldcover'
-        bucket_dir = f'{version}/{year}/map/'
-        filename = f'ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif'
-        outfile = os.path.join(outdir, filename)
-        s3.download_file(bucket, bucket_dir+filename, outfile)
+    if not merge:
+        # -----------------------------------------------------------
+        # Original behavior: one COG + upload per tile
+        # -----------------------------------------------------------
+        outputs = []
 
-    glc_tiles = glob.glob(os.path.join(outdir, "ESA_WorldCover*.tif"))
-  
-  else:
-    print(f'\t* No WorldCover for {year}')
-    quit()
-  
-  # delete WGS84 version
-  os.remove(im_4326_path)
+        for item, local_path in zip(items, local_paths):
 
-  # merging tiles
-  if len(tiles) > 1:
-    gen_merge(glc_tiles, outname)
-    for tile in glc_tiles:
-        os.remove(tile)
-  else:
-    os.rename(glc_tiles[0], outname)
-  
-  # reproject, resample WorldCover to match inputted image
-  match_geotiff(outname, image, outname)
-  
-def reclass_worldcover(wc_path, no_data_locs):
-  # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-    codes_dict = {0: 999, 10: 3, 20:3, 30:1, 40:1, 50:2, 60:3, 70:999, 80:4, 90:3, 95:3, 100:3}
-    wc_rst = rio.open(wc_path)
-    wc_array = wc_rst.read()[0]
+            key = f"{output_prefix}/{os.path.basename(local_path)}"
+            tmpfile = local_path.replace(".tif", "_cog.tif")
 
-    # reclassify WorldCover
-    translated_codes = np.vectorize(codes_dict.get)(wc_array).astype('uint16')
-    translated_codes[no_data_locs] = 999
+            with rio.open(local_path) as src:
+                array = src.read()
+                profile = src.profile
 
-    # write reclassified WorldCover to file
-    wc_reclass_out_file = wc_path.replace('.tif', '_reclass.tif')
-    dump_geotiff(translated_codes, wc_rst.crs, wc_rst.transform, 999, wc_reclass_out_file)
-    return wc_reclass_out_file
+            outputs.append(
+                write_cog_to_s3(array, profile, bucket, key, tmpfile)
+            )
 
-def gen_water_extent(indir, nstd, outname, mask):
-  # get nir band
-  safes = glob.glob(os.path.join(indir, '*SAFE'))
-  nir_files = glob.glob(os.path.join(indir, '*/*B08_10m.tif'))
-  if len(safes) != len(nir_files):
-    print('\t* Extracting B8')
-    nir_files = []
-    for safe in safes:
-      nir_file = extract_band_geotiffs('B08', safe, 'MSIL2A', '10')
-      nir_files.append(nir_file)
-  
-  # merge NIR files
-  nir_merged = os.path.join(Path(outname).parent, 'B8_merged.tif')
-  if not os.path.isfile(nir_merged):
-    print('\t* Merging NIR files.')
-    gen_merge(nir_files, nir_merged)
+            os.remove(local_path)
 
-  # get year
-  year = os.path.basename(indir)[:4]
+        return outputs
 
-  # get no data locs
-  nir_rst = rio.open(nir_merged)
-  nir_nd_val = nir_rst.nodata
-  nir_array = nir_rst.read()[0]
-  nd_locs = np.where(nir_array == nir_nd_val)
+    # -----------------------------------------------------------------
+    # merge=True: mosaic all tiles, COG + upload once
+    # -----------------------------------------------------------------
 
-  # get image bounds in WGS84
-  xmin, ymin, xmax, ymax = nir_rst.bounds
-  transformer = Transformer.from_crs(nir_rst.crs, "EPSG:4326", always_xy=True)
-  xmin_wgs84,  ymax_wgs84= transformer.transform(xmin,ymax)
-  xmax_wgs84,  ymin_wgs84= transformer.transform(xmax,ymin)
+    print()
+    print("=" * 70)
+    print(f"Merging {len(local_paths)} tile(s)")
+    print("=" * 70)
 
-  # U.S. boundaries
-  xmax_us = -66.9513812
-  xmin_us = -124.7844079
-  ymax_us = 49.3457868
-  ymin_us = 24.7433195
+    # Sort items/paths together for a deterministic merge order and a
+    # deterministic choice of "first" item for the merged filename.
+    items_sorted, local_paths_sorted = zip(
+        *sorted(zip(items, local_paths), key=lambda p: p[0].id)
+    )
 
-  # check if image lies copletely within U.S. boundaries
-  # if yes, download CDl
-  # if no, download WorldCover
-  if (xmax_wgs84 < xmax_us) & (xmin_wgs84 > xmin_us) & (ymax_wgs84 < ymax_us) & (ymin_wgs84 > ymin_us):
-    # this year will need to be updated annually to reflect mostly recent CDL year
-    if int(year) > 2024:
-          year = 2024
-    
-    # create CDL directory
-    cdl_dir = os.path.join(Path(outname).parents[1], 'CDL')
-    if not os.path.isdir(cdl_dir):
-      os.mkdir(cdl_dir)
-    
-    # check for existing CDL files
-    cdl_name = os.path.join(cdl_dir, f'CDL_{year}.tif')
-    cdl_check = glob.glob(cdl_name.replace('.tif', '_reclass.tif'))
-    if len(cdl_check) == 0:
-      # download and resample CDL
-      print('\t* Downloading CDL')
-      download_cdl(nir_merged, year, cdl_name)
-      ref_simple = reclass_cdl(cdl_name, nd_locs)
-    else:
-      print('\t* CDL already downloaded!')
-      ref_simple = cdl_check[0]
-    
-  else:
-    # most recent WorldCover year is 2021
-    if int(year) > 2021:
-          year = 2021
+    merged_name = _build_output_filename(
+        items_sorted[0], algorithm_name, masked=cloud_mask, merged=True
+    )
+    merged_path = os.path.join(tmp_dir, merged_name)
 
-    # create WorldCover directory
-    wc_dir = os.path.join(Path(outname).parents[1], 'WorldCover')
-    if not os.path.isdir(wc_dir):
-      os.mkdir(wc_dir)
-    
-    # check for existing WorldCover files
-    wc_name = os.path.join(wc_dir, f'WorldCover_{year}.tif')
-    wc_check = glob.glob(wc_name.replace('.tif', '_reclass.tif'))
-    if len(wc_check) == 0:
-      if not os.path.isfile(wc_name):
-        # download WorldCover
-        print('\t* Downloading WorldCover')
-        download_worldcover(nir_merged, str(year), wc_name)
-      # reclassify WorldCover
-      ref_simple = reclass_worldcover(wc_name, nd_locs)
-    else:
-      print('\t* WorldCover already downloaded!')
-      ref_simple = wc_check[0]
+    merge_products(list(local_paths_sorted), merged_path, method=merge_method)
 
-  # open reclassified CDl and cloud mask
-  ref_simple_array = rio.open(ref_simple).read(1)
-  cloudMask_rst = rio.open(mask)
+    for p in local_paths_sorted:
+        os.remove(p)
 
-  # resample cloud mask to match NIR band
-  cloudMask = cloudMask_rst.read(1,
-          out_shape=(cloudMask_rst.count,
-                    int(cloudMask_rst.height * 2),
-                    int(cloudMask_rst.width * 2)
-          ),
-          resampling=Resampling.nearest
-      )
+    with rio.open(merged_path) as src:
+        array = src.read()
+        profile = src.profile
 
-  # water pixels from reference data that are cloud-free and valid  in the NIR data
-  water = np.where((ref_simple_array == 4) & (cloudMask == 0) & (nir_array != 0))
-  mean = np.nanmean(nir_array[water])   # mean of water pixels
-  std = np.nanstd(nir_array[water])     # standard deviation of water pixels
-  nir_thresh = mean + (nstd * std)      # NIR water threshold is a given number of standard deviations above the mean
-  print('\t* NIR Threshold:', nir_thresh)
+    key = f"{output_prefix}/{merged_name}"
+    tmpfile = merged_path.replace(".tif", "_cog.tif")
 
-  # create water extent array
-  water_extent = np.zeros(nir_array.shape)
-  water_extent[nir_array <= nir_thresh] = 1   # NIR values below the threshold are classified as water
-  water_extent = medfilt2d(water_extent, kernel_size=5)  # filtering small areas
+    output = write_cog_to_s3(array, profile, bucket, key, tmpfile)
 
-  # reclassify water pixels as permanent, flooded developed, flooded vegetation, etc. 
+    os.remove(merged_path)
 
-  classified_flood = np.zeros(water_extent.shape, dtype=np.byte)
-
-  classified_flood[water] = 1  # permanent water
-
-  flood_dev = np.where((ref_simple_array == 2) & (water_extent == 1)) # flooded developed
-  classified_flood[flood_dev] = 2
-
-  flood_veg = np.where((ref_simple_array == 3) & (water_extent == 1)) # flooded vegetation
-  classified_flood[flood_veg] = 3
-
-  flood_crop = np.where((ref_simple_array ==1) & (water_extent == 1)) # flooded cropland/grassland
-  classified_flood[flood_crop] = 4 
-
-  clouds_shadow = np.where(cloudMask == 1) # clouds and cloud shadow
-  classified_flood[clouds_shadow] = 5 
-
-  classified_flood[nir_array == 0] = 0    # no data
-
-  # write reclassified water extent to file
-  print('\t* Generating Water Extent geotiff')
-  dump_geotiff(classified_flood, nir_rst.crs, nir_rst.transform, 0, outname)
-
-def gen_merge(list_of_files, outfile, method='first'):
-  # get unique CRS found in the inputted list of files to merge
-  crs_list = [rio.open(im).crs for im in list_of_files]
-  crs_list_unique = list(set(crs_list))
-
-  # Files actually fed to merge(). When CRSs disagree, each mismatched scene is
-  # reprojected to the dominant CRS in a TEMP directory and swapped in here. We
-  # never reopen a source scene in 'w' mode: doing so used to overwrite (and
-  # truncate mid-read) the input file in place, corrupting the merge. Mirrors the
-  # Landsat gen_merge fix (landsat89_functions.py).
-  merge_inputs = list(list_of_files)
-  tmp_dir = None
-  try:
-    if len(crs_list_unique) != 1:
-        crs_dom = max(crs_list, key=crs_list.count)    # most common CRS
-        tmp_dir = tempfile.mkdtemp(prefix='s2_merge_reproj_')
-        for idx, tif in enumerate(list_of_files):
-            with rio.open(tif) as src:
-                if src.crs == crs_dom:
-                    continue
-                transform, width, height = calculate_default_transform(
-                    src.crs, crs_dom, src.width, src.height, *src.bounds)
-                kwargs = src.meta.copy()
-                kwargs.update({
-                    'crs': crs_dom,
-                    'transform': transform,
-                    'width': width,
-                    'height': height})
-                reproj_path = os.path.join(tmp_dir, f'{idx}_{os.path.basename(tif)}')
-                with rio.open(reproj_path, 'w', **kwargs) as dst:
-                    for i in range(1, src.count + 1):
-                        reproject(
-                            source=rio.band(src, i),
-                            destination=rio.band(dst, i),
-                            src_transform=src.transform,
-                            src_crs=src.crs,
-                            dst_transform=transform,
-                            dst_crs=crs_dom)
-                merge_inputs[idx] = reproj_path
-    else:
-      crs_dom = crs_list_unique[0]
-
-    # determine no data value
-    nodata_val = rio.open(merge_inputs[0]).nodata
-    if not nodata_val:
-        nodata_val = 0
-
-    # number of bands
-    bands = rio.open(merge_inputs[0]).count
-
-    # merge the files
-    im_array, im_trans = merge(merge_inputs, method=method)
-
-    # write the merged images to file
-    with rio.open(
-        outfile, "w",
-        driver = 'GTiff',
-        count = bands,
-        dtype = im_array.dtype,
-        height = im_array.shape[1],
-        width = im_array.shape[2],
-        nodata = nodata_val,
-        crs = crs_dom,
-        transform = im_trans) as dest:
-        dest.write(im_array)
-  finally:
-    if tmp_dir is not None:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-def s2_merge(dir_to_merge, mask=False, method='first'):
-  # Gather inputs, excluding any prior merged output so a re-merge (e.g. -force)
-  # doesn't fold the previous mosaic back into the new one. Raise (not IndexError
-  # on ims[0]) when the product dir has no output -- mirrors ls_merge so the merge
-  # loop can skip a product that failed to generate instead of crashing the job.
-  ims = sorted(
-      im for im in glob.glob(os.path.join(dir_to_merge, '*tif'))
-      if 'merged' not in os.path.basename(im)
-  )
-  if not ims:
-      raise FileNotFoundError(f'No (non-merged) .tif files to merge in: {dir_to_merge}')
-
-  parts = os.path.splitext(os.path.basename(ims[0]))[0].split("_")
-
-  sat = parts[0]
-  level = parts[1]
-  product = parts[2]
-  timestamp = parts[-1]
-
-  merged_output = os.path.join(
-      dir_to_merge,
-      f"{sat}_{level}_{product}_merged_{timestamp}.tif"
-  )
-
-  # merge images
-  gen_merge(ims, merged_output, method)
-
-  if mask:
-    print('\t* Applying Cloud Mask')
-    # Find the merged cloud mask. Use *merged*.tif (not *merged.tif): the merged
-    # cloud mask is renamed to e.g. S2B_cloudMask_merged_2026-06-06_day.tif
-    # (date moved to end + _day), so it no longer *ends* in "merged.tif".
-    # *merged*.tif matches both the pre-rename and renamed forms.
-    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
-    # apply cloud mask
-    apply_cloud_mask(merged_output, cm_merged)
-    # apply_cloud_mask writes <dir_to_merge>/masked/<prefix>_masked_<timestamp>.tif.
-    # Return THAT path (not the unmasked merge) so the caller COGs/uploads the
-    # masked product. Reconstructed from the same split apply_cloud_mask uses, so
-    # it is byte-identical to what was written. Mirrors Landsat ls_merge.
-    base = os.path.splitext(os.path.basename(merged_output))[0]
-    mparts = base.split("_")
-    masked_basename = f"{'_'.join(mparts[:-1])}_masked_{mparts[-1]}.tif"
-    return os.path.join(Path(merged_output).parent, 'masked', masked_basename)
-  return merged_output
+    return [output]

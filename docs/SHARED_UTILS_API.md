@@ -637,6 +637,7 @@ from shared_utils.file_naming import (
     create_nisar_filename,            # (path, event) -> two-date variant for interferometric PAIRS
     no_change,                        # passthrough builder for sub-products like AVIRIS
     prefix_event,                     # (stem, event) -> stem with the event prefix applied at most once
+    strip_event_prefix,               # (name, event=None) -> name with a leading event prefix removed
 )
 ```
 
@@ -650,6 +651,9 @@ Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, `2025-01
 - A stem already ending in a canonical marker — an ISO-Zulu datetime (with `HH:MM:SS` or compact `HHMMSS`) or a `_day` / `_hour` suffix — is kept verbatim; only the prefix rule applies. Mirrors the `cog_utils._ISO_ZULU_END_RE` short-circuit in `rename_with_event` / `get_final_filename`.
 
 Both were regressions in a real activation: a SkySat delivery named `202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z.tif` came out as `202607_Fire_OR_202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z_day.tif`. The mixed `YYYY-MM-DDTHHMMSSZ` stamp also needed its own `DATETIME_PATTERNS` entry — without one, the less-specific `YYYY-MM-DDTHH` pattern matched a *prefix* of it and left `3721Z` welded to the product token. Pinned by `tests/unit/test_file_naming.py` and `tests/unit/test_simple_disaster_naming.py`.
+
+**`strip_event_prefix(name, event_name=None)` is the inverse of `prefix_event`** — for pipelines that keep the activation in the GeoTIFF tags and the S3 prefix rather than in the filename (`notebooks/simple_disaster_staging.ipynb`). Two passes, in order: `event_name` matched **case-insensitively** wins, because it is the only way to strip an event whose location token itself contains underscores (`202508_Flood_New_Mexico` — the generic shape below would eat exactly three tokens and leave `Mexico_NDVI.tif`); otherwise the generic `^YYYYMM_Hazard_Location_` shape is removed, so a *misnamed* delivery — right shape, wrong event — is still cleaned. Note the guards: an 8-digit date head (`20260812_SkySat_…`) can't match, because the anchored `\d{6}` would then need a `_` where `1` sits; and a name that is nothing but the event is returned unchanged rather than stripped down to a bare `.tif`. Only the basename is examined, so a directory component survives. Setting a builder's `event_name` to `''` only stops it *adding* a prefix — it cannot remove one the source arrived with, which is why the stripper runs first. Pinned by `tests/unit/test_file_naming.py::TestStripEventPrefix`.
+
 
 #### `create_nisar_filename(original_path, event_name)` — interferometric pairs
 

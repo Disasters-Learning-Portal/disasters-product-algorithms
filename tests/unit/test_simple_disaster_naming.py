@@ -30,6 +30,7 @@ pytest.importorskip("shared_utils.file_naming")  # needs the package installed
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOKS = [
     REPO_ROOT / "notebooks" / "simple_disaster_template.ipynb",
+    REPO_ROOT / "notebooks" / "simple_disaster_staging.ipynb",
     REPO_ROOT / "notebooks" / "testing-notebooks" / "simple_disaster_template.ipynb",
 ]
 

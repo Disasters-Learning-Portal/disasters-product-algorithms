@@ -56,22 +56,27 @@ roster_handles() {
 
 # roster_check_github <handle>
 #
-# Default checker for roster_validate. Exit 0 = fine, 1 = not a GitHub user,
-# 2 = real user but not a collaborator on $GITHUB_REPOSITORY.
+# Default checker for roster_validate. Exit 0 = fine, 1 = not a GitHub user.
 #
-# The user-exists check is the HARD one and it catches essentially every real
-# typo, because a mistyped handle almost never lands on an existing account.
-# The collaborator check only adds cover for a typo that happens to hit a real
-# stranger — and it is reported as a WARNING, not a failure, because
-# GET /repos/{o}/{r}/collaborators/{user} wants push access and the default
-# GITHUB_TOKEN's permissions vary by workflow. Degrading to a warning there
-# keeps a permissions quirk from failing a release alert.
+# "Is this a real account?" is the whole check, and it catches essentially every
+# real typo, because a mistyped handle almost never lands on an existing account.
+#
+# THERE IS DELIBERATELY NO COLLABORATOR CHECK. A
+# GET /repos/{o}/{r}/collaborators/{user} probe was tried and removed: under the
+# workflow's GITHUB_TOKEN it only resolves DIRECT collaborators, so everyone
+# whose access comes from the org team 404s and reads as "not a collaborator."
+# On this repo that was 4 of 10 handles — including a repository ADMIN —
+# reported wrongly on every run (deterministic, confirmed over two runs;
+# `?affiliation=direct` lines up exactly with which handles passed). There is no
+# accurate version available here: team membership needs `read:org` and listing
+# collaborators needs push access, and the default token has neither.
+#
+# Four permanent false warnings on every release alert is worse than no check.
+# The entire value of this validation is that its output can be trusted, and a
+# warning nobody can act on trains people to skim past the real failures.
 roster_check_github() {
   local h="$1"
   gh api "users/$h" >/dev/null 2>&1 || return 1
-  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-    gh api "repos/${GITHUB_REPOSITORY}/collaborators/$h" >/dev/null 2>&1 || return 2
-  fi
   return 0
 }
 
@@ -97,7 +102,6 @@ roster_validate() {
     case "$rc" in
       0) echo "  ok    $h" ;;
       1) echo "  BAD   $h — not a GitHub user" >&2; bad=1 ;;
-      2) echo "  warn  $h — not a collaborator on ${GITHUB_REPOSITORY:-<unset>}" >&2 ;;
       *) echo "  BAD   $h — check failed (rc=$rc)" >&2; bad=1 ;;
     esac
   done < <(roster_handles)

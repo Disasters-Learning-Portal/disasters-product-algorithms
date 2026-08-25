@@ -123,6 +123,21 @@ def main():
 
     activation_metadata = load_metadata_json(args.metadata_json)
 
+    # Record which processing level produced this product. The two levels ship
+    # OPPOSITE RGB band orders (satellogic_v2.BAND_ORDER), so the level is a
+    # radiometric property of the output, not just provenance -- and it was not
+    # recoverable after the fact: an event rename strips the vendor capture id
+    # (the only other L1D/L1B tell) out of the filename, which is why the blast
+    # radius of the transposition bug could not be bounded from published data.
+    #
+    # Guarded on `is not None` rather than set unconditionally: passing a
+    # metadata dict switches convert_to_cog from the gdalwarp/rio-cogeo
+    # subprocess path to in-process cog_translate (see CLAUDE.md "One engine"),
+    # so creating one here would silently change the COG backend for runs that
+    # did not ask for tags. setdefault mirrors the Capella SOURCE precedent.
+    if activation_metadata is not None:
+        activation_metadata.setdefault("PROCESSING_LEVEL", args.level)
+
     os.makedirs(args.output, exist_ok=True)
 
     for datestring in args.date.split(","):

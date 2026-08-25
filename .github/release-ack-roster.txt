@@ -8,27 +8,40 @@
 #   • .github/scripts/release_alert_body.sh — builds the @mention line
 #   • .github/workflows/release-ack.yaml    — the denominator for the ack tally
 #
-# This is a HAND-MAINTAINED MIRROR of the Disasters-Learning-Portal/disasters
-# team. It is not read from the org API, because the default GITHUB_TOKEN is
-# repo-scoped and gets 403 on GET /orgs/{org}/teams/{slug}/members — reading the
-# team live would mean granting a PAT `Organization permissions -> Members: Read`
-# and inheriting that PAT's expiry as a new way for the alert to break silently.
+# This is a HAND-CURATED list, NOT a mirror of any GitHub team. It was the
+# Disasters-Learning-Portal/disasters team until 2026-08-25 and is now chosen by
+# hand, so do not "resync" it from the team API — several people here are not on
+# that team, and several team members are deliberately not here.
 #
-# Refresh it by hand when the team changes:
+# It is also not read from the org API at run time: the default GITHUB_TOKEN is
+# repo-scoped and 403s on /orgs/{org}/teams/{slug}/members, so reading it live
+# would mean granting a PAT `Organization permissions -> Members: Read` and
+# inheriting that PAT's expiry as a new silent failure mode.
 #
-#   gh api orgs/Disasters-Learning-Portal/teams/disasters/members --jq '.[].login'
+# ADDING SOMEONE: put the handle here with their name in a trailing comment, and
+# say HOW you identified them. The names matter — most of these accounts have no
+# display name, no bio and no public commits, so a bare handle is genuinely hard
+# to re-identify later, and a plausible-looking guess is how the wrong person
+# ends up on a distribution list. Markers used below:
+#   [profile] GitHub display name    [email] commit-author email
+#   [handle]  handle spells the name  [confirmed] identified by a maintainer
+#
+# A MISTYPED HANDLE MENTIONS NOBODY AND FAILS SILENTLY. That is not theoretical:
+# the v1.0.1 alert (#120) used a team mention, notified no one, and nothing
+# surfaced it. `release-ack.yaml` now validates every handle here against the
+# GitHub API before it renders, so a typo fails the run instead of the release.
 #
 # Matching is case-insensitive, so casing here is cosmetic.
 #
-# Last synced with the team: 2026-08-25
+# Last curated: 2026-08-25
 
-anayeaye
-slesaad
-jreed6
-BhattaraiSijan
-jrbell1
-alex-melancon
-taylordupre
-kyle-lesinger
-chelsea-aaron
-ryancarmichael-nasa
+jrbell1              # JR Bell          [handle]
+alex-melancon        # Alex Melancon    [handle]
+taylordupre          # Taylor DuPre     [profile]
+kyle-lesinger        # Kyle Lesinger    [profile]
+chelsea-aaron        # Chelsea Aaron    [email] chelsea.aaron@uah.edu
+acblackford          # Andrew Blackford [profile] UAH
+krosewheeler         # Kaitlyn          [confirmed] no public GitHub identity
+pmkerwin             # Patrick          [confirmed] no public GitHub identity
+gwlayne              # Garrett Layne    [email] garrett.w.layne@nasa.gov
+WeathermanTrent      # Trent            [handle] surname unknown

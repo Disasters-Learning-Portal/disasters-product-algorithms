@@ -54,6 +54,61 @@ roster_handles() {
   printf '%s\n' "$handles"
 }
 
+# roster_check_github <handle>
+#
+# Default checker for roster_validate. Exit 0 = fine, 1 = not a GitHub user,
+# 2 = real user but not a collaborator on $GITHUB_REPOSITORY.
+#
+# The user-exists check is the HARD one and it catches essentially every real
+# typo, because a mistyped handle almost never lands on an existing account.
+# The collaborator check only adds cover for a typo that happens to hit a real
+# stranger — and it is reported as a WARNING, not a failure, because
+# GET /repos/{o}/{r}/collaborators/{user} wants push access and the default
+# GITHUB_TOKEN's permissions vary by workflow. Degrading to a warning there
+# keeps a permissions quirk from failing a release alert.
+roster_check_github() {
+  local h="$1"
+  gh api "users/$h" >/dev/null 2>&1 || return 1
+  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    gh api "repos/${GITHUB_REPOSITORY}/collaborators/$h" >/dev/null 2>&1 || return 2
+  fi
+  return 0
+}
+
+# roster_validate [checker]
+#
+# Check every roster handle. `checker` is a command invoked as `checker <handle>`
+# with roster_check_github's exit convention; it is injectable so the tests can
+# exercise this without a network or a token.
+#
+# WHY THIS EXISTS: a mistyped handle renders as inert plain text in the alert and
+# notifies nobody, with nothing anywhere reporting a problem. That is exactly how
+# the v1.0.1 alert (#120) reached zero people while every workflow went green.
+# Validation turns that silent miss into a failed run.
+roster_validate() {
+  local checker="${1:-roster_check_github}"
+  local bad=0 h rc
+
+  while read -r h; do
+    # `cmd; rc=$?` would abort the whole loop on the FIRST bad handle under
+    # `set -e` — which GitHub's `run:` steps use — reporting nothing. The `||`
+    # is what exempts the checker from errexit so every handle gets reported.
+    "$checker" "$h" && rc=0 || rc=$?
+    case "$rc" in
+      0) echo "  ok    $h" ;;
+      1) echo "  BAD   $h — not a GitHub user" >&2; bad=1 ;;
+      2) echo "  warn  $h — not a collaborator on ${GITHUB_REPOSITORY:-<unset>}" >&2 ;;
+      *) echo "  BAD   $h — check failed (rc=$rc)" >&2; bad=1 ;;
+    esac
+  done < <(roster_handles)
+
+  if [ "$bad" -ne 0 ]; then
+    echo "error: roster contains handles that cannot be mentioned." >&2
+    echo "       A bad handle renders as plain text and notifies nobody." >&2
+    return 1
+  fi
+}
+
 # roster_split <reacted_file> <acked_out> <missing_out>
 #
 # Split the roster into "has reacted" and "has not", where <reacted_file> is one

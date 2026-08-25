@@ -59,6 +59,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A mistyped handle renders as inert plain text and notifies nobody, with
+      # nothing reporting a problem — how the v1.0.1 alert reached zero people
+      # while every workflow went green. Fail the run instead.
+      - name: Validate roster handles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source .github/scripts/release_roster.sh
+          roster_validate
+
       - name: Resolve alert issue
         id: find
         env:

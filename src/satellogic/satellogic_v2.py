@@ -264,6 +264,103 @@ def infer_processing_level(paths):
     return "UNKNOWN"
 
 
+# Vendor band layouts, keyed by processing level. THE TWO LEVELS SHIP THE
+# OPPOSITE RGB ORDER -- this module used to hardcode the L1D layout and apply it
+# to both, which transposed red and blue on every L1B truecolor/colorIR and made
+# ndvi/evi read blue where they meant red (ndwi was unaffected; bands 2 and 4 are
+# the same either way). See .clinerules rule 50.
+#
+# L1D is declared twice by the vendor and both agree: the STAC `eo:bands` on the
+# `analytic` asset (band1 blue 480nm, band2 green 545, band3 red 640, band4 nir
+# 825) and the sibling `_TOA.vrt`'s ColorInterp elements. Confirmed functionally
+# against the vendor's own VISUAL_0 rendering.
+BAND_ORDER = {
+    "L1D": {"blue": 1, "green": 2, "red": 3, "nir": 4},
+    "L1B": {"red": 1, "green": 2, "blue": 3, "nir": 4},
+}
+
+# Layout assumed when the level cannot be inferred AND the file declares nothing.
+DEFAULT_BAND_ORDER = "L1D"
+
+_GCI_ROLE = {
+    gdal.GCI_RedBand: "red",
+    gdal.GCI_GreenBand: "green",
+    gdal.GCI_BlueBand: "blue",
+}
+
+
+def band_order_from_colorinterp(ds):
+    """Map role -> 1-based band index from the file's own ColorInterp, or None.
+
+    Trusted ONLY when red, green and blue are each declared exactly once. GDAL
+    defaults band 1 of a plain multi-band TIFF to ``Gray`` and the rest to
+    ``Undefined``, so a partial declaration is a DRIVER DEFAULT, not a vendor
+    statement -- treating it as one would be worse than the bug this replaces.
+    Conversely a 4-band UInt16 file that names all three IS stating something
+    deliberate, since that is not any driver's default.
+
+    The vendor never declares NIR (band 4 carries no ColorInterp even on files
+    where bands 1-3 do), so it is inferred as the single remaining band. If
+    there is not exactly one leftover, the whole read is rejected rather than
+    guessed at.
+    """
+    seen = {}
+    for i in range(1, ds.RasterCount + 1):
+        role = _GCI_ROLE.get(ds.GetRasterBand(i).GetColorInterpretation())
+        if role:
+            seen.setdefault(role, []).append(i)
+
+    # All three present, none claimed twice.
+    if set(seen) != {"red", "green", "blue"}:
+        return None
+    if any(len(bands) != 1 for bands in seen.values()):
+        return None
+
+    idx = {role: bands[0] for role, bands in seen.items()}
+
+    leftover = [i for i in range(1, ds.RasterCount + 1) if i not in idx.values()]
+    if len(leftover) != 1:
+        return None
+
+    idx["nir"] = leftover[0]
+    return idx
+
+
+def resolve_band_indices(ds, level):
+    """Resolve {red,green,blue,nir} -> band index for THIS scene.
+
+    Prefers the file's own ColorInterp so a future vendor layout change
+    self-corrects, and falls back to the level's documented layout when the
+    file declares nothing usable -- which is the common case, and is also what
+    the committed 100x100 test crop looks like (its ColorInterp was stripped by
+    the cropping helper, which rebuilds from rasterio's ``meta``).
+
+    ALWAYS prints which source decided the mapping. A silently-wrong band order
+    is exactly the failure this function exists to end, and it is invisible in
+    the output: the products still look plausible because ``normalize_band``
+    stretches each band independently.
+    """
+    idx = band_order_from_colorinterp(ds)
+    if idx:
+        print(f"Band order from the file's own ColorInterp: {idx}")
+        return idx
+
+    if level in BAND_ORDER:
+        idx = BAND_ORDER[level]
+        print(f"Band order from the {level} vendor layout "
+              f"(file declares no usable ColorInterp): {idx}")
+        return idx
+
+    # Same "Band order" prefix as the two resolved branches, so one grep over a
+    # job log finds the mapping however it was decided -- including the case
+    # where it was not really decided at all.
+    idx = BAND_ORDER[DEFAULT_BAND_ORDER]
+    print(f"  WARNING: Band order UNRESOLVED -- unknown processing level "
+          f"{level!r} and no ColorInterp; assuming the {DEFAULT_BAND_ORDER} "
+          f"layout {idx}. VERIFY THE OUTPUT.")
+    return idx
+
+
 # Loading reflectance
 def load_reflectance_band(ds, band_num, scale_factor):
     arr = ds.GetRasterBand(band_num).ReadAsArray().astype(np.float32)
@@ -476,9 +573,10 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
 
-    red = load_reflectance_band(ds, 3, scale_factor)
-    green = load_reflectance_band(ds, 2, scale_factor)
-    blue = load_reflectance_band(ds, 1, scale_factor)
+    band = resolve_band_indices(ds, level)
+    red = load_reflectance_band(ds, band["red"], scale_factor)
+    green = load_reflectance_band(ds, band["green"], scale_factor)
+    blue = load_reflectance_band(ds, band["blue"], scale_factor)
 
     red, green, blue = maybe_correct([red, green, blue], level, sunzen)
 
@@ -516,9 +614,10 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
 
-    nir = load_reflectance_band(ds, 4, scale_factor)
-    red = load_reflectance_band(ds, 3, scale_factor)
-    green = load_reflectance_band(ds, 2, scale_factor)
+    band = resolve_band_indices(ds, level)
+    nir = load_reflectance_band(ds, band["nir"], scale_factor)
+    red = load_reflectance_band(ds, band["red"], scale_factor)
+    green = load_reflectance_band(ds, band["green"], scale_factor)
 
     nir, red, green = maybe_correct([nir, red, green], level, sunzen)
 
@@ -552,8 +651,9 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
     # Indices always mask clouds (ticket #320).
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
-    nir = load_reflectance_band(ds, 4, scale_factor)
-    red = load_reflectance_band(ds, 3, scale_factor)
+    band = resolve_band_indices(ds, level)
+    nir = load_reflectance_band(ds, band["nir"], scale_factor)
+    red = load_reflectance_band(ds, band["red"], scale_factor)
 
     nir, red = maybe_correct([nir, red], level, sunzen)
 
@@ -576,8 +676,12 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", filter_size=5):
     # Indices always mask clouds (ticket #320).
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
-    nir = load_reflectance_band(ds, 4, scale_factor)
-    green = load_reflectance_band(ds, 2, scale_factor)
+    # Bands 2 and 4 are the same under both vendor layouts, so ndwi was never
+    # affected by the L1B transposition. It resolves anyway so all five products
+    # read the same way and no future edit can reintroduce a positional index.
+    band = resolve_band_indices(ds, level)
+    nir = load_reflectance_band(ds, band["nir"], scale_factor)
+    green = load_reflectance_band(ds, band["green"], scale_factor)
 
     nir, green = maybe_correct([nir, green], level, sunzen)
 
@@ -600,9 +704,10 @@ def genEVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
     # Indices always mask clouds (ticket #320).
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
 
-    blue = load_reflectance_band(ds, 1, scale_factor)
-    red = load_reflectance_band(ds, 3, scale_factor)
-    nir = load_reflectance_band(ds, 4, scale_factor)
+    band = resolve_band_indices(ds, level)
+    blue = load_reflectance_band(ds, band["blue"], scale_factor)
+    red = load_reflectance_band(ds, band["red"], scale_factor)
+    nir = load_reflectance_band(ds, band["nir"], scale_factor)
 
     blue, red, nir = maybe_correct([blue, red, nir], level, sunzen)
 

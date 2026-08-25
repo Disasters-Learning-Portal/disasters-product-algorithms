@@ -148,6 +148,19 @@ doesn't, `list-dates` / SAR fetch dies with `AccessDenied ... s3:ListBucket ...
 csdap-*`, and the fix is an **IAM grant on `dps-verdi-role` (or the bucket policy)**,
 not anything in this repo.
 
+> **The CSDA grant is DPS-worker / hub only — you CANNOT read these buckets from a
+> laptop SSO session, and that is not a broken login (verified 2026-08-25).** A
+> `disasters-sso` login authenticates fine and reads `nasa-disasters` and
+> `nasa-disasters-staging` normally, but every vendor-bucket call returns
+> `AccessDenied`. Confirmed exhaustively: all six combinations of the accounts that
+> SSO session reaches (`smdc-aws-disasters` 515966502221, `smdc-aws-veda`
+> 444055461661, `smdc-aws-uah-veda` 853558080719) × (`Project-Admin`,
+> `Project-Power-User`) are denied on `csda-data-vendor-satellogic`, on both
+> `ListObjectsV2` and `GetBucketLocation`. **Anything that has to look at raw vendor
+> data — inspecting a scene's bands, reproducing a pipeline bug, cropping a new test
+> fixture — has to run on the MAAP hub.** Do not spend time re-authenticating; the
+> grant is on `dps-verdi-role` and the hub role, and the SSO roles are not in it.
+
 > **History (removed 2026-07-31).** An earlier approach (2026-07-20) had
 > `dps/_env.sh` export `READ_ROLE_ARN=…:role/disasters-prod` and had
 > `_read_session()` **assume** that role for every vendor read. That path **broke
@@ -389,7 +402,13 @@ CLI, so bash does not re-check it. Assertions live in
   nodata; indices `-9999`)** — those
   inputs were removed, so their validators don't run for it. It adds `filter_size`
   (Lee filter on indices, `{3,5,7}`, default 5) and accepts a comma-separated
-  `--date` (multi-date).
+  `--date` (multi-date). **`level` is radiometric, not just scene selection**: the
+  two levels ship the OPPOSITE RGB band order (L1D `band1=blue…band3=red`, L1B
+  reversed), so it decides how pixels are interpreted, not merely which folder is
+  read. `satellogic_v2.resolve_band_indices` works it out per scene — the file's own
+  `ColorInterp` first, else the level's layout — and **prints which source it used**;
+  grep the job log for `Band order`. Outputs carry a `PROCESSING_LEVEL` GeoTIFF tag
+  so the level is recoverable from a published COG. See `.clinerules.md` rule 48.
 - **² Umbra (PR #44)** made speckle filtering **always-on** — folded into the
   `sigma`/`beta`/`gamma` calib functions, with the standalone `apply_filter` and the
   DPS `apply_filter` boolean input both removed — and restricted `filter_size` to

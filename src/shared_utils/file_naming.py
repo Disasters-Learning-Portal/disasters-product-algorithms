@@ -9,6 +9,7 @@ wrappers like SimpleProcessor.
 
 import os
 import re
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 
@@ -151,3 +152,83 @@ def create_output_filename(
             embedded = f"{matched[0:4]}-{matched[4:6]}-{matched[6:8]}"
         return f"{prefix_event(stem_clean, event_name)}_{embedded}_{granularity}.tif"
     return f"{prefix_event(stem, event_name)}_day.tif"
+
+
+# A standalone YYYYMMDD run — the negative lookarounds keep it from biting a
+# chunk out of a longer digit string.
+_COMPACT_DATE_RE = re.compile(r'(?<!\d)(\d{8})(?!\d)')
+
+
+def _compact_dates(stem: str) -> list:
+    """Every standalone YYYYMMDD token in `stem` that is a real calendar date,
+    in the order it appears. `20261332` is digits but not a date, so it is not
+    one; a 6-digit path/row or capture-id can never be one."""
+    found = []
+    for m in _COMPACT_DATE_RE.finditer(stem):
+        try:
+            datetime.strptime(m.group(1), '%Y%m%d')
+        except ValueError:
+            continue
+        found.append(m.group(1))
+    return found
+
+
+def create_nisar_filename(original_path: str, event_name: str) -> str:
+    """
+    Filename builder for NISAR interferometric PAIR products (GUNW and friends).
+
+    Why this exists: an interferogram is derived from TWO acquisitions, so its
+    name carries two dates —
+
+        NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif
+                       ^ reference   ^ secondary
+
+    — and create_output_filename relocates only the FIRST datetime it finds.
+    Run against the above it promotes the *reference* date to the canonical
+    trailing slot and strands the secondary date mid-name, still unhyphenated:
+
+        ..._NISAR_D54_GUNW_20260629_unw_..._cm_2026-06-17_day.tif
+
+    Both dates are meaningful (the pair IS the product), so both are kept, in
+    source order, adjacent, immediately before the `_day` granularity suffix:
+
+        <EVENT>_NISAR_D54_GUNW_unw_delon_deRamp_maskWater_cm_2026-06-17_2026-06-29_day.tif
+
+    That keeps the repo-wide invariant that the name ends in a date + a
+    granularity suffix, and anything reading the LAST date token gets the
+    secondary (post-event) acquisition.
+
+    Source order is preserved rather than sorted: NISAR names the reference
+    first, and silently reordering would misreport the pair if a delivery ever
+    did otherwise.
+
+    Falls back to create_output_filename when the stem does not hold two dates,
+    so this is safe to point a whole category at. Idempotent for the same
+    reason create_output_filename is — an already-canonical stem is returned
+    with only the event prefix applied.
+    """
+    filename = os.path.basename(original_path)
+    stem, ext = os.path.splitext(filename)
+
+    if _STAMPED_END_RE.search(stem):
+        return f"{prefix_event(stem, event_name)}{ext or '.tif'}"
+
+    dates = _compact_dates(stem)
+    if len(dates) < 2:
+        # One date (or none) -> ordinary single-acquisition convention.
+        return create_output_filename(original_path, event_name)
+
+    reference, secondary = dates[0], dates[1]
+
+    stem_clean = stem
+    for date in (reference, secondary):
+        stem_clean = re.sub(r'_?' + re.escape(date), '', stem_clean, count=1)
+    stem_clean = re.sub(r'_{2,}', '_', stem_clean).strip('_')
+
+    def _hyphenate(d):
+        return f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
+
+    return (
+        f"{prefix_event(stem_clean, event_name)}"
+        f"_{_hyphenate(reference)}_{_hyphenate(secondary)}_day.tif"
+    )

@@ -194,7 +194,7 @@ def test_everyone_reacted_leaves_missing_empty(tmp_path, roster):
 # (0 ok / 1 not a user / 2 not a collaborator), so these run with no network.
 _ALL_OK = "_chk() { return 0; }"
 _ALICE_UNKNOWN = '_chk() { [ "$1" = alice ] && return 1; return 0; }'
-_ALICE_NOT_COLLAB = '_chk() { [ "$1" = alice ] && return 2; return 0; }'
+_ALICE_RC2 = '_chk() { [ "$1" = alice ] && return 2; return 0; }'
 
 
 @needs_bash
@@ -214,13 +214,25 @@ def test_validate_fails_on_a_handle_that_is_not_a_github_user(roster):
 
 
 @needs_bash
-def test_validate_only_warns_on_a_non_collaborator(roster):
-    """Warning, not failure: the collaborator API wants push access and the
-    default GITHUB_TOKEN's permissions vary — a quirk there must not fail a
-    release alert."""
-    r = source_and_run(f"{_ALICE_NOT_COLLAB}; roster_validate _chk", env=roster)
-    assert r.returncode == 0, r.stderr
-    assert "not a collaborator" in r.stderr
+def test_validate_has_no_silent_warn_path(roster):
+    """There used to be a `warn` tier for "real user, not a collaborator" (rc 2).
+    It was removed: under the workflow's GITHUB_TOKEN the collaborator endpoint
+    only resolves DIRECT collaborators, so everyone with team-derived access —
+    4 of 10 handles here, including a repo admin — warned wrongly on every run.
+    Any nonzero from the checker must now fail, so nothing can pass while
+    printing a complaint nobody can act on."""
+    r = source_and_run(f"{_ALICE_RC2}; roster_validate _chk", env=roster)
+    assert r.returncode != 0
+    assert "warn" not in r.stdout.lower() and "warn" not in r.stderr.lower()
+
+
+@needs_bash
+def test_default_checker_does_not_probe_collaborators(roster):
+    """Pins the removal at the source: a collaborators API call would reintroduce
+    the false warnings."""
+    body = open(ROSTER_SH).read()
+    fn = body.split("roster_check_github() {")[1].split("}")[0]
+    assert "collaborators" not in fn
 
 
 @needs_bash

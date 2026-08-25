@@ -634,6 +634,7 @@ from shared_utils.file_naming import (
     extract_datetime_from_filename,  # -> (matched_str, 'hour'|'day') | (None, None)
     categorize_file,                  # (filename, {regex: subdir}) -> subdir | 'uncategorized'
     create_output_filename,           # (path, event, categories=None) -> '{event}_{stem}_{date}_{granularity}.tif'
+    create_nisar_filename,            # (path, event) -> two-date variant for interferometric PAIRS
     no_change,                        # passthrough builder for sub-products like AVIRIS
     prefix_event,                     # (stem, event) -> stem with the event prefix applied at most once
 )
@@ -649,6 +650,26 @@ Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, `2025-01
 - A stem already ending in a canonical marker — an ISO-Zulu datetime (with `HH:MM:SS` or compact `HHMMSS`) or a `_day` / `_hour` suffix — is kept verbatim; only the prefix rule applies. Mirrors the `cog_utils._ISO_ZULU_END_RE` short-circuit in `rename_with_event` / `get_final_filename`.
 
 Both were regressions in a real activation: a SkySat delivery named `202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z.tif` came out as `202607_Fire_OR_202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z_day.tif`. The mixed `YYYY-MM-DDTHHMMSSZ` stamp also needed its own `DATETIME_PATTERNS` entry — without one, the less-specific `YYYY-MM-DDTHH` pattern matched a *prefix* of it and left `3721Z` welded to the product token. Pinned by `tests/unit/test_file_naming.py` and `tests/unit/test_simple_disaster_naming.py`.
+
+#### `create_nisar_filename(original_path, event_name)` — interferometric pairs
+
+```python
+create_nisar_filename(
+    "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+    "202606_Earthquake_Venezuela",
+)
+# -> '202606_Earthquake_Venezuela_NISAR_D54_GUNW_unw_delon_deRamp_maskWater_cm_2026-06-17_2026-06-29_day.tif'
+```
+
+An interferogram is derived from **two** acquisitions, so its name carries a reference *and* a secondary date. `extract_datetime_from_filename` returns the **first** match, so `create_output_filename` promotes the *reference* (pre-event) date into the canonical trailing slot and leaves the secondary date welded mid-name as a bare `YYYYMMDD` — `..._GUNW_20260629_unw_..._cm_2026-06-17_day.tif`. Nothing errors; only the S3 key is wrong.
+
+`create_nisar_filename` keeps both dates, **in source order** (NISAR names the reference first — sorting would misreport the pair if a delivery ever did otherwise), adjacent, immediately before `_day`. The name still ends in a date plus a granularity suffix, so the repo-wide convention holds and anything reading the **last** date token gets the secondary (post-event) acquisition.
+
+- Dates are found with `(?<!\d)(\d{8})(?!\d)` and validated through `datetime.strptime`, so a 6-digit path/row or a run like `20261332` cannot masquerade as one.
+- Fewer than two real dates **falls back to `create_output_filename`**, so a whole category can safely point at it.
+- The `_STAMPED_END_RE` short-circuit runs first, so it is idempotent on its own output.
+
+Wired into both `simple_disaster_template.ipynb` tiers as the `nisar` category (listed first — `CATEGORIZATION_PATTERNS` is first-match-wins). See `.clinerules.md` rule 48 for the nodata caveat: displacement is float cm where **0 is real data**, so `NODATA_VALUES['nisar']` is `None` pending a per-activation probe of the source tag.
 
 > The earlier helpers `extract_date_from_filename`, `convert_date`,
 > `parse_filename_components`, `create_cog_filename`, and `create_output_path`

@@ -225,6 +225,129 @@ class TestAlreadyNamedFilesAreAFixedPoint:
         assert create_output_filename(once, self.EVENT) == once
 
 
+class TestCreateNisarFilename:
+    """Tests for create_nisar_filename(original_path, event_name).
+
+    NISAR interferograms are derived from TWO acquisitions, so the name carries
+    two dates. create_output_filename relocates only the first datetime it
+    finds, which on a GUNW name promotes the REFERENCE date to the canonical
+    trailing slot and leaves the SECONDARY date welded mid-name as a bare
+    YYYYMMDD:
+
+        NISAR_D54_GUNW_20260617_20260629_unw_..._cm.tif
+          -> <EVENT>_NISAR_D54_GUNW_20260629_unw_..._cm_2026-06-17_day.tif
+
+    Both dates are the product, so both are kept, in source order, adjacent,
+    immediately before _day.
+    """
+
+    EVENT = "202606_Earthquake_Venezuela"
+
+    def test_pair_dates_move_to_the_end_in_order(self):
+        from shared_utils.file_naming import create_nisar_filename
+        result = create_nisar_filename(
+            "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+            self.EVENT,
+        )
+        assert result == (
+            "202606_Earthquake_Venezuela_NISAR_D54_GUNW_unw_delon_deRamp_maskWater_cm"
+            "_2026-06-17_2026-06-29_day.tif"
+        )
+
+    def test_shared_builder_strands_the_secondary_date(self):
+        """Pins WHY this builder exists — remove it and this is what you get."""
+        from shared_utils.file_naming import create_output_filename
+        bad = create_output_filename(
+            "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+            self.EVENT,
+        )
+        assert "_20260629_" in bad          # unhyphenated, mid-name
+        assert bad.endswith("_2026-06-17_day.tif")  # reference date promoted
+
+    def test_no_orphan_date_token_remains_in_the_stem(self):
+        from shared_utils.file_naming import create_nisar_filename
+        result = create_nisar_filename(
+            "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+            self.EVENT,
+        )
+        assert "20260617" not in result
+        assert "20260629" not in result
+
+    def test_no_double_underscores(self):
+        from shared_utils.file_naming import create_nisar_filename
+        for src in (
+            "NISAR_D54_GUNW_20260617_20260629_unw_cm.tif",
+            "20260617_20260629_NISAR_GUNW_unw_cm.tif",
+            "NISAR_GUNW_unw_cm_20260617_20260629.tif",
+        ):
+            assert "__" not in create_nisar_filename(src, self.EVENT), src
+
+    def test_trailing_variant_tokens_are_preserved(self):
+        from shared_utils.file_naming import create_nisar_filename
+        crop = create_nisar_filename(
+            "NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm-crop2.tif",
+            self.EVENT,
+        )
+        clip = create_nisar_filename(
+            "NISAR_GUNW_A61_20260618_20260630_unw_delon_deRamp_maskWater_cm_clipped.tif",
+            self.EVENT,
+        )
+        assert "cm-crop2" in crop
+        assert "A61" in clip and "cm_clipped" in clip
+
+    def test_variants_of_the_same_pair_do_not_collide(self):
+        from shared_utils.file_naming import create_nisar_filename
+        plain = create_nisar_filename(
+            "NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm.tif", self.EVENT)
+        crop = create_nisar_filename(
+            "NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm-crop2.tif", self.EVENT)
+        assert plain != crop
+
+    def test_last_date_token_is_the_secondary_acquisition(self):
+        """Downstream code that reads the final date gets the post-event scene."""
+        import re
+        from shared_utils.file_naming import create_nisar_filename
+        result = create_nisar_filename(
+            "NISAR_D54_GUNW_20260617_20260629_unw_cm.tif", self.EVENT)
+        assert re.findall(r'\d{4}-\d{2}-\d{2}', result)[-1] == "2026-06-29"
+
+    def test_single_date_falls_back_to_the_shared_convention(self):
+        from shared_utils.file_naming import create_nisar_filename, create_output_filename
+        src = "NISAR_GUNW_20260617_unw_cm.tif"
+        assert create_nisar_filename(src, self.EVENT) == \
+            create_output_filename(src, self.EVENT)
+
+    def test_no_date_falls_back_to_the_shared_convention(self):
+        from shared_utils.file_naming import create_nisar_filename
+        assert create_nisar_filename("NISAR_GUNW_unw_cm.tif", self.EVENT) == \
+            "202606_Earthquake_Venezuela_NISAR_GUNW_unw_cm_day.tif"
+
+    def test_non_date_digit_runs_are_not_mistaken_for_dates(self):
+        from shared_utils.file_naming import create_nisar_filename, create_output_filename
+        # 20261332 has no month 13 -> only one real date -> single-date fallback.
+        src = "NISAR_GUNW_20261332_20260629_unw_cm.tif"
+        assert create_nisar_filename(src, self.EVENT) == \
+            create_output_filename(src, self.EVENT)
+
+    def test_event_prefix_is_not_doubled(self):
+        from shared_utils.file_naming import create_nisar_filename
+        src = f"{self.EVENT}_NISAR_D54_GUNW_20260617_20260629_unw_cm.tif"
+        result = create_nisar_filename(src, self.EVENT)
+        assert result.count(self.EVENT) == 1
+
+    @pytest.mark.parametrize("name", [
+        "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+        "NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm-crop2.tif",
+        "NISAR_GUNW_A61_20260618_20260630_unw_delon_deRamp_maskWater_cm_clipped.tif",
+        "NISAR_GUNW_20260617_unw_cm.tif",
+        "NISAR_GUNW_unw_cm.tif",
+    ])
+    def test_second_pass_is_a_no_op(self, name):
+        from shared_utils.file_naming import create_nisar_filename
+        once = create_nisar_filename(name, self.EVENT)
+        assert create_nisar_filename(once, self.EVENT) == once
+
+
 class TestPrefixEvent:
     """Tests for prefix_event(stem, event_name)."""
 

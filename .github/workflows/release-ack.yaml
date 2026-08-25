@@ -1,0 +1,188 @@
+name: Release alert — who has acknowledged?
+
+# Answers "did everyone actually get the release message?" for the issue that
+# .github/workflows/notify-release.yaml opened.
+#
+# WHY REACTIONS AND NOT A POLL:
+#   GitHub has no delivery or read receipt — the notifications API only ever
+#   exposes the *authenticated user's* own inbox, so nothing can report who
+#   received a message. A GitHub Discussions poll cannot substitute: the GraphQL
+#   types expose only totalVoteCount / viewerHasVoted (DiscussionPoll) and
+#   option / totalVoteCount / viewerHasVoted (DiscussionPollOption) — there is NO
+#   voter list, so a poll can report "7 votes" but never *which three* are
+#   missing. (Discussions is also disabled on this repo.)
+#
+#   Reactions are the one acknowledgement GitHub will name people for:
+#   GET /repos/{o}/{r}/issues/{n}/reactions returns user.login per reaction. One
+#   click for the reader, an exact roster diff for us. ANY reaction counts —
+#   restricting to 👍 only adds a way for an acknowledgement to not register.
+#
+# WHY workflow_dispatch AND NOT A CRON:
+#   Every run @-mentions the stragglers, so a schedule is a nagging machine.
+#   This is deliberately a thing a human runs when they want to know.
+#
+# WHY THE DEFAULT GITHUB_TOKEN IS ENOUGH:
+#   The roster is a checked-in file, not the org team API — GITHUB_TOKEN is
+#   repo-scoped and gets 403 on GET /orgs/{org}/teams/{slug}/members. See the
+#   header of .github/release-ack-roster.txt.
+#
+# TESTING:
+#   The roster parse and the acked/missing diff live in
+#   .github/scripts/release_roster.sh (not inline here) and are pinned by
+#   tests/integration/test_release_ack.py. GitHub only offers workflow_dispatch
+#   for workflows present on the DEFAULT branch, so this file must reach main
+#   before it can be run at all.
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Alert issue number. Blank = newest open "🚀 New release" issue.'
+        required: false
+        type: string
+      only:
+        description: 'Mention only this handle (leave blank for everyone missing). Does not change the tally.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Report to the run summary only — do not comment on the issue.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  tally:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve alert issue
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_ISSUE: ${{ inputs.issue }}
+        run: |
+          if [ -n "$INPUT_ISSUE" ]; then
+            if [[ ! "$INPUT_ISSUE" =~ ^[0-9]+$ ]]; then
+              echo "::error title=Bad issue number::Must be digits only (got: $INPUT_ISSUE)"
+              exit 1
+            fi
+            NUMBER="$INPUT_ISSUE"
+          else
+            # `gh issue list --json` (the list API), NOT `gh issue list --search`:
+            # the search index is eventually consistent, so an issue opened
+            # minutes ago can be invisible to a search. Same reasoning, same
+            # startswith() filter as notify-release.yaml's superseded-alert step.
+            # `max` picks the highest number = the newest alert.
+            NUMBER=$(gh issue list --state open --limit 200 --json number,title \
+              --jq '[.[] | select(.title | startswith("🚀 New release ")) | .number] | max // empty')
+          fi
+
+          if [ -z "$NUMBER" ]; then
+            echo "::error title=No alert issue::No open issue titled '🚀 New release …'. Pass one explicitly with the 'issue' input."
+            exit 1
+          fi
+
+          echo "Using issue #${NUMBER}"
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Tally acknowledgements
+        id: tally
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.find.outputs.number }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          source .github/scripts/release_roster.sh
+
+          # --paginate: the reactions API pages at 30. Without it a well-received
+          # alert would silently under-count and re-ping people who did react.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/reactions" \
+            --jq '.[].user.login' | sort -u > "$RUNNER_TEMP/reacted.txt"
+
+          roster_split "$RUNNER_TEMP/reacted.txt" \
+                       "$RUNNER_TEMP/acked.txt" "$RUNNER_TEMP/missing.txt"
+
+          TOTAL=$(roster_handles | wc -l | tr -d ' ')
+          ACKED=$(wc -l < "$RUNNER_TEMP/acked.txt" | tr -d ' ')
+          MISSING=$(wc -l < "$RUNNER_TEMP/missing.txt" | tr -d ' ')
+
+          # `only` narrows WHO GETS MENTIONED, never the tally above. Fails loudly
+          # if the handle isn't among the missing — a run that mentions nobody but
+          # exits green reads as "mentions don't deliver" when it was a typo.
+          if [ -n "$ONLY" ]; then
+            roster_restrict "$ONLY" "$RUNNER_TEMP/missing.txt" > "$RUNNER_TEMP/nudge.txt"
+            echo "::notice title=Restricted::Mentioning only @${ONLY}. Tally is still ${ACKED}/${TOTAL}."
+          else
+            cp "$RUNNER_TEMP/missing.txt" "$RUNNER_TEMP/nudge.txt"
+          fi
+          NUDGE_COUNT=$(wc -l < "$RUNNER_TEMP/nudge.txt" | tr -d ' ')
+
+          echo "acked=$ACKED"             >> "$GITHUB_OUTPUT"
+          echo "missing=$MISSING"         >> "$GITHUB_OUTPUT"
+          echo "nudge_count=$NUDGE_COUNT" >> "$GITHUB_OUTPUT"
+
+          # Always report, dry run or not.
+          {
+            echo "## Acknowledged ${ACKED}/${TOTAL} — issue #${NUMBER}"
+            echo
+            echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues/${NUMBER}"
+            echo
+            if [ "$ACKED" -gt 0 ]; then
+              echo "### ✅ Reacted"
+              sed 's/^/- @/' "$RUNNER_TEMP/acked.txt"
+              echo
+            fi
+            if [ "$MISSING" -gt 0 ]; then
+              echo "### ⏳ No reaction yet"
+              sed 's/^/- @/' "$RUNNER_TEMP/missing.txt"
+              echo
+            fi
+            if [ -s "$RUNNER_TEMP/acked.txt.extra" ]; then
+              echo "### ℹ️ Reacted but not on the roster"
+              echo
+              echo "Update \`.github/release-ack-roster.txt\` if these people belong on it."
+              sed 's/^/- @/' "$RUNNER_TEMP/acked.txt.extra"
+              echo
+            fi
+            if [ -n "$ONLY" ]; then
+              echo "> **Restricted run** — only @${ONLY} will be mentioned."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep the mention list for the comment step.
+          {
+            echo 'nudge<<ROSTER_EOF'
+            sed 's/^/@/' "$RUNNER_TEMP/nudge.txt" | tr '\n' ' '
+            echo
+            echo 'ROSTER_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Dry run — stop here
+        if: inputs.dry_run
+        run: echo "::notice title=Dry run::Tally written to the run summary. No comment posted."
+
+      # The @-mentions in this comment are the point, not the tally text: an
+      # individual mention is the delivery path that a team mention did not
+      # provide. Skipped when nobody is missing, so a fully-acknowledged release
+      # can be re-checked without pinging anyone.
+      - name: Nudge whoever is missing
+        if: ${{ !inputs.dry_run && steps.tally.outputs.nudge_count != '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.find.outputs.number }}
+          NUDGE: ${{ steps.tally.outputs.nudge }}
+          ACKED: ${{ steps.tally.outputs.acked }}
+          MISSING: ${{ steps.tally.outputs.missing }}
+        run: |
+          gh issue comment "$NUMBER" --body "$(printf '%s\n\n%s\n\n%s\n' \
+            "$NUDGE" \
+            "**${ACKED} of $((ACKED + MISSING)) have acknowledged this release.** If you've read it, react to the issue above (any reaction) — that's all this is asking for." \
+            "<sub>Posted by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) of \`release-ack.yaml\`.</sub>")"
+
+      - name: Nobody to nudge
+        if: ${{ !inputs.dry_run && steps.tally.outputs.nudge_count == '0' }}
+        run: echo "::notice title=Nobody to nudge::No comment posted."

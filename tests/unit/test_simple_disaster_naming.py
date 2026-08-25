@@ -76,8 +76,20 @@ class TestNamingCellWiring:
         assert set(ns["OUTPUT_DIRS"]) == set(ns["CATEGORIZATION_PATTERNS"])
 
     def test_builders_delegate_to_the_shared_module(self, ns):
-        from shared_utils.file_naming import create_output_filename
-        assert set(ns["FILENAME_CREATORS"].values()) == {create_output_filename}
+        """No hand-rolled builders: every value comes from shared_utils.file_naming.
+
+        Subset, not equality — the cell documents overriding ONE product by
+        assigning a different builder to its key (create_nisar_filename is the
+        worked example). What must not reappear is a locally-defined function.
+        """
+        from shared_utils.file_naming import (
+            create_output_filename,
+            create_nisar_filename,
+        )
+        shared = {create_output_filename, create_nisar_filename}
+        assert set(ns["FILENAME_CREATORS"].values()) <= shared
+        # The default for un-overridden categories is still the shared builder.
+        assert create_output_filename in set(ns["FILENAME_CREATORS"].values())
 
     def test_hand_rolled_builders_are_gone(self, nb_path):
         # The duplicated per-product copies are what drifted from the convention.
@@ -110,3 +122,80 @@ class TestNamingCellOutputs:
         for name in (STAMPED, "SkySat_SR_TrueColor_20260812.tif", "tc_20260812.tif"):
             once = build(name, EVENT)
             assert build(once, EVENT) == once
+
+
+class TestNisarCategoryWiring:
+    """The 'nisar' category routes interferometric PAIR products through
+    create_nisar_filename instead of the single-date shared builder.
+
+    NISAR GUNW names carry two dates (reference + secondary). The shared builder
+    relocates only the first, promoting the REFERENCE date to the canonical
+    trailing slot and stranding the secondary date mid-name, unhyphenated:
+
+        NISAR_D54_GUNW_20260617_20260629_unw_..._cm.tif
+          -> <EVENT>_NISAR_D54_GUNW_20260629_unw_..._cm_2026-06-17_day.tif
+    """
+
+    EVENT = "202606_Earthquake_Venezuela"
+    PAIRS = [
+        ("NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+         "202606_Earthquake_Venezuela_NISAR_D54_GUNW_unw_delon_deRamp_maskWater_cm"
+         "_2026-06-17_2026-06-29_day.tif"),
+        ("NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm-crop2.tif",
+         "202606_Earthquake_Venezuela_NISAR_GUNW_unw_delon_deRamp_maskWater_cm-crop2"
+         "_2026-06-13_2026-06-25_day.tif"),
+        ("NISAR_GUNW_20260613_20260625_unw_delon_deRamp_maskWater_cm.tif",
+         "202606_Earthquake_Venezuela_NISAR_GUNW_unw_delon_deRamp_maskWater_cm"
+         "_2026-06-13_2026-06-25_day.tif"),
+        ("NISAR_GUNW_A61_20260618_20260630_unw_delon_deRamp_maskWater_cm_clipped.tif",
+         "202606_Earthquake_Venezuela_NISAR_GUNW_A61_unw_delon_deRamp_maskWater_cm_clipped"
+         "_2026-06-18_2026-06-30_day.tif"),
+    ]
+
+    @pytest.fixture
+    def nisar_ns(self, ns, nb_path):
+        if "nisar" not in ns["CATEGORIZATION_PATTERNS"]:
+            pytest.skip(f"{nb_path.name} carries no 'nisar' category")
+        return ns
+
+    def test_nisar_uses_the_pair_builder(self, nisar_ns):
+        from shared_utils.file_naming import create_nisar_filename
+        assert nisar_ns["FILENAME_CREATORS"]["nisar"] is create_nisar_filename
+
+    def test_nisar_pattern_matches_the_delivered_names(self, nisar_ns):
+        import re as _re
+        pattern = nisar_ns["CATEGORIZATION_PATTERNS"]["nisar"]
+        for src, _ in self.PAIRS:
+            assert _re.search(pattern, src, _re.IGNORECASE), src
+
+    def test_nisar_wins_over_the_optical_categories(self, nisar_ns):
+        """First match wins, so a NISAR name must not be siphoned elsewhere."""
+        import re as _re
+        for src, _ in self.PAIRS:
+            matched = next(
+                cat for cat, pat in nisar_ns["CATEGORIZATION_PATTERNS"].items()
+                if _re.search(pat, src, _re.IGNORECASE)
+            )
+            assert matched == "nisar", f"{src} categorized as {matched}"
+
+    @pytest.mark.parametrize("src,expected", PAIRS)
+    def test_both_dates_survive_in_order(self, nisar_ns, src, expected):
+        build = nisar_ns["FILENAME_CREATORS"]["nisar"]
+        assert build(src, self.EVENT) == expected
+
+    def test_output_keys_stay_distinct(self, nisar_ns):
+        """The crop/clip variants must not collapse onto one S3 key."""
+        build = nisar_ns["FILENAME_CREATORS"]["nisar"]
+        names = [build(src, self.EVENT) for src, _ in self.PAIRS]
+        assert len(set(names)) == len(names)
+
+    def test_nisar_batch_is_idempotent(self, nisar_ns):
+        build = nisar_ns["FILENAME_CREATORS"]["nisar"]
+        for src, _ in self.PAIRS:
+            once = build(src, self.EVENT)
+            assert build(once, self.EVENT) == once
+
+    def test_nisar_has_an_output_dir_and_a_nodata_entry(self, nisar_ns):
+        assert nisar_ns["OUTPUT_DIRS"]["nisar"]
+        # 0 cm displacement is real data — it must never be the sentinel.
+        assert nisar_ns["NODATA_VALUES"]["nisar"] != 0

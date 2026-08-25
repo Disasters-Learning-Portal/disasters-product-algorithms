@@ -33,9 +33,24 @@ fi
 
 REPO_URL="https://github.com/Disasters-Learning-Portal/disasters-product-algorithms"
 
-# Who gets pinged. ONE place, so swapping the team for explicit @handles is a
-# one-line change if team mentions ever stop notifying from a bot-authored issue.
-MENTIONS="@Disasters-Learning-Portal/disasters"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=release_roster.sh
+source "$SCRIPT_DIR/release_roster.sh"
+
+# Who gets pinged. The roster lives in .github/release-ack-roster.txt — ONE
+# place, shared with the ack tally in .github/workflows/release-ack.yaml, so the
+# people who get mentioned and the people who get counted cannot drift apart.
+#
+# EXPLICIT @handles, NOT the @Disasters-Learning-Portal/disasters TEAM MENTION
+# this used to carry. The v1.0.1 alert (issue #120, 2026-08-24) went out with the
+# team mention and reached nobody: a maintainer of that very team had no
+# notification for it, and the issue drew zero reactions and zero comments in
+# its first day. Team mentions from a bot-authored issue evidently do not
+# deliver here — which is the swap the previous version of this comment planned
+# for. If individual mentions turn out not to deliver either, the alert needs a
+# channel outside GitHub notifications; do not keep trying mention variants.
+MENTIONS="$(roster_handles | sed 's/^/@/' | tr '\n' ' ')"
+MENTIONS="${MENTIONS% }"
 
 printf '%s\n' \
 "$MENTIONS" \
@@ -43,6 +58,14 @@ printf '%s\n' \
 "**Version \`$VERSION\` is now on \`main\`.** Release notes: $REPO_URL/releases/tag/$VERSION" \
 "" \
 "Please update your setup on the Disasters hub. It takes about two minutes." \
+"" \
+"> ### 👍 React to this issue when you've read it" \
+"> " \
+"> That reaction is the **only** signal we have that this message reached you —" \
+"> GitHub has no delivery receipt. Any reaction counts." \
+"> " \
+"> \`.github/workflows/release-ack.yaml\` tallies the reactions against" \
+"> \`.github/release-ack-roster.txt\` and re-pings whoever is missing." \
 "" \
 "---" \
 "" \
@@ -209,5 +232,5 @@ printf '%s\n' \
 "[Discussions]($REPO_URL/discussions) (also under **Help → Disasters Resources** in JupyterLab)" \
 "or open a [bug report]($REPO_URL/issues/new)." \
 "" \
-"<sub>Automated by \`.github/workflows/notify-release.yaml\`. Close this issue once you've updated —" \
-"it is closed automatically when the next release goes out.</sub>"
+"<sub>Automated by \`.github/workflows/notify-release.yaml\`. Don't close this issue — react 👍 instead," \
+"so the acknowledgement tally can see you. It is closed automatically when the next release goes out.</sub>"

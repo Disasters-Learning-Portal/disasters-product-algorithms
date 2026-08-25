@@ -97,6 +97,18 @@ jobs:
             echo "title=🚀 New release $VERSION is on main — update your hub copy"
           } >> "$GITHUB_OUTPUT"
 
+      # The alert's whole job is to mention people, and a mistyped handle
+      # renders as inert plain text that notifies nobody — silently. Validate
+      # before rendering, so a bad roster fails this run instead of shipping an
+      # alert that reaches a short list without saying so.
+      - name: Validate roster handles
+        if: steps.v.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source .github/scripts/release_roster.sh
+          roster_validate
+
       # Always render, even on a dry run, so the run page shows exactly
       # what would have been (or was) sent.
       - name: Render alert body

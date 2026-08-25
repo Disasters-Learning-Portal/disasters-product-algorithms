@@ -187,6 +187,62 @@ def test_everyone_reacted_leaves_missing_empty(tmp_path, roster):
 
 
 # --------------------------------------------------------------------------
+# roster_validate — the guard against a silently-dead mention
+# --------------------------------------------------------------------------
+
+# Stub checkers matching roster_check_github's exit convention
+# (0 ok / 1 not a user / 2 not a collaborator), so these run with no network.
+_ALL_OK = "_chk() { return 0; }"
+_ALICE_UNKNOWN = '_chk() { [ "$1" = alice ] && return 1; return 0; }'
+_ALICE_NOT_COLLAB = '_chk() { [ "$1" = alice ] && return 2; return 0; }'
+
+
+@needs_bash
+def test_validate_passes_when_every_handle_resolves(roster):
+    r = source_and_run(f"{_ALL_OK}; roster_validate _chk", env=roster)
+    assert r.returncode == 0, r.stderr
+    assert "ok    alice" in r.stdout
+
+
+@needs_bash
+def test_validate_fails_on_a_handle_that_is_not_a_github_user(roster):
+    """The realistic typo: a mistyped handle almost never hits a real account."""
+    r = source_and_run(f"{_ALICE_UNKNOWN}; roster_validate _chk", env=roster)
+    assert r.returncode != 0
+    assert "not a GitHub user" in r.stderr
+    assert "notifies nobody" in r.stderr
+
+
+@needs_bash
+def test_validate_only_warns_on_a_non_collaborator(roster):
+    """Warning, not failure: the collaborator API wants push access and the
+    default GITHUB_TOKEN's permissions vary — a quirk there must not fail a
+    release alert."""
+    r = source_and_run(f"{_ALICE_NOT_COLLAB}; roster_validate _chk", env=roster)
+    assert r.returncode == 0, r.stderr
+    assert "not a collaborator" in r.stderr
+
+
+@needs_bash
+def test_validate_reports_every_bad_handle_not_just_the_first(tmp_path):
+    path = tmp_path / "roster.txt"
+    path.write_text("alice\nbob\ncarol\n")
+    r = source_and_run(
+        '_chk() { [ "$1" = carol ] && return 0; return 1; }; roster_validate _chk',
+        env={"ROSTER_FILE": str(path)},
+    )
+    assert r.returncode != 0
+    assert "BAD   alice" in r.stderr and "BAD   bob" in r.stderr
+
+
+@needs_bash
+def test_validate_fails_on_an_unexpected_checker_exit(roster):
+    r = source_and_run('_chk() { return 9; }; roster_validate _chk', env=roster)
+    assert r.returncode != 0
+    assert "rc=9" in r.stderr
+
+
+# --------------------------------------------------------------------------
 # roster_restrict — release-ack.yaml's `only` input
 # --------------------------------------------------------------------------
 

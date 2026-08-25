@@ -1,0 +1,34 @@
+# Everyone the release alert must reach.
+#
+# One GitHub handle per line. `#` starts a comment (inline is fine); blank
+# lines are ignored. Parsed by .github/scripts/release_roster.sh, which is the
+# ONLY thing that should read this file.
+#
+# Two consumers:
+#   • .github/scripts/release_alert_body.sh — builds the @mention line
+#   • .github/workflows/release-ack.yaml    — the denominator for the ack tally
+#
+# This is a HAND-MAINTAINED MIRROR of the Disasters-Learning-Portal/disasters
+# team. It is not read from the org API, because the default GITHUB_TOKEN is
+# repo-scoped and gets 403 on GET /orgs/{org}/teams/{slug}/members — reading the
+# team live would mean granting a PAT `Organization permissions -> Members: Read`
+# and inheriting that PAT's expiry as a new way for the alert to break silently.
+#
+# Refresh it by hand when the team changes:
+#
+#   gh api orgs/Disasters-Learning-Portal/teams/disasters/members --jq '.[].login'
+#
+# Matching is case-insensitive, so casing here is cosmetic.
+#
+# Last synced with the team: 2026-08-25
+
+anayeaye
+slesaad
+jreed6
+BhattaraiSijan
+jrbell1
+alex-melancon
+taylordupre
+kyle-lesinger
+chelsea-aaron
+ryancarmichael-nasa

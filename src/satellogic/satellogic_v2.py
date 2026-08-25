@@ -351,9 +351,13 @@ def resolve_band_indices(ds, level):
               f"(file declares no usable ColorInterp): {idx}")
         return idx
 
+    # Same "Band order" prefix as the two resolved branches, so one grep over a
+    # job log finds the mapping however it was decided -- including the case
+    # where it was not really decided at all.
     idx = BAND_ORDER[DEFAULT_BAND_ORDER]
-    print(f"  WARNING: unknown processing level {level!r} and no ColorInterp; "
-          f"assuming the {DEFAULT_BAND_ORDER} layout {idx}. VERIFY THE OUTPUT.")
+    print(f"  WARNING: Band order UNRESOLVED -- unknown processing level "
+          f"{level!r} and no ColorInterp; assuming the {DEFAULT_BAND_ORDER} "
+          f"layout {idx}. VERIFY THE OUTPUT.")
     return idx
 
 

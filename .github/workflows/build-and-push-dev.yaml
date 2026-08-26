@@ -1,4 +1,8 @@
-name: Build & push hub image (dev)
+name: Build & push hub image (dev — ALWAYS builds the dev branch)
+
+# The run title says it too, so it is on the record for every run and not
+# only in the Run-workflow dialog.
+run-name: Build dev image — source is ALWAYS the `dev` branch, whatever the branch selector says
 
 on:
   push:
@@ -26,6 +30,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # A MANUAL dispatch builds `dev` no matter which branch the
+          # Run-workflow dropdown was left on. That dropdown defaults to the
+          # repo default branch (`main`) and GitHub gives no per-workflow way
+          # to change it — so without this pin, the obvious thing to do
+          # (leave it alone and hit Run) pushed MAIN's code under the `-dev`
+          # tag. Nothing warned: the build went green and the tag simply lied
+          # about its contents.
+          #
+          # The push path is left exactly as it was — `github.sha` is what
+          # checkout resolves to by default, i.e. the commit that was pushed,
+          # not whatever the branch tip has drifted to since.
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'dev' || github.sha }}
           # setuptools-scm reads tags via `git describe`; default checkout
           # is a shallow clone with no tag history.
           fetch-depth: 0

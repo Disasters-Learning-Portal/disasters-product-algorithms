@@ -52,6 +52,10 @@ on:
         description: 'Version tag (e.g. v1.0.0). Must match vX.Y.Z.'
         required: true
         type: string
+      silent:
+        description: 'Silent release — do NOT notify the team (no alert issue, nobody @mentioned).'
+        type: boolean
+        default: false
 
 jobs:
   release:
@@ -216,14 +220,34 @@ jobs:
           git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
           git push origin "${{ inputs.version }}"
 
+      # The `silent` checkbox is carried to notify-release.yaml through the
+      # release BODY, because the body is the only thing that travels from
+      # here to there: notify-release.yaml is triggered by the `release:
+      # published` event, and that event's payload has no idea what inputs
+      # this workflow_dispatch was given. The marker is an HTML comment, so
+      # it renders as nothing on the release page.
+      #
+      # `--generate-notes` still runs alongside `--notes`: GitHub PREPENDS
+      # the given body to the auto-generated notes rather than replacing
+      # them, so a silent release keeps its full changelog.
       - name: Create GitHub release with auto-generated notes
         env:
           # Use the PAT here too so the release is attributed to the
           # admin user rather than github-actions[bot] (consistency,
           # not strictly required for this step).
           GH_TOKEN: ${{ secrets.DISASTERS_RELEASE_PAT }}
+          SILENT: ${{ inputs.silent }}
         run: |
+          NOTES=()
+          if [ "$SILENT" = "true" ]; then
+            # Keep this marker byte-identical to the one notify-release.yaml
+            # greps for — pinned by tests/integration/test_release_silent.py.
+            NOTES=(--notes '<!-- notify: skip -->')
+            echo "::notice title=Silent release::No team alert will be opened for ${{ inputs.version }}. Announce it later by running the 'Notify — new release on main' workflow with dry_run unchecked."
+          fi
+
           gh release create "${{ inputs.version }}" \
             --title "${{ inputs.version }}" \
             --target main \
-            --generate-notes
+            --generate-notes \
+            "${NOTES[@]}"

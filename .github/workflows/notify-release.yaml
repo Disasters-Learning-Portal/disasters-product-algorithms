@@ -28,6 +28,15 @@ name: Notify — new release on main
 #   spelled out in sync-deploy-algorithm.yml. If release.yaml is ever
 #   changed to use GITHUB_TOKEN for that step, this workflow goes silent.
 #
+# RELEASING WITHOUT NOTIFYING ANYONE:
+#   Tick `silent` when you run .github/workflows/release.yaml. It still tags,
+#   pushes main, creates the GitHub Release and rebuilds the prod image — it
+#   just writes an invisible `<!-- notify: skip -->` marker into the release
+#   body, which the "Resolve version" step below reads and skips on. Nothing
+#   is opened, nobody is @mentioned. To announce it after the fact, run THIS
+#   workflow by hand with the version and dry_run unticked; the manual path
+#   deliberately ignores the marker.
+#
 # TESTING:
 #   workflow_dispatch below has a dry_run mode that renders the alert into
 #   the run summary without opening an issue. GitHub only offers
@@ -64,12 +73,22 @@ jobs:
       # tag) is SKIPPED rather than failed — it isn't an error, it's just
       # not a version worth paging the team about. A hand-typed bad version
       # on workflow_dispatch IS an error: you meant to announce something.
+      #
+      # A release carrying the `<!-- notify: skip -->` marker in its body is
+      # skipped for the same reason: release.yaml was run with its `silent`
+      # checkbox ticked. The marker is read from the BODY because a
+      # workflow_dispatch input over in release.yaml is invisible to the
+      # `release: published` event it produces. The marker is checked ONLY on
+      # the release event — running THIS workflow by hand is an explicit
+      # "announce it now", which is exactly how you announce a release that
+      # was cut silently.
       - name: Resolve version
         id: v
         env:
           EVENT: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_BODY: ${{ github.event.release.body }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$EVENT" = "release" ]; then
@@ -79,6 +98,15 @@ jobs:
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            # Byte-identical to the marker release.yaml writes — pinned by
+            # tests/integration/test_release_silent.py.
+            case "$RELEASE_BODY" in
+              *'<!-- notify: skip -->'*)
+                echo "::notice title=Skipped::$VERSION was released with 'silent' ticked; not alerting. Run this workflow by hand (dry_run off) to announce it later."
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
             if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::notice title=Skipped::Release tag '$VERSION' is not vX.Y.Z; not alerting."
               echo "skip=true" >> "$GITHUB_OUTPUT"

@@ -49,6 +49,114 @@ def is_extreme_float_nodata(value) -> bool:
     return any(abs(v - bad) / abs(bad) < 1e-6 for bad in EXTREME_FLOAT_NODATA)
 
 
+# `is_extreme_float_nodata` guards the nodata TAG. This threshold guards the
+# other half of the same problem: a file that declares a perfectly sane nodata
+# (e.g. -9999) while its fill PIXELS actually hold FLT_MAX. Nothing masks those
+# pixels — rio-tiler masks on the declared value — so they reach the renderer as
+# real data and clamp to the top of any rescale, painting the masked area solid.
+#
+# 1e30 is far above any physically meaningful raster value we carry (LOS
+# displacement in cm, reflectance, NDVI, building area in m^2) and far below
+# FLT_MAX, so it separates fill from data without needing an exact match
+# against EXTREME_FLOAT_NODATA's specific binary representations.
+EXTREME_FLOAT_ABS_THRESHOLD = 1e30
+
+
+def detect_extreme_float_fill(src, max_probe_px: int = 4_000_000):
+    """
+    Look for FLT_MAX-class values in the PIXEL DATA of a float raster.
+
+    Complements `is_extreme_float_nodata`, which only inspects the nodata tag.
+    A source can declare nodata=-9999 and still be full of FLT_MAX fill; that
+    combination passes every tag-level check and produces a COG whose masked
+    area renders as valid data.
+
+    Cost is bounded: reads a decimated window (nearest-neighbour, so fill values
+    are never averaged away) capped at `max_probe_px` pixels, pulling from an
+    overview when the file has one. That is a small constant read rather than a
+    full-raster load.
+
+    Args:
+        src: An open rasterio dataset.
+        max_probe_px: Approximate ceiling on pixels read.
+
+    Returns:
+        The detected fill value as a float, or None if the raster is not a
+        float type or carries no extreme values.
+    """
+    if not str(src.dtypes[0]).startswith('float'):
+        return None
+
+    h, w = src.height, src.width
+    if h == 0 or w == 0:
+        return None
+
+    scale = 1.0
+    if h * w > max_probe_px:
+        scale = (max_probe_px / float(h * w)) ** 0.5
+    out_h = max(1, int(h * scale))
+    out_w = max(1, int(w * scale))
+
+    try:
+        # Default decimated-read resampling is nearest, which preserves the
+        # sentinel exactly. `average` would blend fill with data and could push
+        # a genuinely-corrupt file back under the threshold.
+        a = src.read(1, out_shape=(out_h, out_w)).astype('float64')
+    except Exception:
+        return None
+
+    extreme = a[np.isfinite(a) & (np.abs(a) >= EXTREME_FLOAT_ABS_THRESHOLD)]
+    if extreme.size == 0:
+        return None
+
+    # Return the dominant sentinel rather than the max: a file may carry both
+    # +FLT_MAX and a handful of other extremes, and gdalwarp's -srcnodata takes
+    # a single value. Use `list_extreme_float_fills` to see them all — a raster
+    # with more than one keeps the non-dominant ones after a remap.
+    values, counts = np.unique(extreme, return_counts=True)
+    return float(values[int(np.argmax(counts))])
+
+
+def list_extreme_float_fills(src, max_probe_px: int = 4_000_000):
+    """
+    Every distinct FLT_MAX-class value present in the pixel data, sorted.
+
+    `detect_extreme_float_fill` returns only the dominant one because a single
+    gdalwarp `-srcnodata` can name a single value. This reports the full set so
+    callers can warn when a remap will necessarily leave some fill behind.
+
+    Args:
+        src: An open rasterio dataset.
+        max_probe_px: Approximate ceiling on pixels read.
+
+    Returns:
+        A sorted list of floats. Empty when the raster is not float or carries
+        no extreme values.
+    """
+    if not str(src.dtypes[0]).startswith('float'):
+        return []
+
+    h, w = src.height, src.width
+    if h == 0 or w == 0:
+        return []
+
+    scale = 1.0
+    if h * w > max_probe_px:
+        scale = (max_probe_px / float(h * w)) ** 0.5
+
+    try:
+        a = src.read(
+            1, out_shape=(max(1, int(h * scale)), max(1, int(w * scale)))
+        ).astype('float64')
+    except Exception:
+        return []
+
+    extreme = a[np.isfinite(a) & (np.abs(a) >= EXTREME_FLOAT_ABS_THRESHOLD)]
+    if extreme.size == 0:
+        return []
+    return sorted(float(v) for v in np.unique(extreme))
+
+
 def validate_nodata_for_dtype(nodata_value, dtype):
     """
     Validate if a no-data value is appropriate for the data type.

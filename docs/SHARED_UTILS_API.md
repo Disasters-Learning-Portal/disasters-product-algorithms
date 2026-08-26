@@ -75,10 +75,10 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `compression_level` | int | No | `22` | Compression level (ZSTD `1`=fast/larger … `22`=slow/smallest). Omitting it keeps the library default 22; the `simple_disaster_template` notebooks pass `9`. |
 | `overwrite` | bool | No | `False` | Overwrite existing files |
 | `verify` | bool | No | `True` | Verify results after processing |
-| `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization. Forwarded to `shared_utils.file_naming.categorize_file`. |
-| `filename_creators` | dict | No | built-in | Functions to generate output filenames |
-| `output_dirs` | dict | No | built-in | Category-to-directory mapping |
-| `nodata_values` | dict | No | built-in | Category-specific nodata values |
+| `categorization_patterns` | dict | No | built-in | `{category_name: regex}` — **note the direction**, it is the TRANSPOSE of what `file_naming.categorize_file` takes (`{regex: subdir}`). `SimpleProcessor._category_lookup()` inverts it before calling that helper, so the category handed to the three dicts below is the NAME. Supplying this **replaces** the built-in defaults rather than merging with them — list every category you want. |
+| `filename_creators` | dict | No | built-in | `{category_name: fn(path, event) -> filename}` |
+| `output_dirs` | dict | No | built-in | `{category_name: subdir}`, relative to `destination_base` |
+| `nodata_values` | dict | No | built-in | `{category_name: nodata}`; `None` = auto-detect from dtype |
 | `save_results` | bool | No | `True` | Save results CSV |
 | `max_workers` | int | No | `4` | Thread-pool size for the per-category file loop in `_process_category`. Bigger = more S3+GDAL concurrency, but oversubscribes if pushed past ~CPU count (each file's `convert_to_cog` already uses `NUM_THREADS=ALL_CPUS`). |
 
@@ -624,9 +624,9 @@ Calculate appropriate overview factors based on image dimensions.
 
 ### file_naming
 
-**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. Both legacy (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) and new unified (`extract_datetime_from_filename`, `categorize_file`, `create_output_filename`) helpers live here; the legacy set is preserved for backwards compatibility with unit tests and `shared_utils_reference.ipynb`.
+**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. The legacy helpers (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) were removed in the unification refactor — see the note at the end of this section for what replaced them.
 
-New code should use the unified helpers:
+Use the unified helpers:
 
 ```python
 from shared_utils.file_naming import (

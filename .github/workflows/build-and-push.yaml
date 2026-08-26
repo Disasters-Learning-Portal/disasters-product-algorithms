@@ -1,4 +1,8 @@
-name: Build & push hub image (prod)
+name: Build & push hub image (prod — ALWAYS builds the main branch)
+
+# The run title says it too, so it is on the record for every run and not
+# only in the Run-workflow dialog.
+run-name: Build prod image — source is ALWAYS the `main` branch, whatever the branch selector says
 
 on:
   push:
@@ -26,6 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # A MANUAL dispatch builds `main` no matter which branch the
+          # Run-workflow dropdown was left on — the mirror of the pin in
+          # build-and-push-dev.yaml, and the more dangerous direction of the
+          # two: dispatching this from `dev` published DEV's code as the prod
+          # `:latest` tag that every hub pod pulls on start. The build went
+          # green and nothing said the image was not main.
+          #
+          # The push path is left exactly as it was — `github.sha` is what
+          # checkout resolves to by default, i.e. the commit that was pushed,
+          # not whatever the branch tip has drifted to since.
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
           # setuptools-scm reads tags via `git describe`; default checkout
           # is a shallow clone with no tag history.
           fetch-depth: 0

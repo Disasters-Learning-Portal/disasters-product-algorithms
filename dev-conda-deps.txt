@@ -41,6 +41,15 @@ scipy
 pillow
 lxml
 
+# --- Plotting (shared_utils/verification.py + plotting.py import these at
+# MODULE level, so `from shared_utils.verification import compare_geotiffs`
+# is an ImportError without them — even though compare_geotiffs itself draws
+# nothing. That broke section 9 of notebooks/shared_utils_reference.ipynb on
+# any env built from this file. matplotlib-base (not matplotlib) to skip the
+# Qt/PyQt GUI stack, matching dps/environment.yml. ---
+matplotlib-base
+seaborn
+
 # --- HTTP / AWS ---
 requests
 boto3

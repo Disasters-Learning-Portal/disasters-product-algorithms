@@ -88,6 +88,66 @@ def prefix_event(stem: str, event_name: str) -> str:
     return f"{event_name}_{stem}"
 
 
+# The SHAPE of an activation event at the head of a stem: YYYYMM_Hazard_Location_.
+# Anchored and followed by '_', so an 8-digit date run (20260812_SkySat_...) cannot
+# match -- `\d{6}` would consume 202608 and then require '_' where '1' sits.
+_EVENT_PREFIX_RE = re.compile(r'^\d{6}_[A-Za-z0-9]+_[A-Za-z0-9]+_')
+
+
+def strip_event_prefix(name: str, event_name: Optional[str] = None) -> str:
+    """
+    Remove a leading activation-event prefix from a filename or stem.
+
+    The inverse of prefix_event(), for pipelines that keep the activation in the
+    GeoTIFF tags and the S3 prefix rather than in the filename. Sources often
+    arrive already named for the event (vendor deliveries staged under it, or a
+    re-run over output from an event-prefixing pipeline).
+
+    Two passes, in this order:
+
+    1. `event_name`, matched case-insensitively, WINS. It is the operator's
+       declared truth, and it is the only way to strip an event whose location
+       token itself contains underscores (`202508_Flood_New_Mexico`), which the
+       generic shape below would only half-remove.
+    2. Otherwise the generic `YYYYMM_Hazard_Location_` shape, so a *misnamed*
+       delivery -- right shape, wrong event, wrong case -- is still cleaned.
+
+    Returns `name` unchanged when neither matches. Only the basename is examined;
+    any directory part is preserved.
+
+        >>> strip_event_prefix("202607_Fire_OR_SkySat_TrueColor.tif")
+        'SkySat_TrueColor.tif'
+        >>> strip_event_prefix("202508_Flood_New_Mexico_NDVI.tif", "202508_Flood_New_Mexico")
+        'NDVI.tif'
+        >>> strip_event_prefix("SkySat_TrueColor.tif")
+        'SkySat_TrueColor.tif'
+    """
+    directory, filename = os.path.split(name)
+
+    stripped = None
+    if event_name:
+        head = f"{event_name}_"
+        if filename.lower().startswith(head.lower()):
+            stripped = filename[len(head):]
+    if stripped is None:
+        match = _EVENT_PREFIX_RE.match(filename)
+        if match:
+            stripped = filename[match.end():]
+
+    if stripped is None:
+        return name
+
+    # A doubled separator in the source ('..._OR__NDVI.tif') would leave a leading
+    # underscore behind.
+    stripped = stripped.lstrip('_')
+
+    # A name that is NOTHING but the event prefix strips to '' or to a bare
+    # extension ('.tif'). Keep the original rather than emitting either.
+    if not stripped or stripped.startswith('.'):
+        return name
+    return os.path.join(directory, stripped) if directory else stripped
+
+
 def no_change(original_path: str, event_name: str) -> str:
     """
     Pass-through filename builder: prepend the event name, preserve stem + ext.

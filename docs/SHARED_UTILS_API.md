@@ -75,10 +75,10 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `compression_level` | int | No | `22` | Compression level (ZSTD `1`=fast/larger … `22`=slow/smallest). Omitting it keeps the library default 22; the `simple_disaster_template` notebooks pass `9`. |
 | `overwrite` | bool | No | `False` | Overwrite existing files |
 | `verify` | bool | No | `True` | Verify results after processing |
-| `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization. Forwarded to `shared_utils.file_naming.categorize_file`. |
-| `filename_creators` | dict | No | built-in | Functions to generate output filenames |
-| `output_dirs` | dict | No | built-in | Category-to-directory mapping |
-| `nodata_values` | dict | No | built-in | Category-specific nodata values |
+| `categorization_patterns` | dict | No | built-in | `{category_name: regex}` — **note the direction**, it is the TRANSPOSE of what `file_naming.categorize_file` takes (`{regex: subdir}`). `SimpleProcessor._category_lookup()` inverts it before calling that helper, so the category handed to the three dicts below is the NAME. Supplying this **replaces** the built-in defaults rather than merging with them — list every category you want. |
+| `filename_creators` | dict | No | built-in | `{category_name: fn(path, event) -> filename}` |
+| `output_dirs` | dict | No | built-in | `{category_name: subdir}`, relative to `destination_base` |
+| `nodata_values` | dict | No | built-in | `{category_name: nodata}`; `None` = auto-detect from dtype |
 | `save_results` | bool | No | `True` | Save results CSV |
 | `max_workers` | int | No | `4` | Thread-pool size for the per-category file loop in `_process_category`. Bigger = more S3+GDAL concurrency, but oversubscribes if pushed past ~CPU count (each file's `convert_to_cog` already uses `NUM_THREADS=ALL_CPUS`). |
 
@@ -624,9 +624,9 @@ Calculate appropriate overview factors based on image dimensions.
 
 ### file_naming
 
-**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. Both legacy (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) and new unified (`extract_datetime_from_filename`, `categorize_file`, `create_output_filename`) helpers live here; the legacy set is preserved for backwards compatibility with unit tests and `shared_utils_reference.ipynb`.
+**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. The legacy helpers (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) were removed in the unification refactor — see the note at the end of this section for what replaced them.
 
-New code should use the unified helpers:
+Use the unified helpers:
 
 ```python
 from shared_utils.file_naming import (
@@ -637,6 +637,7 @@ from shared_utils.file_naming import (
     create_nisar_filename,            # (path, event) -> two-date variant for interferometric PAIRS
     no_change,                        # passthrough builder for sub-products like AVIRIS
     prefix_event,                     # (stem, event) -> stem with the event prefix applied at most once
+    strip_event_prefix,               # (name, event=None) -> name with a leading event prefix removed
 )
 ```
 
@@ -650,6 +651,9 @@ Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, `2025-01
 - A stem already ending in a canonical marker — an ISO-Zulu datetime (with `HH:MM:SS` or compact `HHMMSS`) or a `_day` / `_hour` suffix — is kept verbatim; only the prefix rule applies. Mirrors the `cog_utils._ISO_ZULU_END_RE` short-circuit in `rename_with_event` / `get_final_filename`.
 
 Both were regressions in a real activation: a SkySat delivery named `202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z.tif` came out as `202607_Fire_OR_202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z_day.tif`. The mixed `YYYY-MM-DDTHHMMSSZ` stamp also needed its own `DATETIME_PATTERNS` entry — without one, the less-specific `YYYY-MM-DDTHH` pattern matched a *prefix* of it and left `3721Z` welded to the product token. Pinned by `tests/unit/test_file_naming.py` and `tests/unit/test_simple_disaster_naming.py`.
+
+**`strip_event_prefix(name, event_name=None)` is the inverse of `prefix_event`** — for pipelines that keep the activation in the GeoTIFF tags and the S3 prefix rather than in the filename (`notebooks/simple_disaster_staging.ipynb`). Two passes, in order: `event_name` matched **case-insensitively** wins, because it is the only way to strip an event whose location token itself contains underscores (`202508_Flood_New_Mexico` — the generic shape below would eat exactly three tokens and leave `Mexico_NDVI.tif`); otherwise the generic `^YYYYMM_Hazard_Location_` shape is removed, so a *misnamed* delivery — right shape, wrong event — is still cleaned. Note the guards: an 8-digit date head (`20260812_SkySat_…`) can't match, because the anchored `\d{6}` would then need a `_` where `1` sits; and a name that is nothing but the event is returned unchanged rather than stripped down to a bare `.tif`. Only the basename is examined, so a directory component survives. Setting a builder's `event_name` to `''` only stops it *adding* a prefix — it cannot remove one the source arrived with, which is why the stripper runs first. Pinned by `tests/unit/test_file_naming.py::TestStripEventPrefix`.
+
 
 #### `create_nisar_filename(original_path, event_name)` — interferometric pairs
 

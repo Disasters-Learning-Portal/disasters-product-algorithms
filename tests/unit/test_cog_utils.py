@@ -856,3 +856,90 @@ class TestFourBandMultispectralKeepsItsNodata:
         convert_to_cog(src, out, nodata=None, dst_crs=None, quiet=True)
         with rasterio.open(out) as s:
             assert s.nodata == -9999
+
+
+class TestCreationOptionParity:
+    """convert_to_cog has two backends and they must produce the same GDAL
+    creation options.
+
+    Regression (2026-08-26): the in-process `cog_translate` backend -- the one
+    every metadata-embedding caller uses, including both simple_disaster
+    notebooks and every `--metadata-json` CLI -- built its profile
+    independently of the subprocess `rio cogeo create` backend and was missing
+    two entries.
+
+    `NUM_THREADS=ALL_CPUS` cost ~1.9x (single-threaded compression).
+    `BIGTIFF=IF_SAFER` was far worse: rio-cogeo writes an UNCOMPRESSED scratch
+    dataset and then adds overviews to it, so a source under 4 GB raw can cross
+    the classic-TIFF 4 GB offset ceiling after GDAL's IF_NEEDED heuristic has
+    already chosen classic. libtiff then thrashes in TIFFRewriteDirectory and
+    GDALClose never practically returns. A 3.70 GB SkySat scene (4.38 GB with
+    overviews) ran >27 min without it and 55.6s with it.
+
+    Neither shows up on a small fixture, so assert on the options themselves.
+    """
+
+    COMPRESSIONS = ['ZSTD', 'DEFLATE', 'LZW']
+
+    @pytest.mark.parametrize('compression', COMPRESSIONS)
+    def test_threading_and_bigtiff_always_present(self, compression):
+        from shared_utils.cog_utils import build_creation_options
+        opts = build_creation_options(compression, 9)
+        assert opts['NUM_THREADS'] == 'ALL_CPUS'
+        assert opts['BIGTIFF'] == 'IF_SAFER'
+
+    @pytest.mark.parametrize('compression', COMPRESSIONS)
+    def test_cog_translate_profile_carries_every_creation_option(self, compression):
+        """The in-process backend must not drop any shared creation option."""
+        from shared_utils.cog_utils import (
+            build_creation_options, _build_cog_translate_profile,
+        )
+        opts = build_creation_options(compression, 9)
+        profile = _build_cog_translate_profile(compression, 9)
+        missing = {k: v for k, v in opts.items() if profile.get(k) != v}
+        assert not missing, f"in-process profile dropped {missing}"
+
+    def test_gdal_config_sets_num_threads(self):
+        """cog_translate runs under a bare rasterio.Env() unless we pass this."""
+        from shared_utils.cog_utils import COG_GDAL_CONFIG
+        assert COG_GDAL_CONFIG['GDAL_NUM_THREADS'] == 'ALL_CPUS'
+
+    def test_compression_level_reaches_the_right_key(self):
+        from shared_utils.cog_utils import build_creation_options
+        assert build_creation_options('ZSTD', 17)['ZSTD_LEVEL'] == 17
+        assert build_creation_options('DEFLATE', 7)['ZLEVEL'] == 7
+
+    def test_subprocess_backend_passes_every_creation_option(self, tmp_path, monkeypatch):
+        """Capture the real `rio cogeo create` argv and diff it against the
+        shared builder -- this is what fails if someone edits one branch only."""
+        import subprocess as _sp
+        from shared_utils import cog_utils
+
+        captured = {}
+        real_run = _sp.run  # bind BEFORE patching; cog_utils.subprocess IS _sp
+
+        def fake_run(cmd, *a, **k):
+            if isinstance(cmd, list) and cmd[:3] == ['rio', 'cogeo', 'create']:
+                captured['cmd'] = cmd
+                # Produce the output the caller expects to exist.
+                real_run(['rio', 'cogeo', 'create', cmd[3], cmd[4]], check=True)
+                return _sp.CompletedProcess(cmd, 0, stdout='', stderr='')
+            return real_run(cmd, *a, **k)
+
+        monkeypatch.setattr(cog_utils.subprocess, 'run', fake_run)
+
+        src = _write(tmp_path / "parity.tif", 3, 'uint8', 40)
+        out = str(tmp_path / "parity_cog.tif")
+        cog_utils.convert_to_cog(
+            src, out, nodata=None, dst_crs=None, quiet=True,
+            compression='ZSTD', compression_level=9,
+        )
+
+        assert 'cmd' in captured, "subprocess backend was not exercised"
+        cmd = captured['cmd']
+        passed = {cmd[i + 1] for i, tok in enumerate(cmd) if tok == '--co'}
+        expected = {
+            f'{k}={v}'
+            for k, v in cog_utils.build_creation_options('ZSTD', 9).items()
+        }
+        assert expected <= passed, f"subprocess backend dropped {expected - passed}"

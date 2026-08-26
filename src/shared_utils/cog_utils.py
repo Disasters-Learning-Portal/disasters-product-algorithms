@@ -309,6 +309,65 @@ def get_compression_profile(
     return profile
 
 
+# GDAL Env config shared by both convert_to_cog branches. The subprocess branch
+# gets this for free from the `rio cogeo create` CLI; the in-process branch has
+# to pass it to cog_translate(config=...) explicitly.
+COG_GDAL_CONFIG = {
+    'GDAL_NUM_THREADS': 'ALL_CPUS',
+    'GDAL_TIFF_INTERNAL_MASK': True,
+}
+
+
+def build_creation_options(compression: str, compression_level: int) -> dict:
+    """
+    Single source of truth for the GDAL creation options used by BOTH
+    ``convert_to_cog`` backends -- the subprocess ``rio cogeo create`` branch
+    and the in-process ``rio_cogeo.cog_translate`` branch (``metadata=...``).
+
+    The two branches used to build these independently, and the in-process one
+    was missing both of the entries below. Keep them in one place so they
+    cannot drift again (pinned by ``TestCreationOptionParity``).
+
+    ``NUM_THREADS=ALL_CPUS``
+        ``.clinerules.md`` rule #8 -- every raster hot path runs all cores.
+        Without it GDAL compresses single-threaded, pinning one core per
+        worker. Measured on a 1.2 Gpx SkySat scene: 55.6s -> 28.9s.
+
+    ``BIGTIFF=IF_SAFER``
+        Load-bearing, and the subtler of the two. GDAL's ``IF_NEEDED`` default
+        sizes the classic-vs-BigTIFF decision on the BASE raster alone, but
+        rio-cogeo writes an **uncompressed** scratch dataset and then adds
+        overviews to it. A source that is comfortably under 4 GB uncompressed
+        can therefore cross the 4 GB classic-TIFF offset ceiling *after* the
+        format is already locked in. libtiff then falls into
+        ``TIFFRewriteDirectory``, and ``GDALClose`` on the scratch file
+        effectively never returns.
+
+        Measured on ``SkySat_SR_TrueColor_2026-08-12T232033Z.tif``
+        (39116x31550, 3 band uint8 = 3.70 GB raw, 4.38 GB once overviews are
+        added): the finished COG was already on disk after ~12 min, then the
+        process burned >15 further minutes at 100% CPU inside
+        ``gdal_TIFFRewriteDirectorySec`` before being killed. With
+        ``BIGTIFF=IF_SAFER`` the same file completes in 55.6s.
+
+        Note this is invisible for small test rasters -- it only bites when
+        raw size + overviews straddles 4 GB, which is why it shipped unnoticed.
+    """
+    opts = {
+        'NUM_THREADS': 'ALL_CPUS',
+        'BIGTIFF': 'IF_SAFER',
+    }
+    if compression.upper() == 'DEFLATE':
+        opts['PREDICTOR'] = 2
+        opts['ZLEVEL'] = compression_level
+    elif compression.upper() == 'LZW':
+        opts['PREDICTOR'] = 2
+    elif compression.upper() == 'ZSTD':
+        opts['PREDICTOR'] = 2
+        opts['ZSTD_LEVEL'] = compression_level
+    return opts
+
+
 def _build_cog_translate_profile(compression: str, compression_level: int) -> dict:
     """
     Build a rio_cogeo profile dict that matches what the subprocess
@@ -323,14 +382,7 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
     from rio_cogeo.profiles import cog_profiles
 
     profile = dict(cog_profiles.get(compression.lower()))
-    if compression.upper() == 'DEFLATE':
-        profile['PREDICTOR'] = 2
-        profile['ZLEVEL'] = compression_level
-    elif compression.upper() == 'LZW':
-        profile['PREDICTOR'] = 2
-    elif compression.upper() == 'ZSTD':
-        profile['PREDICTOR'] = 2
-        profile['ZSTD_LEVEL'] = compression_level
+    profile.update(build_creation_options(compression, compression_level))
     return profile
 
 
@@ -831,22 +883,17 @@ def convert_to_cog(
         '--cog-profile', compression.lower(),
         '--overview-level', str(overview_levels),
         '--overview-resampling', overview_resampling,
-        '--co', 'NUM_THREADS=ALL_CPUS',
     ]
 
     # Add no-data value
     if nodata is not None:
         cmd.extend(['--nodata', str(nodata)])
 
-    # Add compression-specific options with level
-    if compression.upper() == 'DEFLATE':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-        cmd.extend(['--co', f'ZLEVEL={compression_level}'])
-    elif compression.upper() == 'LZW':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-    elif compression.upper() == 'ZSTD':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-        cmd.extend(['--co', f'ZSTD_LEVEL={compression_level}'])
+    # Creation options come from the ONE builder both branches share, so the
+    # subprocess path and the in-process cog_translate path cannot diverge
+    # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
+    for key, value in build_creation_options(compression, compression_level).items():
+        cmd.extend(['--co', f'{key}={value}'])
 
     # Execute COG creation.
     #
@@ -894,6 +941,11 @@ def convert_to_cog(
                 overview_resampling=overview_resampling,
                 web_optimized=False,
                 additional_cog_metadata=full_metadata,
+                # The subprocess branch gets this from the `rio cogeo create`
+                # CLI (its --threads defaults to ALL_CPUS). Without it here,
+                # cog_translate runs under a bare rasterio.Env() and GDAL
+                # compresses on a single thread.
+                config=COG_GDAL_CONFIG,
                 quiet=quiet,
             )
         else:

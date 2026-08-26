@@ -393,3 +393,74 @@ class TestNoChange:
         from shared_utils.file_naming import no_change
         assert no_change("/data/Event_ang_earlylook.tif", "Event") == \
             "Event_ang_earlylook.tif"
+
+
+class TestStripEventPrefix:
+    """Tests for strip_event_prefix(name, event_name=None).
+
+    The inverse of prefix_event(), for pipelines that keep the activation in the
+    GeoTIFF tags + the S3 prefix instead of the filename
+    (notebooks/simple_disaster_staging.ipynb).
+    """
+
+    def test_strips_the_generic_event_shape_with_no_event_name(self):
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("202607_Fire_OR_SkySat_TrueColor.tif") == \
+            "SkySat_TrueColor.tif"
+
+    def test_event_name_wins_over_the_generic_shape(self):
+        """A location token with underscores is only strippable via event_name.
+
+        The generic YYYYMM_Hazard_Location_ shape would eat exactly three tokens
+        and leave 'Mexico_NDVI.tif' behind.
+        """
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("202508_Flood_New_Mexico_NDVI.tif",
+                                  "202508_Flood_New_Mexico") == "NDVI.tif"
+        assert strip_event_prefix("202508_Flood_New_Mexico_NDVI.tif") == "Mexico_NDVI.tif"
+
+    def test_event_name_match_is_case_insensitive(self):
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("202606_earthquake_venezuela_NDVI_20260101.tif",
+                                  "202606_Earthquake_Venezuela") == "NDVI_20260101.tif"
+
+    def test_strips_a_misnamed_event_that_is_not_event_name(self):
+        """Right shape, wrong event -- operators mislabel. Still cleaned."""
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("202607_Fire_OR_SkySat_TrueColor.tif",
+                                  "202606_Earthquake_Venezuela") == "SkySat_TrueColor.tif"
+
+    def test_leaves_an_unprefixed_name_alone(self):
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("SkySat_SR_TrueColor_20260812.tif",
+                                  "202606_Earthquake_Venezuela") == \
+            "SkySat_SR_TrueColor_20260812.tif"
+
+    def test_an_8digit_date_head_is_not_an_event_prefix(self):
+        """`\\d{6}` must not bite the front off a YYYYMMDD run: 202608 then '1',
+        not '_', so the anchored pattern cannot match."""
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("20260812_SkySat_SR_TrueColor.tif") == \
+            "20260812_SkySat_SR_TrueColor.tif"
+
+    def test_preserves_a_directory_component(self):
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("drcs_activations/evt/202607_Fire_OR_NDVI.tif") == \
+            "drcs_activations/evt/NDVI.tif"
+
+    def test_refuses_to_strip_away_the_whole_stem(self):
+        """A name that is nothing BUT the event would strip to '.tif'."""
+        from shared_utils.file_naming import strip_event_prefix
+        assert strip_event_prefix("202607_Fire_OR_.tif", "202607_Fire_OR") == \
+            "202607_Fire_OR_.tif"
+
+    def test_is_idempotent(self):
+        from shared_utils.file_naming import strip_event_prefix
+        once = strip_event_prefix("202607_Fire_OR_SkySat_TrueColor.tif", "202607_Fire_OR")
+        assert strip_event_prefix(once, "202607_Fire_OR") == once
+
+    def test_round_trips_with_prefix_event(self):
+        from shared_utils.file_naming import prefix_event, strip_event_prefix
+        stem = "SkySat_TrueColor"
+        assert strip_event_prefix(prefix_event(stem, "202607_Fire_OR"),
+                                  "202607_Fire_OR") == stem

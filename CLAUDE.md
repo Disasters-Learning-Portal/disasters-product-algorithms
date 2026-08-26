@@ -106,6 +106,19 @@ All sensor CLIs also accept `--metadata-json <path>`. The path points at a JSON 
 mamba install -y -c conda-forge $(grep -v '^\s*#' dev-conda-deps.txt | grep -v '^\s*$' | tr '\n' ' ')
 pip install -e .
 
+# UPDATE an existing checkout to the latest release (this is what to tell an
+# operator). Stashes/restores uncommitted work, fast-forwards, reinstalls:
+bash tools/update.sh                 # onto main (released)
+bash tools/update.sh --branch dev    # onto dev (unreleased tip)
+# The reinstall is NOT optional: the version is dynamic (setuptools-scm reads
+# the newest git tag) and shared_utils.version resolves it through
+# importlib.metadata at INSTALL time — so a bare `git pull` leaves
+# PROCESSOR_STRING, the tag baked into every published COG, on the old version.
+# Safe w.r.t. conda: [project.dependencies] excludes GDAL/rasterio/rio-cogeo.
+# The autostash carries a per-run marker and is popped BY that marker, so a
+# stash you already had is never consumed. Pinned by
+# tests/integration/test_update_sh.py (real throwaway git repos).
+
 # CLI usage
 process_landsat89 --help
 process_sentinel2 --help

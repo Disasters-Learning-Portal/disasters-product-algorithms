@@ -35,6 +35,18 @@ def initialize_s3_client(bucket_name='nasa-disasters', verbose=True):
     """
     s3_client = None
 
+    # Say so when the assume-role path is not even available. `aws_credentials`
+    # is gitignored and absent from a fresh checkout / hub pod, so this branch
+    # is the NORMAL case -- and it used to be entirely silent, which meant an
+    # operator saw only the "default credentials" line below and had no way to
+    # tell whether the role had been tried and failed or never attempted.
+    if verbose and not (HAS_UPLOAD_CREDENTIALS and EXTERNAL_ID and UPLOAD_ROLE_ARN):
+        print(
+            "ℹ️ aws_credentials.py not importable -- skipping the STS assume-role "
+            "and using ambient credentials. On the Disasters hub those are the "
+            "disasters-prod role; elsewhere they may be read-only."
+        )
+
     # Method 1: Try to use external ID for upload permissions
     if HAS_UPLOAD_CREDENTIALS and EXTERNAL_ID and UPLOAD_ROLE_ARN:
         try:
@@ -115,8 +127,11 @@ def initialize_s3_client(bucket_name='nasa-disasters', verbose=True):
     try:
         fs_read = fsspec.filesystem('s3', anon=False)
 
+        # NOT "Confirmed access to <bucket>" -- that is what this line used to
+        # say, and it was false: constructing an fsspec filesystem never
+        # touches the bucket. It read as a green light while uploads went on to
+        # AccessDenied. Use can_write_to_bucket() for a real write check.
         if verbose:
-            print(f"✅ Confirmed access to {bucket_name} bucket")
             print(f"✅ S3 filesystem (fsspec) initialized")
 
         return s3_client, fs_read
@@ -125,6 +140,49 @@ def initialize_s3_client(bucket_name='nasa-disasters', verbose=True):
         if verbose:
             print(f"❌ Failed to initialize fsspec filesystem: {e}")
         return None, None
+
+
+def can_write_to_bucket(s3_client, bucket, prefix='', verbose=True):
+    """
+    Actually verify write access by round-tripping a tiny probe object.
+
+    ``head_bucket`` and fsspec construction both succeed for a read-only
+    identity, so neither is evidence that an upload will work. Permissions on
+    these buckets are commonly granted per PREFIX, so the probe is written
+    under ``prefix`` -- writable at the bucket root does not imply writable at
+    ``ProgramData/<Product>/``.
+
+    Call this BEFORE a long conversion. The failure it catches otherwise
+    surfaces only at the upload, i.e. after every file has been processed.
+
+    Args:
+        s3_client: Boto3 S3 client
+        bucket: S3 bucket name
+        prefix: Key prefix to probe under (e.g. 'ProgramData/Skysat')
+        verbose: Print the outcome
+
+    Returns:
+        tuple: (ok, detail) -- ``detail`` is None on success, else the error string.
+    """
+    key = f"{prefix.strip('/')}/.write-probe" if prefix.strip('/') else '.write-probe'
+    try:
+        s3_client.put_object(Bucket=bucket, Key=key, Body=b'')
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        if verbose:
+            print(f"❌ NOT writable: s3://{bucket}/{key}\n   {detail}")
+        return False, detail
+
+    try:
+        s3_client.delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        # Wrote but could not clean up -- write access is still proven.
+        if verbose:
+            print(f"⚠️ Wrote s3://{bucket}/{key} but could not delete the probe")
+
+    if verbose:
+        print(f"✅ Write access confirmed: s3://{bucket}/{prefix.strip('/')}/")
+    return True, None
 
 
 def check_s3_file_exists(s3_client, bucket, key):

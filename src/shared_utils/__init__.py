@@ -63,6 +63,7 @@ from shared_utils.file_naming import (
     create_nisar_filename,
     no_change,
     prefix_event,
+    strip_event_prefix,
 )
 
 # Web Mercator clip detection (requires rasterio).
@@ -170,6 +171,7 @@ __all__ = [
     'create_nisar_filename',
     'no_change',
     'prefix_event',
+    'strip_event_prefix',
     # Web Mercator clip detection (reprojection.py)
     'needs_webmerc_clip',
     'WEBMERC_VALID_LAT',

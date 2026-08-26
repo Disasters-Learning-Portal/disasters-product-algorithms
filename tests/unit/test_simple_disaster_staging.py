@@ -106,7 +106,7 @@ class TestEventStaysOutOfTheFilename:
         from shared_utils.file_naming import strip_event_prefix  # noqa: F401  (import guard)
 
         sources = {
-            "nisar": "NISAR_D54_GUNW_20260617_20260629_unw_delon_cm.tif",
+            "nisar": "NISAR_D54_GUNW_20260617_20260629_unw_deIon_cm.tif",
             "trueColor": "SkySat_SR_TrueColor_20260812.tif",
             "ndvi": "Sentinel2_NDVI_20260101.tif",
         }

@@ -309,6 +309,65 @@ def get_compression_profile(
     return profile
 
 
+# GDAL Env config shared by both convert_to_cog branches. The subprocess branch
+# gets this for free from the `rio cogeo create` CLI; the in-process branch has
+# to pass it to cog_translate(config=...) explicitly.
+COG_GDAL_CONFIG = {
+    'GDAL_NUM_THREADS': 'ALL_CPUS',
+    'GDAL_TIFF_INTERNAL_MASK': True,
+}
+
+
+def build_creation_options(compression: str, compression_level: int) -> dict:
+    """
+    Single source of truth for the GDAL creation options used by BOTH
+    ``convert_to_cog`` backends -- the subprocess ``rio cogeo create`` branch
+    and the in-process ``rio_cogeo.cog_translate`` branch (``metadata=...``).
+
+    The two branches used to build these independently, and the in-process one
+    was missing both of the entries below. Keep them in one place so they
+    cannot drift again (pinned by ``TestCreationOptionParity``).
+
+    ``NUM_THREADS=ALL_CPUS``
+        ``.clinerules.md`` rule #8 -- every raster hot path runs all cores.
+        Without it GDAL compresses single-threaded, pinning one core per
+        worker. Measured on a 1.2 Gpx SkySat scene: 55.6s -> 28.9s.
+
+    ``BIGTIFF=IF_SAFER``
+        Load-bearing, and the subtler of the two. GDAL's ``IF_NEEDED`` default
+        sizes the classic-vs-BigTIFF decision on the BASE raster alone, but
+        rio-cogeo writes an **uncompressed** scratch dataset and then adds
+        overviews to it. A source that is comfortably under 4 GB uncompressed
+        can therefore cross the 4 GB classic-TIFF offset ceiling *after* the
+        format is already locked in. libtiff then falls into
+        ``TIFFRewriteDirectory``, and ``GDALClose`` on the scratch file
+        effectively never returns.
+
+        Measured on ``SkySat_SR_TrueColor_2026-08-12T232033Z.tif``
+        (39116x31550, 3 band uint8 = 3.70 GB raw, 4.38 GB once overviews are
+        added): the finished COG was already on disk after ~12 min, then the
+        process burned >15 further minutes at 100% CPU inside
+        ``gdal_TIFFRewriteDirectorySec`` before being killed. With
+        ``BIGTIFF=IF_SAFER`` the same file completes in 55.6s.
+
+        Note this is invisible for small test rasters -- it only bites when
+        raw size + overviews straddles 4 GB, which is why it shipped unnoticed.
+    """
+    opts = {
+        'NUM_THREADS': 'ALL_CPUS',
+        'BIGTIFF': 'IF_SAFER',
+    }
+    if compression.upper() == 'DEFLATE':
+        opts['PREDICTOR'] = 2
+        opts['ZLEVEL'] = compression_level
+    elif compression.upper() == 'LZW':
+        opts['PREDICTOR'] = 2
+    elif compression.upper() == 'ZSTD':
+        opts['PREDICTOR'] = 2
+        opts['ZSTD_LEVEL'] = compression_level
+    return opts
+
+
 def _build_cog_translate_profile(compression: str, compression_level: int) -> dict:
     """
     Build a rio_cogeo profile dict that matches what the subprocess
@@ -323,14 +382,7 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
     from rio_cogeo.profiles import cog_profiles
 
     profile = dict(cog_profiles.get(compression.lower()))
-    if compression.upper() == 'DEFLATE':
-        profile['PREDICTOR'] = 2
-        profile['ZLEVEL'] = compression_level
-    elif compression.upper() == 'LZW':
-        profile['PREDICTOR'] = 2
-    elif compression.upper() == 'ZSTD':
-        profile['PREDICTOR'] = 2
-        profile['ZSTD_LEVEL'] = compression_level
+    profile.update(build_creation_options(compression, compression_level))
     return profile
 
 
@@ -482,6 +534,18 @@ def convert_to_cog(
         existing_nodata = src.nodata
         src_crs = src.crs
 
+        # Probe the PIXELS for FLT_MAX-class fill. `is_extreme_float_nodata`
+        # below only inspects the nodata tag, which misses the inverse (and more
+        # damaging) case: a sane-looking tag such as -9999 on a raster whose
+        # fill pixels are actually FLT_MAX. Nothing masks those, so they survive
+        # into the COG and render as real data. Bounded decimated read.
+        from shared_utils.compression import detect_extreme_float_fill
+        extreme_fill = detect_extreme_float_fill(src)
+
+        # Set when the fill has to be rewritten rather than merely re-tagged.
+        # Consumed at the warp step, which translates -srcnodata -> -dstnodata.
+        remap_extreme_fill = None
+
         # Determine no-data value.
         #
         # `bool` is checked BEFORE the numeric branch and with isinstance, not
@@ -571,6 +635,31 @@ def convert_to_cog(
                     f"EXTREME_FLOAT_NODATA for the known-bad value set."
                 )
                 nodata = remapped
+                # Re-tagging alone is not enough. The old behaviour set the tag
+                # to -9999 and then handed gdalwarp `-srcnodata -9999`, which
+                # matches nothing — the FLT_MAX pixels sailed through into the
+                # output, masked by neither the old value nor the new one.
+                # Translate the actual fill instead.
+                remap_extreme_fill = (
+                    extreme_fill if extreme_fill is not None
+                    else float(existing_nodata)
+                )
+            elif existing_nodata is not None and extreme_fill is not None:
+                # The tag is sane (e.g. -9999) but the PIXELS carry FLT_MAX.
+                # Tag-level checks all pass, so this used to fall through to
+                # "use the existing value" and emit a COG whose fill was
+                # invisible to every consumer: rio-tiler masks on the declared
+                # -9999, finds none, and renders FLT_MAX as data that clamps to
+                # the top of any rescale.
+                remapped = set_nodata_value(dtype)
+                print(
+                    f"  WARNING: source declares nodata={existing_nodata!r} but "
+                    f"its pixels contain {extreme_fill!r} (FLT_MAX-class fill). "
+                    f"Remapping that fill to {remapped} so the declared value "
+                    f"and the data agree."
+                )
+                nodata = remapped
+                remap_extreme_fill = extreme_fill
             elif existing_nodata is not None:
                 nodata = existing_nodata
                 if not quiet:
@@ -579,6 +668,16 @@ def convert_to_cog(
                 nodata = set_nodata_value(dtype)
                 if not quiet:
                     print(f"  Auto-selected no-data value for {dtype}: {nodata}")
+                if extreme_fill is not None:
+                    # No tag at all, but the fill is still FLT_MAX. Declaring
+                    # the dtype default without translating the pixels would
+                    # produce the same silently-broken COG as the branch above.
+                    print(
+                        f"  WARNING: no nodata tag, and pixels contain "
+                        f"{extreme_fill!r} (FLT_MAX-class fill). Remapping that "
+                        f"fill to {nodata}."
+                    )
+                    remap_extreme_fill = extreme_fill
         else:
             # Validate user-provided no-data
             validation = validate_nodata_for_dtype(nodata, dtype)
@@ -591,10 +690,58 @@ def convert_to_cog(
                     )
                 print(f"  Warning: No-data value {nodata} may be invalid for {dtype}")
 
+        # The branches above only set remap_extreme_fill while auto-detecting
+        # (nodata=None). An explicitly-supplied nodata= skips all of them, and
+        # the per-sensor CLIs pass one routinely (process_landsat89,
+        # process_sentinel2, process_capella, process_satellogic all forward a
+        # --nodata). A sane explicit value on a FLT_MAX-filled raster is exactly
+        # the case this guard exists for, so catch it here rather than letting
+        # the caller's argument wave the corrupt fill through.
+        if (
+            remap_extreme_fill is None
+            and extreme_fill is not None
+            and nodata is not None
+            and not isinstance(nodata, (bool, np.bool_))
+        ):
+            print(
+                f"  WARNING: caller supplied nodata={nodata!r}, but the pixels "
+                f"contain {extreme_fill!r} (FLT_MAX-class fill). Remapping that "
+                f"fill to {nodata!r} so the declared value and the data agree."
+            )
+            remap_extreme_fill = extreme_fill
+
+        # One -srcnodata can only name one value, so a raster carrying more than
+        # one extreme sentinel (e.g. +FLT_MAX and -FLT_MAX) keeps whichever is
+        # not the dominant one. Say so loudly rather than emit a COG that looks
+        # repaired but still has unmasked fill in it.
+        if remap_extreme_fill is not None:
+            from shared_utils.compression import list_extreme_float_fills
+            all_fills = list_extreme_float_fills(src)
+            if len(all_fills) > 1:
+                leftover = [v for v in all_fills if v != remap_extreme_fill]
+                print(
+                    f"  WARNING: {len(all_fills)} distinct FLT_MAX-class fill "
+                    f"values present {all_fills!r}. Only {remap_extreme_fill!r} "
+                    f"will be remapped; {leftover!r} will REMAIN in the output "
+                    f"and stay unmasked. Rewrite this raster's fill upstream."
+                )
+
         # Check if reprojection is needed
         needs_reprojection = (dst_crs is not None and
                              src_crs is not None and
                              str(src_crs).upper() != dst_crs.upper())
+
+        # A pending FLT_MAX fill remap also requires the warp pass, even when
+        # the CRS already matches: gdalwarp's -srcnodata/-dstnodata is what
+        # actually rewrites those pixels. gdal_translate -a_nodata only re-tags,
+        # and the cog_translate path copies pixels verbatim, so without this a
+        # same-CRS source would keep its corrupt fill.
+        if remap_extreme_fill is not None and not needs_reprojection:
+            needs_reprojection = True
+            if not quiet:
+                print(
+                    "  Forcing a same-CRS warp pass to rewrite the FLT_MAX fill."
+                )
 
         # Decide whether to clip output to Web Mercator's valid domain.
         # `clip_to_webmerc=None` (default) defers to auto-detect; pass True/False
@@ -664,14 +811,18 @@ def convert_to_cog(
             if not quiet:
                 print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
+        # When the warp was forced purely to rewrite the fill, dst_crs may be
+        # None or identical to the source; keep the pixels where they are.
+        warp_target_crs = dst_crs if dst_crs is not None else str(src_crs)
+
         if not quiet:
-            print(f"  Warping to {dst_crs}...")
+            print(f"  Warping to {warp_target_crs}...")
 
         # Build gdalwarp command (chosen over `rio warp` so we can use
         # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
         warp_cmd = [
             'gdalwarp',
-            '-t_srs', dst_crs,
+            '-t_srs', warp_target_crs,
             '-r', resampling_method,
             '-multi',
             '-wo', 'NUM_THREADS=ALL_CPUS',
@@ -689,9 +840,18 @@ def convert_to_cog(
                 '-te_srs', 'EPSG:3857',
             ])
 
-        # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata)
+        # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata).
+        # These are normally the same value — the warp is not meant to change
+        # what counts as fill. The exception is a pending FLT_MAX remap, where
+        # -srcnodata must name the value actually sitting in the pixels so
+        # gdalwarp rewrites it to the safe -dstnodata on the way out. Using
+        # `nodata` on both sides there would match nothing and silently keep
+        # the corrupt fill.
         if nodata is not None:
-            warp_cmd.extend(['-srcnodata', str(nodata)])
+            src_nodata_arg = (
+                remap_extreme_fill if remap_extreme_fill is not None else nodata
+            )
+            warp_cmd.extend(['-srcnodata', repr(float(src_nodata_arg))])
             warp_cmd.extend(['-dstnodata', str(nodata)])
 
         warp_cmd.extend([warp_source, warped_file])
@@ -723,22 +883,17 @@ def convert_to_cog(
         '--cog-profile', compression.lower(),
         '--overview-level', str(overview_levels),
         '--overview-resampling', overview_resampling,
-        '--co', 'NUM_THREADS=ALL_CPUS',
     ]
 
     # Add no-data value
     if nodata is not None:
         cmd.extend(['--nodata', str(nodata)])
 
-    # Add compression-specific options with level
-    if compression.upper() == 'DEFLATE':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-        cmd.extend(['--co', f'ZLEVEL={compression_level}'])
-    elif compression.upper() == 'LZW':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-    elif compression.upper() == 'ZSTD':
-        cmd.extend(['--co', 'PREDICTOR=2'])
-        cmd.extend(['--co', f'ZSTD_LEVEL={compression_level}'])
+    # Creation options come from the ONE builder both branches share, so the
+    # subprocess path and the in-process cog_translate path cannot diverge
+    # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
+    for key, value in build_creation_options(compression, compression_level).items():
+        cmd.extend(['--co', f'{key}={value}'])
 
     # Execute COG creation.
     #
@@ -786,6 +941,11 @@ def convert_to_cog(
                 overview_resampling=overview_resampling,
                 web_optimized=False,
                 additional_cog_metadata=full_metadata,
+                # The subprocess branch gets this from the `rio cogeo create`
+                # CLI (its --threads defaults to ALL_CPUS). Without it here,
+                # cog_translate runs under a bare rasterio.Env() and GDAL
+                # compresses on a single thread.
+                config=COG_GDAL_CONFIG,
                 quiet=quiet,
             )
         else:

@@ -86,15 +86,41 @@ class TestDestination:
         ]
         assert not offenders, f"drcs_activations_new survives in code cells {offenders}"
 
-    def test_uploads_through_the_assume_role_client(self):
-        """Plain `aws s3 cp` to the destination would use ambient credentials only.
+    def test_uploads_through_a_boto3_client_not_the_aws_cli(self):
+        """Destination writes go through upload_to_s3 with a boto3 client.
 
-        The staging writes go through s3_operations.initialize_s3_client, which
-        tries the STS assume-role in aws_credentials.py first.
+        Ambient credentials on purpose (2026-08-26): on the Disasters hub the pod
+        already assumes disasters-prod, so anyone with hub access can publish.
+        The previous initialize_s3_client route tried an STS assume-role from
+        aws_credentials.py -- a gitignored file absent from every fresh pod -- and
+        then fell through to these same ambient credentials silently.
         """
-        cell = _cell_containing("initialize_s3_client")
+        cell = _cell_containing("def _process(item):")
         assert "upload_to_s3(" in cell
+        assert "boto3.client('s3')" in cell
         assert "aws', 's3', 'cp', f's3://{DESTINATION_BUCKET}" not in cell
+
+    def test_upload_errors_are_not_swallowed(self):
+        """upload_to_s3 gates every print, including the real boto3 error, on
+        `verbose`. With verbose=False an AccessDenied surfaced only as the
+        generic "upload failed" and the cause was lost."""
+        cell = _cell_containing("def _process(item):")
+        # Assert on the CALL, not the cell -- the comment above it names
+        # verbose=False to explain what went wrong before.
+        call = next(
+            ln for ln in cell.splitlines()
+            if "upload_to_s3(" in ln and not ln.lstrip().startswith("#")
+        )
+        assert "verbose=True" in call, f"upload_to_s3 call not verbose: {call.strip()}"
+
+    def test_write_access_is_preflighted_before_any_conversion(self):
+        """These scenes take minutes each and _process deletes its /tmp files in
+        `finally`, so discovering AccessDenied at the upload throws away the whole
+        batch. head_bucket/fsspec both succeed read-only, so probe a real write."""
+        cell = _cell_containing("def _process(item):")
+        assert "can_write_to_bucket(" in cell
+        # Must run before the batch, not inside the worker.
+        assert cell.index("can_write_to_bucket(") < cell.index("def _process(item):")
 
 
 class TestEventStaysOutOfTheFilename:
@@ -161,7 +187,7 @@ class TestTempFilePaths:
                                                                  "strip_event_prefix")
 
     def test_temp_paths_are_namespaced_by_index(self):
-        cell = _cell_containing("initialize_s3_client(")
+        cell = _cell_containing("def _process(item):")
         assert "local_input = f\"/tmp/{item['idx']}_src_{filename}\"" in cell
         assert "local_cog = f\"/tmp/{item['idx']}_cog_{new_name}\"" in cell
 

@@ -1,4 +1,8 @@
-name: Release
+name: Release (ALWAYS releases from dev)
+
+# The run title restates it, so which branch was actually released is on the
+# record for every run rather than only in the Run-workflow dialog.
+run-name: Release (${{ inputs.bump }}) — from `dev` onto `main`${{ inputs.silent && ' · SILENT, no team alert' || '' }}
 
 # One-click release flow.
 #
@@ -6,6 +10,10 @@ name: Release
 # Admin-gated by the `release` environment, so only an admin can approve.
 #
 # What this does (after admin approval):
+#   0. Works out the version itself. You pick patch / minor / major; the
+#      workflow reads the highest existing vX.Y.Z tag and does the
+#      arithmetic. Nobody has to look up where the numbering got to, and a
+#      release can't skip or reuse a number by typo.
 #   1. Fast-forwards main from dev.
 #   2. Tags the new main HEAD as <version>.
 #   3. Pushes the tag — setuptools-scm uses it as the package version.
@@ -48,10 +56,25 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version tag (e.g. v1.0.0). Must match vX.Y.Z.'
+      # An input `description` is the ONLY text GitHub renders inside the
+      # Run-workflow dialog, so the "which branch does this release?" answer
+      # has to live here to be read at the moment it matters. The branch
+      # selector above it is a GitHub-supplied control that cannot be
+      # relabelled, hidden, or defaulted per workflow.
+      #
+      # The version NUMBER is derived, not typed. Nobody has to look up what
+      # the last tag was, and the arithmetic can't be fumbled into a version
+      # that skips or reuses a number — you state what KIND of change this is
+      # and the workflow computes the rest from the highest existing tag.
+      bump:
+        description: 'How big is this change? patch = fixes only · minor = new features, backwards-compatible · major = breaking. — ⚠️ This ALWAYS releases the tip of `dev` onto `main`. The "Use workflow from" branch selector above does NOT change what gets released; leave it on main.'
         required: true
-        type: string
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
       silent:
         description: 'Silent release — do NOT notify the team (no alert issue, nobody @mentioned).'
         type: boolean
@@ -64,13 +87,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Validate version format
-        run: |
-          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must match vX.Y.Z (got: ${{ inputs.version }})"
-            exit 1
-          fi
-
       # Pre-flight token check. Catches the #1 failure mode of this workflow:
       # the DISASTERS_RELEASE_PAT secret has expired (fine-grained PATs expire
       # on the date set at creation time). Without this step, the workflow
@@ -162,13 +178,73 @@ jobs:
           # NOT in the bypass list on this repo.
           token: ${{ secrets.DISASTERS_RELEASE_PAT }}
 
-      - name: Verify tag does not already exist
+      # Derive the version from the highest existing tag + the requested bump,
+      # so nobody has to look up where the numbering got to.
+      #
+      # The highest tag is taken by VERSION SORT over all vX.Y.Z tags, not by
+      # `git describe --tags --abbrev=0`. describe walks ancestry and returns
+      # the nearest tag reachable from HEAD, so a release cut before an older
+      # branch was merged could resolve to a tag several versions behind and
+      # silently renumber backwards. `sort -V` also orders v1.0.10 after
+      # v1.0.9, which a plain lexical sort gets wrong the moment a component
+      # reaches double digits.
+      - name: Resolve next version
+        id: ver
+        env:
+          BUMP: ${{ inputs.bump }}
         run: |
-          git fetch --tags
-          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag ${{ inputs.version }} already exists."
+          git fetch --tags --force
+
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
+
+          if [ -z "$LATEST" ]; then
+            # No release has ever been cut. Start the numbering rather than
+            # failing — but say so loudly, because this is also what a broken
+            # tag fetch looks like, and that would silently restart at v0.1.0
+            # on a repo that already has releases.
+            NEXT="v0.1.0"
+            echo "::warning title=No existing tags::No vX.Y.Z tag found. Starting at ${NEXT}. If this repo HAS releases, the tag fetch failed — stop and investigate rather than re-running."
+          else
+            if [[ ! "$LATEST" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "::error title=Unparseable tag::Highest tag '$LATEST' is not vX.Y.Z; cannot compute the next version."
+              exit 1
+            fi
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+              *)
+                # Unreachable from the UI (`type: choice`), but the API and
+                # `gh workflow run` will happily post anything. Defaulting to
+                # a patch bump here would ship a release under a version that
+                # misdescribes it, so refuse instead.
+                echo "::error title=Bad bump::Expected patch|minor|major (got: '$BUMP')"
+                exit 1
+                ;;
+            esac
+            NEXT="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          if git rev-parse "$NEXT" >/dev/null 2>&1; then
+            echo "::error title=Tag already exists::${NEXT} is already tagged. Two releases were probably cut at once."
             exit 1
           fi
+
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Version resolved::${LATEST:-(none)} + ${BUMP} → ${NEXT}"
+          {
+            echo "## Release \`${NEXT}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Previous tag | \`${LATEST:-(none)}\` |"
+            echo "| Bump | \`${BUMP}\` |"
+            echo "| New version | \`${NEXT}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configure git
         run: |
@@ -184,7 +260,7 @@ jobs:
           # If origin/dev is already merged in (e.g. a manual sync ran beforehand),
           # git prints "Already up to date" and skips the commit — the subsequent
           # push is then a no-op, and the workflow proceeds to tagging.
-          git merge --no-ff origin/dev -m "Release ${{ inputs.version }}"
+          git merge --no-ff origin/dev -m "Release ${{ steps.ver.outputs.version }}"
           if ! git push origin main; then
             echo "::error title=Push to main was rejected::See HOW TO FIX in the step log."
             cat >&2 <<'EOF'
@@ -217,8 +293,8 @@ jobs:
 
       - name: Tag and push
         run: |
-          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
+          git tag -a "${{ steps.ver.outputs.version }}" -m "Release ${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.version }}"
 
       # The `silent` checkbox is carried to notify-release.yaml through the
       # release BODY, because the body is the only thing that travels from
@@ -243,11 +319,11 @@ jobs:
             # Keep this marker byte-identical to the one notify-release.yaml
             # greps for — pinned by tests/integration/test_release_silent.py.
             NOTES=(--notes '<!-- notify: skip -->')
-            echo "::notice title=Silent release::No team alert will be opened for ${{ inputs.version }}. Announce it later by running the 'Notify — new release on main' workflow with dry_run unchecked."
+            echo "::notice title=Silent release::No team alert will be opened for ${{ steps.ver.outputs.version }}. Announce it later by running the 'Notify — new release on main' workflow with dry_run unchecked."
           fi
 
-          gh release create "${{ inputs.version }}" \
-            --title "${{ inputs.version }}" \
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --title "${{ steps.ver.outputs.version }}" \
             --target main \
             --generate-notes \
             "${NOTES[@]}"

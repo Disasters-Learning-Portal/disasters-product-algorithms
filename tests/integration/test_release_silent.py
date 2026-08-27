@@ -24,6 +24,7 @@ The run blocks are extracted from the YAML and executed for real (with a stub
 tests/integration/test_blackmarble_run_sh.py.
 """
 import os
+import re
 import shutil
 import subprocess
 
@@ -189,9 +190,16 @@ def test_manual_dispatch_ignores_the_marker(tmp_path):
 
 def create_release_script(version="v1.2.3"):
     script = step_run(RELEASE_YAML, "Create GitHub release with auto-generated notes")
-    # The step interpolates ${{ inputs.version }} directly into the run block;
+    # The step interpolates the resolved version straight into the run block;
     # the runner substitutes it before bash ever sees it, so we do the same.
-    return script.replace("${{ inputs.version }}", version)
+    # Substituting by pattern rather than by the exact expression keeps this
+    # working across renames — the version moved from `inputs.version` to
+    # `steps.ver.outputs.version` when the bump selector replaced the typed
+    # box, and a literal replace would have silently stopped matching and
+    # left bash a `${{ ... }}` it cannot expand.
+    substituted = re.sub(r"\$\{\{[^}]*\}\}", version, script)
+    assert "${{" not in substituted, f"unsubstituted expression left in: {substituted}"
+    return substituted
 
 
 @pytest.fixture

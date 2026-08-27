@@ -292,9 +292,48 @@ convert_to_cog(
 ) -> str                                    # Returns path to created COG
 ```
 
-The engine: subprocess `gdalwarp` (with `NUM_THREADS=ALL_CPUS`) + `rio cogeo create`.
+**Two backends, chosen by `metadata`:**
+
+| `metadata` | COG step | Why |
+|---|---|---|
+| `None` (default) | subprocess `rio cogeo create` | Unchanged, fast |
+| a dict | in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` | The CLI has no flag for arbitrary tags, and GDAL 3.10+ refuses a post-step `SetMetadata` on a finished COG |
+
+Both are preceded by subprocess `gdalwarp` (`NUM_THREADS=ALL_CPUS`) when a reprojection is needed.
+Every caller passing `metadata=` or `--metadata-json` takes the second path — both `simple_disaster`
+notebooks and every sensor CLI.
+
+**Creation options come from one builder, `build_creation_options(compression, compression_level)`,
+consumed by BOTH backends** so they cannot drift. It always includes:
+
+- **`NUM_THREADS=ALL_CPUS`** — `.clinerules.md` rule #8. Without it GDAL compresses single-threaded
+  (one core pinned per worker).
+- **`BIGTIFF=IF_SAFER`** — not cosmetic. rio-cogeo writes an **uncompressed** scratch raster and then
+  adds overviews to it, so a source under 4 GB uncompressed can cross the classic-TIFF 4 GB offset
+  ceiling *after* GDAL's `IF_NEEDED` default has already chosen classic. libtiff then thrashes in
+  `TIFFRewriteDirectory` and `GDALClose` never practically returns — with the finished COG already
+  on disk. A 1.2 Gpx SkySat scene (3.70 GB raw, 4.38 GB with overviews) went from >27 min stuck to
+  28.9 s. Invisible on small fixtures; pinned by `TestCreationOptionParity`. See
+  disasters-portal#405.
+
+Historically the in-process backend built its own profile and had **neither** of these. If you add a
+`--co` to one backend, add it to `build_creation_options` instead — the parity test captures the real
+`rio cogeo create` argv and diffs it against the builder.
+
 Default `dst_crs` is EPSG:3857 (see CLAUDE.md / .clinerules.md for the airflow ensemble bug).
 Accepts `/vsis3/`, `/vsicurl/`, etc. — useful when called from `main_processor` in streaming mode.
+
+**Sizing note:** the scratch raster is roughly `width × height × bands` **uncompressed**, plus ~33%
+for overviews, and lives next to the output (i.e. `/tmp` for most callers). Four `map_threaded`
+workers on gigapixel scenes can need tens of GB.
+
+#### `build_creation_options(compression, compression_level) -> dict`
+
+Single source of truth for the GDAL creation options used by both `convert_to_cog` backends —
+`NUM_THREADS`, `BIGTIFF`, and the per-codec `PREDICTOR` / `ZSTD_LEVEL` / `ZLEVEL`. The companion
+`COG_GDAL_CONFIG` dict (`GDAL_NUM_THREADS`, `GDAL_TIFF_INTERNAL_MASK`) is passed to
+`cog_translate(config=...)`; without it that call runs under a bare `rasterio.Env()` and compresses
+on one thread.
 
 #### `validate_cog(cog_path) -> Tuple[bool, dict]`
 
@@ -409,6 +448,30 @@ AWS S3 client management and file operations.
 #### `initialize_s3_client(bucket_name='nasa-disasters', verbose=True) -> Tuple[client, fs_read]`
 
 Initialize S3 client with automatic credential detection. Tries STS assume-role first (if `aws_credentials.py` exists), then falls back to default credentials.
+
+> **`aws_credentials.py` is gitignored and is in no checkout and on no fresh hub pod**, so the
+> fallback is the *normal* path, not an edge case — the module-level import fails, the assume-role
+> branch is skipped, and its `🔑 Attempting to authenticate…` line never prints. If you see only
+> `✅ S3 client initialized with default credentials`, the role was **never attempted**, not tried
+> and failed. On the Disasters hub those ambient credentials are the `disasters-prod` role.
+>
+> Neither this function nor `fsspec` construction proves you can **write** anywhere — a read-only
+> identity passes both. Use `can_write_to_bucket` before a long job. (An earlier version printed
+> `✅ Confirmed access to <bucket>` here; it only meant fsspec constructed, and was removed.)
+
+#### `can_write_to_bucket(s3_client, bucket, prefix='', verbose=True) -> Tuple[bool, Optional[str]]`
+
+Verify write access for real by round-tripping a tiny probe object, then deleting it. Returns
+`(ok, detail)` — `detail` is `None` on success, else the error string.
+
+Call it **before** a long conversion. `head_bucket` and fsspec both succeed for a read-only
+identity, so without this a permission problem surfaces only at the upload — after every file has
+been processed, and typically after the caller's `finally` has deleted the local outputs.
+
+The probe is written under `prefix`, not at the bucket root: grants on these buckets are commonly
+**per-prefix**, so writable at the root does not imply writable at `ProgramData/<Product>/Output/`.
+If the write succeeds but the cleanup delete fails, write access is still proven and the function
+returns `True` with a warning.
 
 #### `list_s3_files(s3_client, bucket, prefix, suffix='.tif') -> List[str]`
 

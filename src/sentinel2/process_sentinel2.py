@@ -24,6 +24,7 @@ from sentinel2.sentinel2_functions import (
     get_algorithm,
     generate_index,
     generate_composite,
+    generate_water_extent,
     merge_products,
     _build_output_filename,
 )
@@ -56,6 +57,7 @@ SENTINEL2_STAC_API = (
 
 # No data setting
 INDEX_NODATA = -9999
+WATER_NODATA = 0
 COMPOSITE_NODATA = False
 
 
@@ -63,11 +65,17 @@ COMPOSITE_NODATA = False
 # Sentinel-2 product categories
 # ---------------------------------------------------------------------
 
+WATER_EXTENT_PRODUCTS = {
+    "we",
+}
+
+
 INDEX_PRODUCTS = {
     "ndvi",
     "ndwi",
     "mndwi",
     "nbr",
+    "evi",
 }
 
 COMPOSITE_PRODUCTS = {
@@ -96,6 +104,8 @@ def main():
             "ndwi",
             "mndwi",
             "nbr",
+            "evi",
+            "we",
             "true_color",
             "natural_color",
             "color_infrared",
@@ -253,7 +263,11 @@ def main():
     # Determine product type
     # -----------------------------------------------------------------
 
-    if args.product in INDEX_PRODUCTS:
+    if args.product in WATER_EXTENT_PRODUCTS:
+        algorithm_type = "water_extent"
+        nodata = WATER_NODATA
+    
+    elif args.product in INDEX_PRODUCTS:
         algorithm_type = "index"
         nodata = INDEX_NODATA
 
@@ -361,7 +375,17 @@ def main():
         )
         print("=" * 70)
 
-        if algorithm_type == "index":
+        if algorithm_type == "water_extent":
+
+            outfile = generate_water_extent(
+                item=item,
+                algorithm=algorithm,
+                algorithm_name=args.product,
+                output_dir=args.output,
+                cloud_mask=args.cloud_mask,
+            )
+
+        elif algorithm_type == "index":
 
             outfile = generate_index(
                 item=item,
@@ -371,6 +395,7 @@ def main():
                 nodata=nodata,
                 cloud_mask=args.cloud_mask,
             )
+
 
         else:
 

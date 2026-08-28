@@ -15,16 +15,30 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import glob
+import time
+import requests
+import geopandas as gpd
+import shutil
+import zipfile
+
 import boto3
+from botocore import UNSIGNED
+from botocore.client import Config
 import numpy as np
 import rasterio as rio
 
+from scipy.signal import medfilt2d
+from shapely.geometry import box
 from pystac_client import Client
 from rio_cogeo.cogeo import cog_translate
 from rasterio.enums import Resampling
 from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject
 from rasterio.session import AWSSession
+
+import logging
+logging.getLogger("pyspectral.rsr_reader").setLevel(logging.ERROR)
 
 _aws_session = AWSSession(
     boto3.Session(),
@@ -106,6 +120,18 @@ def get_algorithm(
 
     return algorithm
 
+# Cached Rayleigh correction objects, keyed by platform name. Rayleigh()
+# initialization reads (and may fetch/verify) LUT and RSR data from disk,
+# so building one per platform once -- rather than once per band per item
+# -- avoids repeated redundant I/O across a run with many scenes.
+_rayleigh_instances = {}
+
+
+def _get_rayleigh_instance(platform_name):
+    if platform_name not in _rayleigh_instances:
+        from pyspectral.rayleigh import Rayleigh
+        _rayleigh_instances[platform_name] = Rayleigh(platform_name, "msi")
+    return _rayleigh_instances[platform_name]
 
 # ---------------------------------------------------------------------
 # STAC
@@ -588,6 +614,1452 @@ def get_cloud_mask(item, out_shape, cloud_classes=(3, 8, 9, 10)):
 
     return np.isin(scl, cloud_classes)
 
+# ---------------------------------------------------------------------
+# Water Extent Reference Data
+# ---------------------------------------------------------------------
+
+def _match_raster_to_reference(
+    source_path,
+    reference_profile,
+    output_path,
+    dst_nodata,
+):
+    """
+    Reproject and resample a raster so that it exactly matches
+    the reference raster's CRS, transform, width, and height.
+
+    This replaces the old workflow's match_geotiff() function.
+    """
+
+    with rio.open(source_path) as src:
+
+        profile = reference_profile.copy()
+
+        profile.update(
+            {
+                "driver": "GTiff",
+                "count": 1,
+                "dtype": "uint16",
+                "nodata": dst_nodata,
+                "width": reference_profile["width"],
+                "height": reference_profile["height"],
+                "crs": reference_profile["crs"],
+                "transform": reference_profile["transform"],
+                "compress": "ZSTD",
+            }
+        )
+
+        with rio.open(output_path, "w", **profile) as dst:
+
+            reproject(
+                source=rio.band(src, 1),
+                destination=rio.band(dst, 1),
+                src_transform=src.transform,
+                src_crs=src.crs,
+                src_nodata=src.nodata,
+                dst_transform=reference_profile["transform"],
+                dst_crs=reference_profile["crs"],
+                dst_nodata=dst_nodata,
+                resampling=Resampling.nearest,
+            )
+
+    return output_path
+
+
+
+def _download_cdl_for_water_extent(
+    nir_profile,
+    year,
+    outname,
+    reference_dir,
+):
+    """
+    Download the USDA NASS CDL, extract only the portion needed for
+    the Sentinel-2 scene, and resample it to the B08 grid.
+
+    All CDL intermediate files are temporary and are removed after
+    the requested Sentinel-2-matched CDL is created.
+    """
+
+    from rasterio.windows import from_bounds
+    from rasterio.warp import transform_bounds
+
+    # ------------------------------------------------------------
+    # CDL year
+    # ------------------------------------------------------------
+
+    year = min(int(year), 2024)
+
+    if year < 2008:
+        raise ValueError(
+            f"CDL year {year} is not supported."
+        )
+
+    os.makedirs(
+        reference_dir,
+        exist_ok=True,
+    )
+
+    # ------------------------------------------------------------
+    # Temporary paths
+    #
+    # These are NOT intended to remain after processing.
+    # ------------------------------------------------------------
+
+    zip_path = os.path.join(
+        reference_dir,
+        f"_CDL_{year}_30m_download.zip",
+    )
+
+    national_cdl_path = os.path.join(
+        reference_dir,
+        f"_CDL_{year}_30m.tif",
+    )
+
+    subset_path = os.path.join(
+        reference_dir,
+        f"_CDL_{year}_subset.tif",
+    )
+
+    try:
+
+        # --------------------------------------------------------
+        # Download national CDL
+        # --------------------------------------------------------
+
+        if not os.path.exists(zip_path):
+
+            print()
+            print(
+                f"Downloading national {year} 30-m CDL..."
+            )
+            print(
+                "This is approximately 1.6 GB for the 2024 CDL."
+            )
+
+            cdl_url = (
+                "https://www.nass.usda.gov/"
+                "Research_and_Science/Cropland/Release/datasets/"
+                f"{year}_30m_cdls.zip"
+            )
+
+            print(
+                f"CDL URL: {cdl_url}"
+            )
+
+            try:
+
+                with requests.get(
+                    cdl_url,
+                    stream=True,
+                    timeout=(30, 1800),
+                ) as response:
+
+                    response.raise_for_status()
+
+                    with open(
+                        zip_path,
+                        "wb",
+                    ) as f:
+
+                        for chunk in response.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+
+                            if chunk:
+                                f.write(chunk)
+
+                print(
+                    "CDL download complete."
+                )
+
+            except requests.exceptions.RequestException as e:
+
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+
+                raise RuntimeError(
+                    f"Failed to download the {year} CDL: {e}"
+                ) from e
+
+        # --------------------------------------------------------
+        # Extract national CDL TIFF
+        # --------------------------------------------------------
+
+        print(
+            "Extracting CDL TIFF..."
+        )
+
+        with zipfile.ZipFile(
+            zip_path,
+            "r",
+        ) as z:
+
+            tif_members = [
+                name
+                for name in z.namelist()
+                if name.lower().endswith(".tif")
+            ]
+
+            if len(tif_members) == 0:
+                raise RuntimeError(
+                    f"No TIFF found inside {zip_path}"
+                )
+
+            tif_member = tif_members[0]
+
+            with z.open(tif_member) as src_file:
+
+                with open(
+                    national_cdl_path,
+                    "wb",
+                ) as dst_file:
+
+                    shutil.copyfileobj(
+                        src_file,
+                        dst_file,
+                    )
+
+        print(
+            "CDL TIFF extracted."
+        )
+
+        # --------------------------------------------------------
+        # Determine Sentinel-2 bounds
+        # --------------------------------------------------------
+
+        src_crs = nir_profile["crs"]
+        transform = nir_profile["transform"]
+        width = nir_profile["width"]
+        height = nir_profile["height"]
+
+        left = transform.c
+        top = transform.f
+
+        right = (
+            left
+            + width * transform.a
+        )
+
+        bottom = (
+            top
+            + height * transform.e
+        )
+
+        # --------------------------------------------------------
+        # Transform scene bounds to CDL CRS
+        # --------------------------------------------------------
+
+        cdl_crs = "EPSG:5070"
+
+        cdl_left, cdl_bottom, cdl_right, cdl_top = (
+            transform_bounds(
+                src_crs,
+                cdl_crs,
+                left,
+                bottom,
+                right,
+                top,
+            )
+        )
+
+        # --------------------------------------------------------
+        # Extract only required CDL subset
+        # --------------------------------------------------------
+
+        print(
+            "Extracting CDL subset for Sentinel-2 scene..."
+        )
+
+        with rio.open(
+            national_cdl_path
+        ) as src:
+
+            window = from_bounds(
+                cdl_left,
+                cdl_bottom,
+                cdl_right,
+                cdl_top,
+                transform=src.transform,
+            )
+
+            full_window = rio.windows.Window(
+                0,
+                0,
+                src.width,
+                src.height,
+            )
+
+            window = window.intersection(
+                full_window
+            )
+
+            if (
+                window.width <= 0
+                or window.height <= 0
+            ):
+                raise RuntimeError(
+                    "Sentinel-2 scene does not overlap "
+                    "the national CDL."
+                )
+
+            cdl_array = src.read(
+                1,
+                window=window,
+            )
+
+            subset_transform = src.window_transform(
+                window
+            )
+
+            subset_profile = src.profile.copy()
+
+            subset_profile.update(
+                {
+                    "driver": "GTiff",
+                    "height": cdl_array.shape[0],
+                    "width": cdl_array.shape[1],
+                    "count": 1,
+                    "transform": subset_transform,
+                    "crs": src.crs,
+                    "compress": "ZSTD",
+                }
+            )
+
+            with rio.open(
+                subset_path,
+                "w",
+                **subset_profile,
+            ) as dst:
+
+                dst.write(
+                    cdl_array,
+                    1,
+                )
+
+        # --------------------------------------------------------
+        # Match subset to Sentinel-2 B08
+        # --------------------------------------------------------
+
+        print(
+            "Resampling CDL to match Sentinel-2 B08..."
+        )
+
+        _match_raster_to_reference(
+            subset_path,
+            nir_profile,
+            outname,
+            dst_nodata=0,
+        )
+
+        print(
+            f"CDL reference created: {outname}"
+        )
+
+        return outname
+
+    finally:
+
+        # --------------------------------------------------------
+        # Remove ALL temporary CDL files
+        # --------------------------------------------------------
+
+        for temporary_path in (
+            zip_path,
+            national_cdl_path,
+            subset_path,
+        ):
+
+            if os.path.exists(temporary_path):
+
+                try:
+                    os.remove(
+                        temporary_path
+                    )
+                except OSError:
+                    pass
+
+
+def _download_worldcover_for_water_extent(
+    nir_profile,
+    year,
+    output_path,
+):
+    """
+    Download ESA WorldCover tiles intersecting the Sentinel-2 scene
+    and match the result to the Sentinel-2 B08 grid.
+
+    This follows the legacy WorldCover workflow.
+    """
+
+    if year not in ("2020", "2021"):
+        year = "2021"
+
+    # -------------------------------------------------------------
+    # WorldCover tile grid
+    # -------------------------------------------------------------
+
+    grid_url = (
+        "https://esa-worldcover.s3.eu-central-1.amazonaws.com/"
+        "v100/2020/esa_worldcover_2020_grid.geojson"
+    )
+
+    print("Loading WorldCover tile grid...")
+
+    grid = gpd.read_file(grid_url)
+
+    # -------------------------------------------------------------
+    # Get Sentinel-2 image bounds in WGS84
+    # -------------------------------------------------------------
+
+    src_crs = nir_profile["crs"]
+    transform = nir_profile["transform"]
+    width = nir_profile["width"]
+    height = nir_profile["height"]
+
+    left = transform.c
+    top = transform.f
+    right = left + width * transform.a
+    bottom = top + height * transform.e
+
+    from rasterio.warp import transform_bounds
+
+    xmin, ymin, xmax, ymax = transform_bounds(
+        src_crs,
+        "EPSG:4326",
+        left,
+        bottom,
+        right,
+        top,
+    )
+
+    geom = box(
+        xmin,
+        ymin,
+        xmax,
+        ymax,
+    )
+
+    tiles = grid[
+        grid.intersects(geom)
+    ]
+
+    if len(tiles) == 0:
+        raise RuntimeError(
+            "No WorldCover tiles intersect the Sentinel-2 scene."
+        )
+
+    print(
+        f"Found {len(tiles)} WorldCover tile(s)."
+    )
+
+    versions = {
+        "2020": "v100",
+        "2021": "v200",
+    }
+
+    version = versions[year]
+
+    # -------------------------------------------------------------
+    # Download tiles
+    # -------------------------------------------------------------
+
+    s3 = boto3.client(
+        "s3",
+        config=Config(
+            signature_version=UNSIGNED
+        ),
+    )
+
+    downloaded_tiles = []
+
+    bucket = "esa-worldcover"
+    bucket_dir = f"{version}/{year}/map/"
+
+    worldcover_dir = os.path.dirname(
+        output_path
+    )
+
+    os.makedirs(
+        worldcover_dir,
+        exist_ok=True,
+    )
+
+    for tile in tiles.ll_tile:
+
+        filename = (
+            f"ESA_WorldCover_10m_{year}_"
+            f"{version}_{tile}_Map.tif"
+        )
+
+        tile_path = os.path.join(
+            worldcover_dir,
+            filename,
+        )
+
+        if not os.path.exists(tile_path):
+
+            print(
+                f"Downloading WorldCover tile: {tile}"
+            )
+
+            s3.download_file(
+                bucket,
+                bucket_dir + filename,
+                tile_path,
+            )
+
+        else:
+
+            print(
+                f"WorldCover tile already exists: {tile}"
+            )
+
+        downloaded_tiles.append(
+            tile_path
+        )
+
+    # -------------------------------------------------------------
+    # Merge WorldCover tiles if necessary
+    # -------------------------------------------------------------
+
+    if len(downloaded_tiles) == 1:
+
+        merged_worldcover = downloaded_tiles[0]
+
+    else:
+
+        merged_worldcover = output_path.replace(
+            ".tif",
+            "_merged_raw.tif",
+        )
+
+        print(
+            "Merging WorldCover tiles..."
+        )
+
+        arrays, merge_transform = merge(
+            downloaded_tiles,
+        )
+
+        with rio.open(
+            downloaded_tiles[0]
+        ) as src:
+
+            profile = src.profile.copy()
+
+        profile.update(
+            {
+                "driver": "GTiff",
+                "height": arrays.shape[1],
+                "width": arrays.shape[2],
+                "transform": merge_transform,
+                "count": 1,
+                "dtype": arrays.dtype,
+            }
+        )
+
+        with rio.open(
+            merged_worldcover,
+            "w",
+            **profile,
+        ) as dst:
+
+            dst.write(
+                arrays[0],
+                1,
+            )
+
+    # -------------------------------------------------------------
+    # Match WorldCover to B08
+    # -------------------------------------------------------------
+
+    print(
+        "Matching WorldCover to Sentinel-2 B08 grid..."
+    )
+
+    _match_raster_to_reference(
+        merged_worldcover,
+        nir_profile,
+        output_path,
+        dst_nodata=0,
+    )
+
+    # -------------------------------------------------------------
+    # Cleanup downloaded tiles
+    # -------------------------------------------------------------
+
+    for tile_path in downloaded_tiles:
+
+        if os.path.exists(tile_path):
+            os.remove(tile_path)
+
+    if (
+        merged_worldcover != downloaded_tiles[0]
+        and os.path.exists(merged_worldcover)
+    ):
+        os.remove(merged_worldcover)
+
+    print(
+        f"WorldCover created: {output_path}"
+    )
+
+    return output_path
+
+
+def _reclass_cdl_array(
+    cdl_array,
+    nir_nodata_mask,
+):
+    """
+    Reclassify CDL using the exact classes from the legacy
+    water-extent workflow.
+
+    Classes:
+        1 = cropland/grassland
+        2 = developed
+        3 = other vegetation
+        4 = permanent water
+        999 = no data
+    """
+
+    codes_dict = {
+        1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
+        6: 1, 10: 1, 11: 1, 12: 1,
+        13: 1, 14: 1, 21: 1, 22: 1,
+        23: 1, 24: 1, 25: 1, 26: 1,
+        27: 1, 28: 1, 29: 1, 30: 1,
+        31: 1, 32: 1, 33: 1, 34: 1,
+        35: 1, 36: 1, 37: 1, 38: 1,
+        39: 1, 41: 1, 42: 1, 43: 1,
+        44: 1, 45: 1, 46: 1, 47: 1,
+        48: 1, 49: 1, 50: 1, 51: 1,
+        52: 1, 53: 1, 54: 1, 55: 1,
+        56: 1, 57: 1, 58: 1, 59: 1,
+        60: 1, 61: 1, 66: 1, 67: 1,
+        68: 1, 69: 1, 70: 1, 71: 1,
+        72: 1, 74: 1, 75: 1, 76: 1,
+        77: 1, 204: 1, 205: 1,
+        206: 1, 207: 1, 208: 1,
+        209: 1, 210: 1, 211: 1,
+        212: 1, 213: 1, 214: 1,
+        215: 1, 216: 1, 217: 1,
+        218: 1, 219: 1, 220: 1,
+        221: 1, 222: 1, 223: 1,
+        224: 1, 225: 1, 226: 1,
+        227: 1, 228: 1, 229: 1,
+        230: 1, 231: 1, 232: 1,
+        233: 1, 234: 1, 235: 1,
+        236: 1, 237: 1, 238: 1,
+        239: 1, 240: 1, 241: 1,
+        242: 1, 243: 1, 244: 1,
+        245: 1, 246: 1, 247: 1,
+        248: 1, 249: 1, 250: 1,
+        254: 1, 176: 1,
+
+        121: 2, 122: 2, 123: 2, 124: 2,
+
+        131: 3, 141: 3, 142: 3,
+        143: 3, 152: 3, 190: 3,
+        195: 3,
+
+        111: 4, 112: 4, 92: 4,
+
+        0: 999,
+        81: 999,
+        88: 999,
+    }
+
+    translated = np.full(
+        cdl_array.shape,
+        999,
+        dtype=np.uint16,
+    )
+
+    for source_code, target_code in codes_dict.items():
+
+        translated[
+            cdl_array == source_code
+        ] = target_code
+
+    translated[
+        nir_nodata_mask
+    ] = 999
+
+    return translated
+
+
+def _reclass_worldcover_array(
+    worldcover_array,
+    nir_nodata_mask,
+):
+    """
+    Reclassify WorldCover using the exact classes from the legacy
+    water-extent workflow.
+
+    Classes:
+        1 = cropland/grassland
+        2 = developed
+        3 = other vegetation
+        4 = permanent water
+        999 = no data
+    """
+
+    codes_dict = {
+        0: 999,
+        10: 3,
+        20: 3,
+        30: 1,
+        40: 1,
+        50: 2,
+        60: 3,
+        70: 999,
+        80: 4,
+        90: 3,
+        95: 3,
+        100: 3,
+    }
+
+    translated = np.full(
+        worldcover_array.shape,
+        999,
+        dtype=np.uint16,
+    )
+
+    for source_code, target_code in codes_dict.items():
+
+        translated[
+            worldcover_array == source_code
+        ] = target_code
+
+    translated[
+        nir_nodata_mask
+    ] = 999
+
+    return translated
+
+# ---------------------------------------------------------------------
+# Water Extent
+# ---------------------------------------------------------------------
+
+def generate_water_extent(
+    item,
+    algorithm,
+    algorithm_name,
+    output_dir="./s3_temp",
+    cloud_mask=False,
+):
+    """
+    Generate the Sentinel-2 Water Extent product using the same
+    methodology as the legacy gen_water_extent() workflow.
+
+    Algorithm:
+
+        1. Read Sentinel-2 B08 at native resolution.
+        2. Obtain CDL or WorldCover reference data.
+        3. Reclassify reference data:
+               1 = cropland/grassland
+               2 = developed
+               3 = vegetation
+               4 = permanent water
+             999 = no data
+        4. Identify cloud-free permanent-water pixels.
+        5. Calculate:
+               threshold = mean(water NIR)
+                         + nstd * std(water NIR)
+        6. Classify pixels below threshold as water.
+        7. Apply 5x5 median filtering.
+        8. Classify:
+               0 = no data
+               1 = permanent water
+               1 = flooded developed
+               1 = flooded vegetation
+               1 = flooded crop/grassland
+               0 = cloud/cloud shadow
+    """
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True,
+    )
+
+    # -------------------------------------------------------------
+    # Get Sentinel-2 B08
+    # -------------------------------------------------------------
+
+    if "nir" not in item.assets:
+        raise KeyError(
+            f"Asset 'nir' not found in STAC item "
+            f"'{item.id}'."
+        )
+
+    nir_asset = item.assets["nir"]
+
+    href, scale, offset, gsd = get_asset_metadata(
+        nir_asset
+    )
+
+    print(
+        f"NIR asset: {href}"
+    )
+
+    print(
+        "NIR extra_fields:"
+    )
+
+    if hasattr(nir_asset, "extra_fields"):
+        print(
+            nir_asset.extra_fields
+        )
+
+    print(
+        "raster:bands:"
+    )
+
+    if hasattr(nir_asset, "extra_fields"):
+        print(
+            nir_asset.extra_fields.get(
+                "raster:bands"
+            )
+        )
+
+    # -------------------------------------------------------------
+    # IMPORTANT:
+    #
+    # The legacy algorithm uses raw B08 values. Therefore:
+    #
+    #     apply_scale=False
+    #
+    # Do NOT convert the B08 values to reflectance here.
+    # -------------------------------------------------------------
+
+    nir_array, nir_profile = read_algorithm_band(
+        nir_asset,
+        target_gsd=algorithm.get(
+            "gsd",
+            10,
+        ),
+        resample=algorithm.get(
+            "resample",
+            False,
+        ),
+        apply_scale=False,
+    )
+
+    nir_array = np.asarray(
+        nir_array
+    )
+
+    print()
+    print("RAW NIR statistics:")
+    print(
+        f"  dtype: {nir_array.dtype}"
+    )
+    print(
+        f"  min: {np.nanmin(nir_array)}"
+    )
+    print(
+        f"  max: {np.nanmax(nir_array)}"
+    )
+    print(
+        f"  mean: {np.nanmean(nir_array)}"
+    )
+    print(
+        f"  median: {np.nanmedian(nir_array)}"
+    )
+
+    # -------------------------------------------------------------
+    # NIR no-data
+    #
+    # Sentinel-2 B08 has nodata = 0.
+    # -------------------------------------------------------------
+
+    nir_nodata = 0
+
+    nir_nd_mask = (
+        nir_array == nir_nodata
+    )
+
+    print(
+        f"  nodata pixels: "
+        f"{np.count_nonzero(nir_nd_mask)}"
+    )
+
+    # -------------------------------------------------------------
+    # Determine year
+    # -------------------------------------------------------------
+
+    year = item.datetime.year
+
+    # -------------------------------------------------------------
+    # Determine geographic bounds
+    # -------------------------------------------------------------
+
+    from rasterio.warp import transform_bounds
+
+    bounds = nir_profile
+
+    left = bounds["transform"].c
+    top = bounds["transform"].f
+
+    right = (
+        left
+        + bounds["width"]
+        * bounds["transform"].a
+    )
+
+    bottom = (
+        top
+        + bounds["height"]
+        * bounds["transform"].e
+    )
+
+    xmin_wgs84, ymin_wgs84, xmax_wgs84, ymax_wgs84 = (
+        transform_bounds(
+            bounds["crs"],
+            "EPSG:4326",
+            left,
+            bottom,
+            right,
+            top,
+        )
+    )
+
+    print()
+    print("Scene bounds:")
+    print(
+        f"  WGS84: "
+        f"{xmin_wgs84}, "
+        f"{ymin_wgs84}, "
+        f"{xmax_wgs84}, "
+        f"{ymax_wgs84}"
+    )
+
+    # -------------------------------------------------------------
+    # U.S. boundaries from legacy workflow
+    # -------------------------------------------------------------
+
+    xmax_us = -66.9513812
+    xmin_us = -124.7844079
+    ymax_us = 49.3457868
+    ymin_us = 24.7433195
+
+    inside_us = (
+        (xmax_wgs84 < xmax_us)
+        and
+        (xmin_wgs84 > xmin_us)
+        and
+        (ymax_wgs84 < ymax_us)
+        and
+        (ymin_wgs84 > ymin_us)
+    )
+
+    # -------------------------------------------------------------
+    # Reference data directory
+    # -------------------------------------------------------------
+
+    reference_dir = os.path.join(
+        output_dir,
+        "water_extent_reference",
+    )
+
+    os.makedirs(
+        reference_dir,
+        exist_ok=True,
+    )
+
+    # -------------------------------------------------------------
+    # Get reference land-cover data
+    # -------------------------------------------------------------
+
+    if inside_us:
+
+        cdl_year = min(
+            year,
+            2024,
+        )
+    
+        # Temporary CDL matched to the Sentinel-2 B08 grid.
+        # It is deleted immediately after reading.
+        cdl_path = os.path.join(
+            reference_dir,
+            f"_CDL_{cdl_year}_matched.tif",
+        )
+    
+        _download_cdl_for_water_extent(
+            nir_profile,
+            cdl_year,
+            cdl_path,
+            reference_dir,
+        )
+    
+        print(
+            f"Using CDL reference: {cdl_path}"
+        )
+    
+        with rio.open(
+            cdl_path
+        ) as ref:
+    
+            ref_array = ref.read(1)
+    
+        ref_simple_array = _reclass_cdl_array(
+            ref_array,
+            nir_nd_mask,
+        )
+    
+        # The matched CDL is no longer needed after it has
+        # been converted to the simplified classification.
+        if os.path.exists(cdl_path):
+    
+            os.remove(cdl_path)
+
+    else:
+
+        wc_year = 2021
+
+        wc_path = os.path.join(
+            reference_dir,
+            f"WorldCover_{wc_year}_"
+            f"{_get_sat_level_tile(item)[2]}.tif",
+        )
+
+        if not os.path.exists(wc_path):
+
+            wc_raw_path = os.path.join(
+                reference_dir,
+                f"WorldCover_{wc_year}_"
+                f"{_get_sat_level_tile(item)[2]}_raw.tif",
+            )
+
+            _download_worldcover_for_water_extent(
+                nir_profile,
+                str(wc_year),
+                wc_raw_path,
+            )
+
+            if (
+                os.path.exists(wc_raw_path)
+                and wc_raw_path != wc_path
+            ):
+                os.rename(
+                    wc_raw_path,
+                    wc_path,
+                )
+
+        print(
+            f"Using WorldCover reference: {wc_path}"
+        )
+
+        with rio.open(
+            wc_path
+        ) as ref:
+
+            ref_array = ref.read(1)
+
+        ref_simple_array = _reclass_worldcover_array(
+            ref_array,
+            nir_nd_mask,
+        )
+
+    # -------------------------------------------------------------
+    # Cloud mask
+    # -------------------------------------------------------------
+
+    if cloud_mask:
+
+        print(
+            "Applying cloud mask..."
+        )
+
+        cloud_mask_array = get_cloud_mask(
+            item,
+            out_shape=nir_array.shape,
+        )
+
+    else:
+
+        print(
+            "Cloud mask not requested."
+        )
+
+        cloud_mask_array = np.zeros(
+            nir_array.shape,
+            dtype=bool,
+        )
+
+    # -------------------------------------------------------------
+    # Identify permanent-water pixels
+    #
+    # Exact equivalent of:
+    #
+    # water = np.where(
+    #     (ref_simple_array == 4)
+    #     & (cloudMask == 0)
+    #     & (nir_array != 0)
+    # )
+    # -------------------------------------------------------------
+
+    permanent_water_mask = (
+        (ref_simple_array == 4)
+        &
+        (~cloud_mask_array)
+        &
+        (~nir_nd_mask)
+    )
+
+    water_count = np.count_nonzero(
+        permanent_water_mask
+    )
+
+    print()
+    print(
+        f"Permanent-water reference pixels: "
+        f"{water_count:,}"
+    )
+
+    if water_count == 0:
+
+        raise RuntimeError(
+            "No valid permanent-water pixels were found "
+            "after applying the land-cover and cloud masks. "
+            "Cannot calculate the NIR water threshold."
+        )
+
+    # -------------------------------------------------------------
+    # Calculate dynamic NIR threshold
+    #
+    # IMPORTANT:
+    #
+    # This is the actual logic from the old workflow.
+    # -------------------------------------------------------------
+
+    water_nir = nir_array[
+        permanent_water_mask
+    ]
+
+    mean = np.nanmean(
+        water_nir
+    )
+
+    std = np.nanstd(
+        water_nir
+    )
+
+    # -------------------------------------------------------------
+    # nstd comes from the algorithm configuration.
+    #
+    # If it isn't supplied, use 1.0.
+    # -------------------------------------------------------------
+
+    nstd = algorithm.get(
+        "nstd",
+        1.0,
+    )
+
+    nir_thresh = (
+        mean
+        + (
+            nstd
+            * std
+        )
+    )
+
+    print()
+    print("Water NIR statistics:")
+    print(
+        f"  mean: {mean}"
+    )
+    print(
+        f"  std: {std}"
+    )
+    print(
+        f"  nstd: {nstd}"
+    )
+    print(
+        f"  NIR threshold: {nir_thresh}"
+    )
+
+    # -------------------------------------------------------------
+    # Create binary water extent
+    #
+    # Exact equivalent of:
+    #
+    # water_extent = np.zeros(nir_array.shape)
+    # water_extent[nir_array <= nir_thresh] = 1
+    # -------------------------------------------------------------
+
+    water_extent = np.zeros(
+        nir_array.shape,
+        dtype=np.uint8,
+    )
+
+    water_extent[
+        nir_array <= nir_thresh
+    ] = 1
+
+    # -------------------------------------------------------------
+    # Median filter
+    #
+    # Exact legacy operation:
+    #
+    # medfilt2d(water_extent, kernel_size=5)
+    # -------------------------------------------------------------
+
+    print(
+        "Applying 5x5 median filter..."
+    )
+
+    water_extent = medfilt2d(
+        water_extent,
+        kernel_size=5,
+    ).astype(
+        np.uint8
+    )
+
+    # -------------------------------------------------------------
+    # Final binary water mask
+    #
+    # 0 = not water
+    # 1 = water
+    # -------------------------------------------------------------
+    
+    classified_flood = np.zeros(
+        water_extent.shape,
+        dtype=np.uint8,
+    )
+    
+    # Permanent water
+    classified_flood[
+        permanent_water_mask
+    ] = 1
+    
+    # Flooded developed
+    flood_dev = (
+        (ref_simple_array == 2)
+        &
+        (water_extent == 1)
+    )
+    
+    classified_flood[
+        flood_dev
+    ] = 1
+    
+    # Flooded vegetation
+    flood_veg = (
+        (ref_simple_array == 3)
+        &
+        (water_extent == 1)
+    )
+    
+    classified_flood[
+        flood_veg
+    ] = 1
+    
+    # Flooded crop/grassland
+    flood_crop = (
+        (ref_simple_array == 1)
+        &
+        (water_extent == 1)
+    )
+    
+    classified_flood[
+        flood_crop
+    ] = 1
+    
+    # Clouds are NOT classified as water
+    if cloud_mask:
+        classified_flood[
+            cloud_mask_array
+        ] = 0
+    
+    # NIR no-data is NOT classified as water
+    classified_flood[
+        nir_nd_mask
+    ] = 0
+
+    # -------------------------------------------------------------
+    # Print class statistics
+    # -------------------------------------------------------------
+
+    print()
+    print("Water extent classes:")
+
+    for value, label in [
+        (0, "Not Water"),
+        (1, "Water"),
+    ]:
+
+        count = np.count_nonzero(
+            classified_flood == value
+        )
+
+        print(
+            f"  {value}: {label}: "
+            f"{count:,} pixels"
+        )
+
+    # -------------------------------------------------------------
+    # Output filename
+    # -------------------------------------------------------------
+
+    output_name = _build_output_filename(
+        item,
+        algorithm_name,
+        masked=cloud_mask,
+    )
+
+    outfile = os.path.join(
+        output_dir,
+        output_name,
+    )
+
+    # -------------------------------------------------------------
+    # Write GeoTIFF
+    #
+    # IMPORTANT:
+    # The legacy workflow uses 0 as nodata.
+    # -------------------------------------------------------------
+
+    profile = nir_profile.copy()
+
+    profile.update(
+        driver="GTiff",
+        count=1,
+        dtype="uint8",
+        nodata=0,
+    )
+
+    print()
+    print(
+        f"Writing Water Extent GeoTIFF: "
+        f"{outfile}"
+    )
+
+    with rio.open(
+        outfile,
+        "w",
+        **profile,
+    ) as dst:
+
+        dst.write(
+            classified_flood,
+            1,
+        )
+
+    print(
+        f"Generation completed: {outfile}"
+    )
+
+    return outfile
+
+# ---------------------------------------------------------------------
+# Rayleigh correction
+# ---------------------------------------------------------------------
+
+# Maps Earth Search's common asset names to raw Sentinel-2 band codes.
+# pyspectral's Rayleigh model only defines correction coefficients for
+# B01-B07, matching the band restriction in the legacy SAFE-based
+# pipeline's get_rayleigh_correction.
+_ASSET_TO_BAND_CODE = {
+    "coastal": "B01",
+    "blue": "B02",
+    "green": "B03",
+    "red": "B04",
+    "rededge1": "B05",
+    "rededge2": "B06",
+    "rededge3": "B07",
+    "nir": "B08",
+    "nir08": "B8A",
+    "nir09": "B09",
+    "swir16": "B11",
+    "swir22": "B12",
+}
+
+_RAYLEIGH_CORRECTABLE_BANDS = {"B01", "B02", "B03", "B04", "B05", "B06", "B07"}
+
+
+def get_rayleigh_correction(item, asset_name):
+    """
+    Compute a Rayleigh-scattering reflectance correction for one
+    Sentinel-2 band, mirroring the legacy SAFE-based pipeline's
+    get_rayleigh_correction, but sourced from STAC item properties
+    instead of SAFE XML metadata.
+
+    Only bands B01-B07 are corrected (pyspectral has no coefficients
+    for the others) -- for any other band this returns 0.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 STAC item.
+
+    asset_name : str
+        Common asset name as used in the algorithm catalog (e.g.
+        "red", "nir"). Mapped to a raw band code via
+        _ASSET_TO_BAND_CODE.
+
+    Returns
+    -------
+    float
+        Reflectance correction (0-1 scale) to subtract from the band.
+        Returns 0 if the band is not correctable, geometry is
+        unavailable, or pyspectral is not installed.
+    """
+
+    try:
+        from pyspectral.rayleigh import Rayleigh  # noqa: F401 -- import check only
+    except ImportError:
+        print(
+            "\t* Rayleigh correction error. pyspectral package must be "
+            "installed (>=0.12.5)."
+        )
+        return 0
+
+    band_code = _ASSET_TO_BAND_CODE.get(asset_name)
+
+    if band_code not in _RAYLEIGH_CORRECTABLE_BANDS:
+        return 0
+
+    props = item.properties
+
+    sun_elevation = props.get("view:sun_elevation")
+    sun_azimuth = props.get("view:sun_azimuth")
+
+    if sun_elevation is None or sun_azimuth is None:
+        print(
+            f"\t* Rayleigh correction skipped for {band_code}: STAC item "
+            f"'{item.id}' has no view:sun_elevation/view:sun_azimuth."
+        )
+        return 0
+
+    sun_zenith = 90.0 - sun_elevation
+
+    sat_zenith = props.get("view:incidence_angle")
+    sat_azimuth = props.get("view:azimuth")
+
+    if sat_zenith is None or sat_azimuth is None:
+        sat_zenith = 0.0
+        azidiff = sun_azimuth
+    else:
+        azidiff = abs(sun_azimuth - sat_azimuth)
+
+    platform = props.get("platform", "sentinel-2a")
+    platform_name = "Sentinel-2A" if platform.endswith("a") else "Sentinel-2B"
+
+    print(f"\t* Applying Rayleigh correction to: {band_code}")
+
+    s2 = _get_rayleigh_instance(platform_name)   # <-- changed: cached, not rebuilt
+
+    ray = 0.01 * s2.get_reflectance(
+        np.asarray(sun_zenith),
+        np.asarray(sat_zenith),
+        np.asarray(azidiff),
+        band_code,
+    )
+
+    return float(ray)
+
 
 # ---------------------------------------------------------------------
 # Index processing
@@ -670,7 +2142,7 @@ def generate_index(
     algorithm,
     algorithm_name,
     output_dir="./s3_temp",
-    nodata=999,
+    nodata=-9999,
     cloud_mask=False,
 ):
     """
@@ -715,6 +2187,13 @@ def generate_index(
             "Normalized-difference indices require exactly two assets."
         )
 
+    # Rayleigh scattering correction applies automatically for L1C
+    # (Top-Of-Atmosphere) products, since they have no atmospheric
+    # correction applied. L2A already has Rayleigh correction baked in
+    # via Sen2Cor, so no additional correction is applied there.
+    _, level, _ = _get_sat_level_tile(item)
+    apply_rayleigh = level == "MSIL1C"
+
     bands = []
 
     for band_name in algorithm_assets:
@@ -731,6 +2210,11 @@ def generate_index(
             resample=algorithm.get("resample", False),
             apply_scale=True,
         )
+
+        if apply_rayleigh:
+            correction = get_rayleigh_correction(item, band_name)
+            if correction:
+                band = band - correction
 
         bands.append(band)
 
@@ -916,6 +2400,13 @@ def generate_composite(
 
     algorithm_assets = algorithm["assets"]
 
+    # Rayleigh scattering correction applies automatically for L1C
+    # (Top-Of-Atmosphere) products, since they have no atmospheric
+    # correction applied. L2A already has Rayleigh correction baked in
+    # via Sen2Cor, so no additional correction is applied there.
+    _, level, _ = _get_sat_level_tile(item)
+    apply_rayleigh = level == "MSIL1C"
+
     bands = []
 
     for band_name in algorithm_assets:
@@ -932,6 +2423,13 @@ def generate_composite(
             resample=algorithm.get("resample", False),
             apply_scale=False,
         )
+
+        if apply_rayleigh:
+            correction = get_rayleigh_correction(item, band_name)
+            if correction:
+                # Scale reflectance-space correction (0-1) up to raw
+                # DN units (0-10000) to match this band's units.
+                band = band - (correction * 10000)
 
         bands.append(band)
 
@@ -977,74 +2475,62 @@ def generate_composite(
 # ---------------------------------------------------------------------
 
 def merge_products(tif_paths, output_path, method="first"):
-    """
-    Mosaic a list of local single-product GeoTIFFs (e.g. one true_color
-    composite or one NDVI index per Sentinel-2 tile) into a single output
-    GeoTIFF.
-
-    Adjacent Sentinel-2 tiles can fall in different UTM zones, so any
-    input not matching the dominant CRS is reprojected to a temp file
-    before merging.
-
-    Parameters
-    ----------
-    tif_paths : list of str
-        Local paths to per-tile product GeoTIFFs to merge.
-
-    output_path : str
-        Path to write the merged GeoTIFF.
-
-    method : str
-        rasterio.merge method. "first" means the first-listed tile's
-        valid (non-nodata) pixels win; nodata pixels (e.g. masked
-        clouds) are filled by later tiles where available.
-
-    Returns
-    -------
-    str
-        output_path
-    """
 
     if len(tif_paths) == 1:
         shutil.copy(tif_paths[0], output_path)
         return output_path
 
-    crs_list = [rio.open(p).crs for p in tif_paths]
-    crs_list_unique = list(set(crs_list))
+    # Determine dominant CRS
+    with rio.open(tif_paths[0]) as src:
+        crs_list = [rio.open(p).crs for p in tif_paths]
+
+    crs_dom = max(set(crs_list), key=crs_list.count)
 
     merge_inputs = list(tif_paths)
     tmp_dir = None
-    crs_dom = crs_list_unique[0]
 
     try:
-        if len(crs_list_unique) != 1:
-            crs_dom = max(crs_list, key=crs_list.count)
-            tmp_dir = tempfile.mkdtemp(prefix="s2_stac_merge_reproj_")
+        # Reproject inputs that don't match the dominant CRS
+        if any(crs != crs_dom for crs in crs_list):
+
+            tmp_dir = tempfile.mkdtemp(prefix="s2_merge_reproj_")
 
             for idx, tif in enumerate(tif_paths):
+
                 with rio.open(tif) as src:
+
                     if src.crs == crs_dom:
                         continue
 
                     transform, width, height = calculate_default_transform(
-                        src.crs, crs_dom, src.width, src.height, *src.bounds
+                        src.crs,
+                        crs_dom,
+                        src.width,
+                        src.height,
+                        *src.bounds,
                     )
+
                     kwargs = src.meta.copy()
+
                     kwargs.update(
                         {
                             "crs": crs_dom,
                             "transform": transform,
                             "width": width,
                             "height": height,
+                            "nodata": src.nodata,
                         }
                     )
 
                     reproj_path = os.path.join(
-                        tmp_dir, f"{idx}_{os.path.basename(tif)}"
+                        tmp_dir,
+                        f"{idx}_{os.path.basename(tif)}",
                     )
 
                     with rio.open(reproj_path, "w", **kwargs) as dst:
+
                         for i in range(1, src.count + 1):
+
                             reproject(
                                 source=rio.band(src, i),
                                 destination=rio.band(dst, i),
@@ -1052,16 +2538,27 @@ def merge_products(tif_paths, output_path, method="first"):
                                 src_crs=src.crs,
                                 dst_transform=transform,
                                 dst_crs=crs_dom,
+                                src_nodata=src.nodata,
+                                dst_nodata=src.nodata,
+                                resampling=Resampling.nearest,
                             )
 
                     merge_inputs[idx] = reproj_path
+
+        # ---------------------------------------------------------
+        # Merge
+        # ---------------------------------------------------------
 
         with rio.open(merge_inputs[0]) as ref:
             nodata_val = ref.nodata
             count = ref.count
             dtype = ref.dtypes[0]
 
-        array, transform = merge(merge_inputs, method=method)
+        array, transform = merge(
+            merge_inputs,
+            method=method,
+            nodata=nodata_val,
+        )
 
         profile = {
             "driver": "GTiff",
@@ -1221,10 +2718,11 @@ def process_items(
     if algorithm_type not in (
         "index",
         "composite",
+        "water_extent",
     ):
         raise ValueError(
             "algorithm_type must be either "
-            "'index' or 'composite'."
+            "'index', 'composite', or 'water_extent'."
         )
 
     os.makedirs(
@@ -1245,8 +2743,16 @@ def process_items(
         print(f"Generating tile: {item.id}")
         print("=" * 70)
 
-        if algorithm_type == "index":
-
+        if algorithm_type == "water_extent":
+            local_path = generate_water_extent(
+                item,
+                algorithm,
+                algorithm_name,
+                output_dir=tmp_dir,
+                cloud_mask=cloud_mask,
+            )
+        
+        elif algorithm_type == "index":
             local_path = generate_index(
                 item,
                 algorithm,
@@ -1257,7 +2763,6 @@ def process_items(
             )
 
         else:
-
             local_path = generate_composite(
                 item,
                 algorithm,

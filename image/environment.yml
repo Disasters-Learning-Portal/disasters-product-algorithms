@@ -24,6 +24,14 @@ dependencies:
   - geoviews-core>=1.14.1
   # pystac issue #1575 fixed in 1.14.0; floor keeps the fix, drops the exact pin.
   - pystac>=1.14.0
+  # STAC client + Rayleigh correction for the Sentinel-2 STAC pipeline
+  # (src/sentinel2/sentinel2_stac_functions.py). pystac-client is a hard
+  # module-level import; pyspectral is a hard dep of the L1C path, which
+  # RAISES rather than silently skipping the correction when it is absent.
+  # pyspectral also needs RSR/LUT data provisioned offline -- see the
+  # pyspectral block in image/Dockerfile.
+  - pystac-client>=0.9.0
+  - pyspectral>=0.14.3
   # Required by tools/new_sensor.py at runtime. nbformat is part of Jupyter
   # so usually already in Pangeo base, but listing both explicitly here
   # guarantees the scaffolder runs on a fresh hub pod without a manual

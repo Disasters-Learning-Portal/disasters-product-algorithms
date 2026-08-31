@@ -73,6 +73,16 @@ dependencies:
   - psutil
   - fsspec
   - s3fs
+  # --- Sentinel-2 STAC pipeline (src/sentinel2/sentinel2_stac_functions.py) ---
+  # pystac-client is a hard module-level import -- without it
+  # process_sentinel2_stac fails at import, not at first use.
+  # pyspectral backs the L1C Rayleigh correction, which RAISES rather
+  # than silently returning an uncorrected product when it is missing.
+  # It ALSO needs RSR + LUT data files that Rayleigh() would otherwise
+  # try to download at run time -- fatal on a DPS worker. dps/Dockerfile
+  # bakes them in and gates the build on tools/pyspectral_selfcheck.py.
+  - pystac-client>=0.9.0
+  - pyspectral>=0.14.3
   # --- Archive tools ---
   # p7zip provides the `7z` binary that process_sentinel2 shells out to
   # (`7z x <scene>.SAFE.zip`, process_sentinel2.py) to extract Sentinel-2 .SAFE

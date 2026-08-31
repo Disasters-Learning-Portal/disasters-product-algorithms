@@ -84,6 +84,35 @@ RUN conda run --live-stream --name disasters_dps pip install --no-deps --no-cach
 RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
              /app/disasters-product-algorithms/dps/*.sh 2>/dev/null || true
 
+# --- pyspectral offline data (Sentinel-2 L1C Rayleigh correction) ---------
+# Installing the conda package is NOT enough. Rayleigh() needs an RSR file
+# and an aerosol LUT that pyspectral does not ship, and it will try to
+# DOWNLOAD both on first use -- fatal on a DPS worker with no outbound
+# network, and fatal in the middle of an activation rather than here.
+#
+# PSP_CONFIG_FILE is the ONLY env var pyspectral reads (there is no
+# PSP_DATA_ROOT). It must point at a file that EXISTS or get_config()
+# raises, hence writing the yaml rather than only setting the variable.
+# An absolute data root also makes the data independent of $HOME, so it
+# stays visible to whatever uid the job runs as -- data downloaded as
+# root into ~/.local/share/pyspectral would not be.
+ENV PSP_CONFIG_FILE=/opt/pyspectral/pyspectral.yaml
+RUN mkdir -p /opt/pyspectral /opt/pyspectral_data \
+    && printf '%s\n' \
+        'rsr_dir: /opt/pyspectral_data' \
+        'rayleigh_dir: /opt/pyspectral_data' \
+        'download_from_internet: False' \
+        > /opt/pyspectral/pyspectral.yaml \
+    # download_rsr()/download_luts() are unconditional -- they do not
+    # consult download_from_internet -- so the False above does not block
+    # this step. Only the one aerosol type Rayleigh() defaults to; all 11
+    # would be ~600 MB.
+    && conda run --live-stream --name disasters_dps python -c \
+        "from pyspectral.utils import download_rsr, download_luts; \
+         download_rsr(); \
+         download_luts(aerosol_types=['marine_clean_aerosol'])" \
+    && chmod -R a+rX /opt/pyspectral /opt/pyspectral_data
+
 # --- build-time smoke check ----------------------------------------------
 # Fail the build EARLY (not at DPS job time) if the env name drifted from
 # dps/environment.yml's `name: disasters_dps`, or if any `process_*` entry point
@@ -128,14 +157,19 @@ RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
 # any version suffix conda-forge adds. Adding a driver dep to dps/environment.yml?
 # Add it here too.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
+    && conda run --name disasters_dps process_sentinel2_stac --help >/dev/null \
     && conda run --name disasters_dps python -c \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
+    && conda run --name disasters_dps python -c \
+        "import sentinel2.sentinel2_stac_functions" \
     && conda run --name disasters_dps python -c "import blackmarble" \
     && conda run --name disasters_dps blackmarble --help >/dev/null \
     && conda run --name disasters_dps python \
         /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
     && conda run --name disasters_dps python \
         /app/disasters-product-algorithms/dps/blackmarble/bm_georef.py --self-check \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/tools/pyspectral_selfcheck.py \
     && conda run --name disasters_dps bash -c '\
         for drv in HDF5 JP2OpenJPEG; do \
           ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \

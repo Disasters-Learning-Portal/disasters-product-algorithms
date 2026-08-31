@@ -17,6 +17,10 @@ dependencies = [
     "psutil",
     "fsspec",
     "s3fs",
+    # Sentinel-2 STAC pipeline (sentinel2.sentinel2_stac_functions).
+    # A hard module-level import, so without it `process_sentinel2_stac`
+    # fails at import and the CI cli-smoke job goes red.
+    "pystac-client>=0.9.0",
 ]
 
 # =============================================================================
@@ -49,6 +53,7 @@ test = [
 [project.scripts]
 process_landsat89 = "landsat.cli:process_landsat89_cli"
 process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
+process_sentinel2_stac = "sentinel2.cli:process_sentinel2_stac_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 process_satellogic = "satellogic.cli:process_satellogic_cli"
 process_umbra = "umbra.cli:process_umbra_cli"
@@ -61,6 +66,13 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
+
+# The Sentinel-2 STAC pipeline reads its algorithm catalog from a JSON
+# file shipped alongside the code. Without this it is absent from an
+# installed copy and `process_sentinel2_stac` cannot find its default
+# --algorithm-file.
+[tool.setuptools.package-data]
+sentinel2 = ["algorithms-sentinel2.json"]
 
 # NOTE: Black Marble is NOT part of this package. The VEDA Black Marble nighttime-lights
 # pipeline lives in its own upstream repo (github.com/NASA-IMPACT/veda-black-marble) and is

@@ -36,12 +36,12 @@ geopandas
 pyproj
 
 # STAC client for the Sentinel-2 STAC pipeline
-# (sentinel2/sentinel2_stac_functions.py imports pystac_client at module
+# (sentinel2/sentinel2_odr_functions.py imports pystac_client at module
 # level). Also in pyproject [project.dependencies] for the pip path.
 pystac-client
 
 # Rayleigh scattering correction for Sentinel-2 L1C
-# (sentinel2/sentinel2_stac_functions.get_rayleigh_correction).
+# (sentinel2/sentinel2_odr_functions.get_rayleigh_correction).
 # The module RAISES rather than silently skipping the correction when
 # this is missing, so it is a hard dep of the L1C path, not optional.
 # NOTE: the package alone is not enough at run time -- Rayleigh() also

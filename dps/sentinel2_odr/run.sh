@@ -10,7 +10,7 @@ set -euo pipefail
 #                       tile + date, unzip with 7z, process locally.
 #                       Needs COP_USER / COP_PASS from MAAP secrets.
 #
-#   dps/sentinel2_stac/ (this one) query a STAC API (Earth Search) by bbox +
+#   dps/sentinel2_odr/ (this one) query a STAC API (Earth Search) by bbox +
 #                       date range and read the cloud-optimized assets straight
 #                       from S3. NO credentials, NO download step, NO 7z.
 #
@@ -125,7 +125,7 @@ validate_int_range cloud_cover "${CLOUD_COVER%%.*}" 0 100
 require_nonempty products "${PRODUCTS}" \
   'one or more products, space-separated, e.g. true_color ndvi'
 # Token set mirrors --product's `choices` in
-# src/sentinel2/process_sentinel2_stac.py. Validated here because a bad token
+# src/sentinel2/process_sentinel2_odr.py. Validated here because a bad token
 # would otherwise only surface after the STAC search has already run.
 # shellcheck disable=SC2086  # intentional word-split of the space-separated list
 for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" \
@@ -193,7 +193,7 @@ for product in ${PRODUCTS}; do
   # shellcheck disable=SC2206
   [[ -n "${WE_NSTD}" ]]      && args+=( --we-nstd ${WE_NSTD} )
 
-  conda run --live-stream --name disasters_dps process_sentinel2_stac "${args[@]}"
+  conda run --live-stream --name disasters_dps process_sentinel2_odr "${args[@]}"
 
 done
 

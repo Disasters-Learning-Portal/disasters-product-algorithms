@@ -27,8 +27,8 @@ def download_sentinel2_cli():
         exec(code, {'__name__': '__main__'})
 
 
-def process_sentinel2_stac_cli():
-    """Entry point for the process_sentinel2_stac command.
+def process_sentinel2_odr_cli():
+    """Entry point for the process_sentinel2_odr command.
 
     Unlike the two shims above, the STAC pipeline exposes a real
     ``main()`` rather than running at module scope, so this imports and
@@ -36,7 +36,7 @@ def process_sentinel2_stac_cli():
     reachable by ``tests/integration/test_dispatch_undefined_names.py``
     and by a plain ``import``.
     """
-    from sentinel2.process_sentinel2_stac import main
+    from sentinel2.process_sentinel2_odr import main
 
     main()
 

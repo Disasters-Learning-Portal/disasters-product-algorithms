@@ -53,7 +53,7 @@ on:
           - list_dates
           - landsat
           - sentinel2
-          - sentinel2_stac
+          - sentinel2_odr
           - blackmarble
           - blackmarble_noaa
         default: capella

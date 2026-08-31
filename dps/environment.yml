@@ -73,9 +73,9 @@ dependencies:
   - psutil
   - fsspec
   - s3fs
-  # --- Sentinel-2 STAC pipeline (src/sentinel2/sentinel2_stac_functions.py) ---
+  # --- Sentinel-2 STAC pipeline (src/sentinel2/sentinel2_odr_functions.py) ---
   # pystac-client is a hard module-level import -- without it
-  # process_sentinel2_stac fails at import, not at first use.
+  # process_sentinel2_odr fails at import, not at first use.
   # pyspectral backs the L1C Rayleigh correction, which RAISES rather
   # than silently returning an uncorrected product when it is missing.
   # It ALSO needs RSR + LUT data files that Rayleigh() would otherwise

@@ -30,10 +30,10 @@
 # .SAFE path is retired. Deleting the old one is Phase 5 of issue #144 — do not
 # do it by reusing this name.
 #
-# dps/sentinel2_stac/algorithm_config.yaml (the GUI path) carries the SAME name
+# dps/sentinel2_odr/algorithm_config.yaml (the GUI path) carries the SAME name
 # on purpose: whichever path you register from, it targets the one process.
 # =============================================================================
-algorithm_name: disasters-sentinel2-stac-process
+algorithm_name: disasters-sentinel2-odr-process
 algorithm_version: dev
 algorithm_description: >-
   Generate Sentinel-2 Cloud Optimized GeoTIFF disaster-response products (true
@@ -52,13 +52,13 @@ license: Apache-2.0
 release_notes: STAC/COG Sentinel-2 pipeline; registered alongside the .SAFE-based algorithm for side-by-side comparison (issue #144).
 # Absolute path INSIDE the built image (Dockerfile bakes the repo at
 # /app/disasters-product-algorithms). Not repo-relative.
-run_command: /app/disasters-product-algorithms/dps/sentinel2_stac/run.sh
+run_command: /app/disasters-product-algorithms/dps/sentinel2_odr/run.sh
 ram_min: 64
 cores_min: 8
 outdir_max: 20
 
 # INPUTS — ALL optional (`?`), so no falsy value can trip the Submit form's
-# "Valid value required" check. Defaults mirror dps/sentinel2_stac/run.sh; run.sh
+# "Valid value required" check. Defaults mirror dps/sentinel2_odr/run.sh; run.sh
 # does the real validation after parsing.
 #
 # NO credential inputs of any kind: Earth Search and the Sentinel-2 COGs on AWS

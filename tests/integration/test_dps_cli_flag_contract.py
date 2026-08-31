@@ -42,7 +42,7 @@ SENSORS = [
     # whatever sys.path tests/conftest.py sets up, so every row skips unless the
     # package is actually installed (`pip install -e .`). With it installed all
     # six rows run and the contract is genuinely enforced.
-    ("sentinel2_stac", "sentinel2.process_sentinel2_stac"),
+    ("sentinel2_odr", "sentinel2.process_sentinel2_odr"),
 ]
 
 

@@ -1,4 +1,4 @@
-"""Executes the real dps/sentinel2_stac/run.sh end to end, with conda stubbed.
+"""Executes the real dps/sentinel2_odr/run.sh end to end, with conda stubbed.
 
 WHY THIS EXISTS
 ---------------
@@ -11,7 +11,7 @@ broken orchestration only shows up as a failed, or silently wrong, DPS job.
 
 The one thing stubbed is `conda`, because the real invocation needs the
 disasters_dps env and a multi-gigabyte read from Earth Search. The stub sits
-first on PATH, records the argv of every `process_sentinel2_stac` call, and
+first on PATH, records the argv of every `process_sentinel2_odr` call, and
 writes tiny real GeoTIFFs where the CLI would. Everything else -- the
 validators, the product loop, the bbox conversion, the publish filter, the
 output/ copy -- is the shipped code.
@@ -29,7 +29,7 @@ import sys
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RUN_SH = os.path.join(REPO_ROOT, "dps", "sentinel2_stac", "run.sh")
+RUN_SH = os.path.join(REPO_ROOT, "dps", "sentinel2_odr", "run.sh")
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 
@@ -39,7 +39,7 @@ START = "2025-08-12"
 END = "2025-08-14"
 
 
-# `conda run [--live-stream] --name <env> process_sentinel2_stac <args...>`
+# `conda run [--live-stream] --name <env> process_sentinel2_odr <args...>`
 # Records the args, then emulates the CLI by touching a file per product at
 # --output. Also emulates the water-extent reference cache, so the publish
 # filter is exercised against something real.
@@ -57,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cmd="${1:-}"; shift || true
-[[ "${cmd}" == "process_sentinel2_stac" ]] || { echo "stub: unexpected command ${cmd}" >&2; exit 64; }
+[[ "${cmd}" == "process_sentinel2_odr" ]] || { echo "stub: unexpected command ${cmd}" >&2; exit 64; }
 
 # Record this invocation's argv, one JSON array per line.
 "${TEST_PYTHON}" -c '

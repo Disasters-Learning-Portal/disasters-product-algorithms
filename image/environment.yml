@@ -25,7 +25,7 @@ dependencies:
   # pystac issue #1575 fixed in 1.14.0; floor keeps the fix, drops the exact pin.
   - pystac>=1.14.0
   # STAC client + Rayleigh correction for the Sentinel-2 STAC pipeline
-  # (src/sentinel2/sentinel2_stac_functions.py). pystac-client is a hard
+  # (src/sentinel2/sentinel2_odr_functions.py). pystac-client is a hard
   # module-level import; pyspectral is a hard dep of the L1C path, which
   # RAISES rather than silently skipping the correction when it is absent.
   # pyspectral also needs RSR/LUT data provisioned offline -- see the

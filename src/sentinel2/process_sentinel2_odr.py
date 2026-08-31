@@ -1,5 +1,5 @@
 """
-process_sentinel2_stac.py
+process_sentinel2_odr.py
 
 Command-line interface for processing Sentinel-2 imagery sourced from a
 STAC API (Earth Search) rather than from downloaded Copernicus .SAFE
@@ -19,7 +19,7 @@ caller's job (dps/_finalize.sh for DPS runs, or an operator notebook) --
 this CLI never uploads.
 
 The actual processing functions live in
-sentinel2.sentinel2_stac_functions.
+sentinel2.sentinel2_odr_functions.
 
 This module coexists with the legacy .SAFE-based `process_sentinel2`
 during the STAC migration; see issue #144. The legacy pipeline is
@@ -30,7 +30,7 @@ side-by-side on real activations.
 import argparse
 import os
 
-from sentinel2.sentinel2_stac_functions import (
+from sentinel2.sentinel2_odr_functions import (
     search_sentinel2,
     get_algorithm,
     generate_index,

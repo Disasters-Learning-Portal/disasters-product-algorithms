@@ -43,7 +43,8 @@ concrete examples of the pattern — copy the closest one when adding a new algo
 
 **Two Sentinel-2 algorithms are registered on purpose.** `sentinel2/` downloads
 `.SAFE` archives from Copernicus (needs `COP_USER`/`COP_PASS` MAAP secrets and
-`p7zip`); `sentinel2_stac/` queries a STAC API and reads COGs straight from S3
+`p7zip`); `sentinel2_odr/` queries a STAC API and reads COGs straight from the AWS
+Open Data Registry (ODR) bucket
 (no credentials, no download). They carry DIFFERENT `algorithm_name`s so both
 stay runnable and can be compared on real activations before the `.SAFE` one is
 retired — a rename would replace rather than add. See issue #144 and

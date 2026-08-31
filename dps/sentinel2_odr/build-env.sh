@@ -2,13 +2,13 @@
 set -euo pipefail
 # MAAP DPS build script (Sentinel-2, STAC path). Run ONCE per worker image build.
 # Creates the shared `disasters_dps` conda env and installs this repo so the
-# `process_sentinel2_stac` console script is on PATH for run.sh's `conda run`.
+# `process_sentinel2_odr` console script is on PATH for run.sh's `conda run`.
 #
 # Identical to dps/sentinel2/build-env.sh -- both Sentinel-2 algorithms share one
 # env and one image, and differ only by run_command. It exists separately because
 # algorithm_config.yaml's build_command is per-algorithm.
 
-# basedir = dps/sentinel2_stac/ ; repo_root = two levels up.
+# basedir = dps/sentinel2_odr/ ; repo_root = two levels up.
 basedir=$( cd "$(dirname "$0")" ; pwd -P )
 repo_root=$( cd "${basedir}/../.." ; pwd -P )
 

@@ -3,7 +3,7 @@ Build-time gate: pyspectral's Rayleigh correction works OFFLINE.
 
 Why this exists
 ---------------
-`sentinel2.sentinel2_stac_functions.get_rayleigh_correction` raises when
+`sentinel2.sentinel2_odr_functions.get_rayleigh_correction` raises when
 pyspectral is unavailable, rather than returning 0 and shipping
 uncorrected top-of-atmosphere data under a product name that claims
 correction. That makes the correction a hard dependency of the L1C path

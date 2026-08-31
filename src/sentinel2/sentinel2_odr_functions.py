@@ -1,5 +1,5 @@
 """
-sentinel2_stac_functions.py
+sentinel2_odr_functions.py
 
 Sentinel-2 processing functions, STAC/COG edition.
 
@@ -3203,5 +3203,5 @@ def merge_products(tif_paths, output_path, method="first"):
 # which is defined nowhere in this repo (NameError on first call),
 # and process_index/process_composite additionally unpacked a
 # 2-tuple from generate_index/generate_composite, which return a
-# single path string. process_sentinel2_stac.main() implements the
+# single path string. process_sentinel2_odr.main() implements the
 # per-item loop directly; publishing to S3 is dps/_finalize.sh's job.

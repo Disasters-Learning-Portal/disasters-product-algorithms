@@ -1,6 +1,6 @@
 """Science-level tests for the Sentinel-2 STAC pipeline.
 
-These pin the parts of `sentinel2.sentinel2_stac_functions` where being
+These pin the parts of `sentinel2.sentinel2_odr_functions` where being
 wrong produces a plausible-looking raster rather than a crash -- which
 is the failure class that actually reaches a published product:
 
@@ -23,7 +23,7 @@ rio = pytest.importorskip("rasterio")
 pytest.importorskip("pystac_client")
 pytest.importorskip("geopandas")
 
-from sentinel2 import sentinel2_stac_functions as s2  # noqa: E402
+from sentinel2 import sentinel2_odr_functions as s2  # noqa: E402
 
 
 # ---------------------------------------------------------------------

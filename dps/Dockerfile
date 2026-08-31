@@ -157,11 +157,11 @@ RUN mkdir -p /opt/pyspectral /opt/pyspectral_data \
 # any version suffix conda-forge adds. Adding a driver dep to dps/environment.yml?
 # Add it here too.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
-    && conda run --name disasters_dps process_sentinel2_stac --help >/dev/null \
+    && conda run --name disasters_dps process_sentinel2_odr --help >/dev/null \
     && conda run --name disasters_dps python -c \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
     && conda run --name disasters_dps python -c \
-        "import sentinel2.sentinel2_stac_functions" \
+        "import sentinel2.sentinel2_odr_functions" \
     && conda run --name disasters_dps python -c "import blackmarble" \
     && conda run --name disasters_dps blackmarble --help >/dev/null \
     && conda run --name disasters_dps python \

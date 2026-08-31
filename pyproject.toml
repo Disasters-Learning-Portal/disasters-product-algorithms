@@ -53,6 +53,7 @@ download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 process_satellogic = "satellogic.cli:process_satellogic_cli"
 process_umbra = "umbra.cli:process_umbra_cli"
 process_capella = "capella.cli:process_capella_cli"
+process_iceye = "iceye.cli:process_iceye_cli"
 summarize_raster = "raster_tools.cli:summarize_raster_cli"
 
 [project.urls]
@@ -60,7 +61,7 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "blackmarble*", "shared_utils*", "raster_tools*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "iceye*", "blackmarble*", "shared_utils*", "raster_tools*"]
 
 # blackmarble/ is a VENDORED, self-contained package (VEDA Black Marble nighttime-
 # lights pipeline; source: github.com/HarshiniGirish/veda-black-marble). Unlike the

@@ -32,6 +32,17 @@ SENSORS = [
     ("satellogic", "satellogic.process_satellogic"),
     ("landsat", "landsat.process_landsat89"),
     ("sentinel2", "sentinel2.process_sentinel2"),
+    # The STAC pipeline lives in the sentinel2 package alongside the .SAFE one,
+    # so its dps dir name and its module name differ -- hence the pair rather
+    # than a derived name.
+    #
+    # NOTE for anyone seeing these rows skip with "exposed no parser flags to
+    # introspect": that is an ENVIRONMENT problem, not a property of the CLIs.
+    # The introspection runs the module in a SUBPROCESS, which does not inherit
+    # whatever sys.path tests/conftest.py sets up, so every row skips unless the
+    # package is actually installed (`pip install -e .`). With it installed all
+    # six rows run and the contract is genuinely enforced.
+    ("sentinel2_stac", "sentinel2.process_sentinel2_stac"),
 ]
 
 

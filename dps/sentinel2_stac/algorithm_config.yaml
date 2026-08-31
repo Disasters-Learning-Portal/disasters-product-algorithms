@@ -1,0 +1,100 @@
+algorithm_name: disasters-sentinel2-stac-process
+# git ref DPS clones (branch or tag). 'dev' tracks active development; pin a tag
+# (e.g. v0.10.0) for reproducible production runs.
+algorithm_version: dev
+algorithm_description: >-
+  Generate Sentinel-2 Cloud Optimized GeoTIFF disaster-response products (true
+  color, SWIR, NDVI, EVI, water extent, etc.) by querying a STAC API (Earth
+  Search) over a bounding box and date range and reading the cloud-optimized
+  assets directly from S3 -- no scene download, no Copernicus credentials.
+  This is the STAC replacement for disasters-sentinel2-process, which downloads
+  .SAFE archives from CDSE. BOTH are registered during the migration so they can
+  be compared on real activations; see issue #144.
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+# MAAP clones the repo to /app/<repo-name>/ and runs these from /app, so the
+# command paths MUST be prefixed with the repo directory name.
+build_command: disasters-product-algorithms/dps/sentinel2_stac/build-env.sh
+run_command: disasters-product-algorithms/dps/sentinel2_stac/run.sh
+# MAAP OPS default base image. MAAP installs Miniconda during the build and runs
+# build-env.sh on top, so a minimal base is fine.
+base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v4.2.0
+# Resource requirements (OGC/CWL schema; replaces the old queue + disk_space).
+# Matches disasters-sentinel2-process: same tile sizes, same product set. The
+# STAC path needs no room for .SAFE archives, but the water-extent product may
+# cache a national CDL (~1.6 GB) plus its extracted GeoTIFF, so outdir_max stays.
+ram_min: 64
+cores_min: 8
+outdir_max: 20
+# Metadata (pre-fills the registration form).
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: STAC/COG Sentinel-2 pipeline; coexists with the .SAFE-based algorithm during the migration.
+citation: NASA Disasters Program
+keywords: sentinel-2, cog, disasters, flood, fire, ndvi, evi, water-extent, stac
+# Inputs: flat list, each {name, label, doc, type, default}. Booleans arrive as a
+# true/false control; primitives as --name <value>.
+#
+# NO credential inputs and no MAAP secret lookups: the Earth Search STAC API and
+# the Sentinel-2 COGs on AWS Open Data are both public. That is the main
+# operational difference from disasters-sentinel2-process, which needs
+# COP_USER / COP_PASS stored as MAAP secrets.
+#
+# source_label / stac_api are HARDCODED in run.sh, and dst_crs / compression /
+# nodata are hardcoded in the CLI, so none are inputs (matching Capella /
+# Satellogic / Sentinel-2). To change any of them, publish a new
+# algorithm_version.
+inputs:
+  - name: bbox
+    label: Bounding box
+    doc: "Area of interest as min_lon,min_lat,max_lon,max_lat in WGS84 (commas or spaces). Any Sentinel-2 tile intersecting it is processed in full, so a small box is fine. Pre-filled with a known-good test AOI over central Iowa."
+    type: string
+    default: "-93.70,42.00,-93.55,42.10"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so a bare Submit runs; set a REAL event for a real activation (the placeholder YYYYMM_Hazard_Location is rejected at run time). It is written into the GeoTIFF tags and the S3 prefix, NOT into the filename."
+    type: string
+    default: "202601_KyleWx_US"
+  - name: start_date
+    label: Start date
+    doc: "Search start date, YYYY-MM-DD (inclusive). Must be 2015-06-23 or later -- Sentinel-2A launched then."
+    type: string
+    default: "2025-08-12"
+  - name: end_date
+    label: End date
+    doc: "Search end date, YYYY-MM-DD (inclusive). Widen the window if a run finds no scenes: Sentinel-2 revisit is ~5 days, so a single day catches only one orbit swath."
+    type: string
+    default: "2025-08-14"
+  - name: level
+    label: Processing level
+    doc: "Sentinel-2 processing level: 2 = L2A (surface reflectance, recommended), 1 = L1C (top-of-atmosphere, gets a Rayleigh-scattering correction). Cloud masking requires 2."
+    type: string
+    default: "2"
+  - name: products
+    label: Products
+    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir. One COG per product per scene."
+    type: string
+    default: "true_color ndvi"
+  - name: cloud_cover
+    label: Max cloud cover %
+    doc: "Only scenes below this scene-level cloud percentage are processed (0-100). Raise it if a run finds no scenes."
+    type: string
+    default: "50"
+  - name: we_nstd
+    label: Water-extent std devs
+    doc: "Only used when 'we' is in products; ignored otherwise. One or more NIR std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5 2. One water-extent COG is produced per value (filename carries NSTD_<value>). Higher = higher NIR threshold = MORE pixels classified as water. Decimals use a dot (1.5, not 1,5). Default 1."
+    type: string
+    default: "1"
+  - name: merge
+    label: Merge tiles
+    doc: Mosaic all matched tiles into one product per date (--merge).
+    type: boolean
+    default: true
+  - name: mask
+    label: Cloud mask
+    doc: Mask cloud, cloud-shadow and thin-cirrus pixels using the L2A Scene Classification Layer. Requires level 2.
+    type: boolean
+    default: false
+outputs:
+  - name: output
+    type: Directory

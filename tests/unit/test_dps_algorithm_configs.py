@@ -56,7 +56,19 @@ OGC_CONFIGS = sorted(
 # Only these are current and registered. The cross-path consistency rules below are
 # asserted strictly for them, because for these the two files really do describe one
 # deployed process.
-CURRENT_OGC = {"sentinel2", "umbra", "blackmarble", "blackmarble_noaa"}
+#
+# `sentinel2` and `sentinel2_stac` are BOTH live on purpose: the STAC pipeline is
+# registered alongside the .SAFE one so the two can be compared on real
+# activations before either is retired (issue #144, Phase 3/4). They are separate
+# processes with separate names -- a rename is not a move, so reusing one name
+# would replace rather than add.
+CURRENT_OGC = {
+    "sentinel2",
+    "sentinel2_stac",
+    "umbra",
+    "blackmarble",
+    "blackmarble_noaa",
+}
 
 # The rest predate the sensor CLI changes (PR #45 hardcoded most of satellogic's inputs;
 # the "-ogc-test" -> "disasters-<sensor>-process" name consolidation never reached them)

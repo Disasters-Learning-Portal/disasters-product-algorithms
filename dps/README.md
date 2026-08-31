@@ -41,6 +41,14 @@ are used by every algorithm. Everything else lives in a per-algorithm `<name>/` 
 The existing algorithms (`landsat`, `sentinel2`, `capella`, `umbra`, `satellogic`) are
 concrete examples of the pattern — copy the closest one when adding a new algorithm.
 
+**Two Sentinel-2 algorithms are registered on purpose.** `sentinel2/` downloads
+`.SAFE` archives from Copernicus (needs `COP_USER`/`COP_PASS` MAAP secrets and
+`p7zip`); `sentinel2_stac/` queries a STAC API and reads COGs straight from S3
+(no credentials, no download). They carry DIFFERENT `algorithm_name`s so both
+stay runnable and can be compared on real activations before the `.SAFE` one is
+retired — a rename would replace rather than add. See issue #144 and
+"Sentinel-2: TWO algorithms during the STAC migration" in [docs/DPS.md](../docs/DPS.md).
+
 One algorithm deliberately deviates: **`list_dates/`** (registered as `list-dates`)
 is a **discovery** tool, not a processing algorithm — it takes a `sensor` selector
 (capella|umbra|satellogic) and runs its own `report_dates.py`, which calls each

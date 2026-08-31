@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
+from shared_utils.file_naming import create_sar_output_filename
 
 
 def retrieve_iceye_resources(date: Union[str, datetime], bucket="csdap-iceye-delivery", prefix="disasters"):
@@ -121,14 +122,14 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     ret_list = []
     dt = datetime.strptime(grd_in_file.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S")
     
-    outfile_base = (
-        f"{save_location}/"
-        f"{dt.strftime('%Y%m')}_"
-        f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}_"
-        f"sigma0_"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"_filtered{filter_size}"
-        ".tif"
+    outfile_base = os.path.join(
+        save_location,
+        create_sar_output_filename(
+            f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}",
+            "sigma0",
+            dt,
+            filter_size,
+        ),
     )
     
     if save_products in ["amp", "both"]:

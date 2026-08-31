@@ -744,6 +744,71 @@ time. The whole mechanism:
 Prereq: repo secret **`MAAP_PGT`** (only used when `register_to_maap` is checked).
 This path uses pure GitHub Actions + the MAAP OGC API — no `maap-py`, no hub UI.
 
+## Sentinel-2: TWO algorithms during the STAC migration
+
+**"ODR" = AWS Open Data Registry**, where the Sentinel-2 COGs this pipeline
+reads are published. The name follows the repo's own term -- the original
+module docstring called these "the Sentinel-2 ODR notebooks". The pipeline
+*discovers* scenes through a STAC API (Earth Search) and *reads* them from
+the ODR bucket; both words describe it, and the registered algorithm is
+`disasters-sentinel2-odr-process`.
+
+There are deliberately **two** registered Sentinel-2 processes. Do not "clean one
+up" — both are live until the migration finishes (issue #144).
+
+| | `disasters-sentinel2-process` | `disasters-sentinel2-odr-process` |
+|---|---|---|
+| dir | `dps/sentinel2/` | `dps/sentinel2_odr/` |
+| CLI | `process_sentinel2` | `process_sentinel2_odr` |
+| source | Copernicus CDSE `.SAFE` archives | Earth Search STAC → COGs on S3 |
+| selection | MGRS `tile` + `download_date` | `bbox` + `start_date`/`end_date` |
+| credentials | `COP_USER` / `COP_PASS` MAAP secrets | **none** — both endpoints are public |
+| needs `p7zip` | yes (`7z x <scene>.SAFE.zip`) | no |
+| event in filename | yes (`-event`) | no — tags + S3 prefix only |
+| products per run | one CLI call, `-p a b c` | `--product` is **singular**; run.sh loops |
+
+**Why two names.** A rename is not a move: editing `algorithm_name` registers a
+NEW process and leaves the old one runnable. Reusing `disasters-sentinel2-process`
+for the STAC pipeline would *replace* the `.SAFE` job rather than add a second
+one, which is exactly what makes a side-by-side comparison impossible. The
+distinct name is the mechanism, not an accident.
+
+**Why they coexist in one package.** `process_sentinel2_odr.py` and
+`sentinel2_odr_functions.py` live inside `src/sentinel2/`, not in a
+`src/sentinel2_odr/` package of their own. `tools/check_sensor_consistency.py`
+requires a notebook pair per *sensor directory* and fires its copy-paste leak
+check on any cell-0 mention of another sensor's alias — and `sentinel2_odr`
+contains the substring `sentinel2`, so a separate package would flag itself
+against `sentinel2` and need the lint tool changed. A second module in the
+existing package satisfies every rule untouched.
+
+**One image serves both.** MAAP builds one container per repo+branch and the two
+algorithms differ only by `run_command`, so `dps/environment.yml` must carry
+`p7zip` (for the `.SAFE` job) **and** `pystac-client` + `pyspectral` (for the STAC
+job) for the whole overlap. Dropping `p7zip` is Phase 5, after the `.SAFE`
+algorithm is deleted — not before.
+
+**Registering.** One at a time, from `deploy-algorithm`, and verify
+`{"status": "accepted"}` — a green run is not proof (see the 409 section above):
+
+```bash
+gh workflow run register-dps.yml --ref deploy-algorithm \
+  -f algorithm=sentinel2_odr -f algorithm_version=dev -f register_to_maap=true
+# wait for `completed`, check the conclusion, THEN dispatch the next one
+gh run list --workflow=register-dps.yml --limit 1
+gh run view <id> --json conclusion
+```
+
+Both must appear in the Submit Jobs **Process** dropdown before the comparison
+runs start.
+
+**Comparing them (Phase 4).** Same `activation_event`, same AOI, same dates, same
+level. Note the outputs are *not* byte-comparable and are not meant to be: the
+`.SAFE` job prefixes the event onto filenames and the STAC job does not, and the
+STAC job's water extent carries an `NSTD_<value>` token. Compare *content* —
+water-extent class histograms and total water area, per-pixel index difference
+statistics, and the embedded `ACTIVATION_EVENT` / `PROCESSOR` tags.
+
 ## Deleting (undeploying) an algorithm
 
 **The Register Algorithm GUI can register but not delete.** Undeploying is a

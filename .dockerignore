@@ -30,6 +30,10 @@ tests/
 # The scaffolder + lint scripts are dev-time. The image already has
 # the consistency lint via CI; no need to ship the tooling.
 tools/
+# ...except the pyspectral offline gate, which image/Dockerfile runs at
+# build time to prove the Rayleigh RSR/LUT data is provisioned. One small
+# file; the rest of tools/ stays out of the image.
+!tools/pyspectral_selfcheck.py
 bin/
 
 # MAAP DPS build/run scripts + algorithm manifests. DPS clones the git repo

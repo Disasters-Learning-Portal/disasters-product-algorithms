@@ -125,6 +125,33 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DISASTERS_PRODUCT_ALGORITHMS=${SETUPTOOLS
 COPY --chown=${NB_USER}:${NB_USER} . /srv/repo/algorithms
 RUN /srv/conda/envs/notebook/bin/pip install --no-deps /srv/repo/algorithms
 
+# --- pyspectral offline data (Sentinel-2 L1C Rayleigh correction) ---------
+# Same provisioning as dps/Dockerfile, and for the same reason: the conda
+# package alone is not enough, because Rayleigh() downloads its RSR and
+# aerosol LUT on first use. Baking them in keeps a hub pod working when
+# the notebook runs the L1C path, and PSP_CONFIG_FILE + an absolute data
+# root keep the data findable regardless of $HOME.
+#
+# The self-check blocks the network and exercises the real code path for
+# all three Sentinel-2 platforms, so a broken data layout fails this
+# build rather than an operator's activation.
+ENV PSP_CONFIG_FILE=/opt/pyspectral/pyspectral.yaml
+USER root
+RUN mkdir -p /opt/pyspectral /opt/pyspectral_data \
+    && printf '%s\n' \
+        'rsr_dir: /opt/pyspectral_data' \
+        'rayleigh_dir: /opt/pyspectral_data' \
+        'download_from_internet: False' \
+        > /opt/pyspectral/pyspectral.yaml \
+    && /srv/conda/envs/notebook/bin/python -c \
+        "from pyspectral.utils import download_rsr, download_luts; \
+         download_rsr(); \
+         download_luts(aerosol_types=['marine_clean_aerosol'])" \
+    && chmod -R a+rX /opt/pyspectral /opt/pyspectral_data
+USER ${NB_USER}
+RUN /srv/conda/envs/notebook/bin/python \
+        /srv/repo/algorithms/tools/pyspectral_selfcheck.py
+
 # Image-test harness inherited from NASA-IMPACT upstream. The script
 # references /srv/repo/image-tests/ which doesn't exist in our fork — kept
 # as a placeholder for future use rather than deleted, since the upstream

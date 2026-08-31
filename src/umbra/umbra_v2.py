@@ -25,6 +25,7 @@ from typing import Union
 from datetime import datetime
 from shared_utils.geotools import *
 from shared_utils.s3utils import *
+from shared_utils.file_naming import create_sar_output_filename
 
 def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-data-vendor-umbra", prefix : str = "disasters") -> list[str]:
     """Return every Umbra tif for the acquisition closest to ``date``.
@@ -152,6 +153,20 @@ def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
     return np.where(valid, out, np.nan)
 
 
+def _umbra_output_name(in_file: str, product: str, filter_size: int) -> str:
+    """Output basename for one calibrated Umbra product.
+
+    The vendor GEC basename leads with the acquisition stamp and the satellite:
+    ``2026-08-05-03-54-47_UMBRA-07_GEC.tif``. Both the ``YYYYMM`` head and the
+    trailing ISO-Zulu stamp come from that one datetime, so it is parsed once
+    here rather than twice per f-string as the three calib functions used to do.
+    """
+    basename = os.path.basename(in_file)
+    acquired = datetime.strptime(basename.split("_")[0], "%Y-%m-%d-%H-%M-%S")
+    platform = basename.split("_")[1].capitalize()
+    return create_sar_output_filename(platform, product, acquired, filter_size)
+
+
 def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
@@ -190,13 +205,8 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
     sigma_0 = 20. * np.log10(sigma_linear)
     print(np.nanmax(sigma_0), np.nanmin(sigma_0))
 
-    outfile = (
-        f"{save_location}/"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
-        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
-        f"sigma0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"_filtered{filter_size}.tif"
+    outfile = os.path.join(
+        save_location, _umbra_output_name(in_file, "sigma0", filter_size)
     )
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 
@@ -239,13 +249,8 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", 
     beta_0 = 20. * np.log10(beta_linear)
     print(np.nanmax(beta_0), np.nanmin(beta_0))
 
-    outfile = (
-        f"{save_location}/"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
-        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
-        f"beta0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"_filtered{filter_size}.tif"
+    outfile = os.path.join(
+        save_location, _umbra_output_name(in_file, "beta0", filter_size)
     )
     dump_geotiff_float(outfile, beta_0, projref, in_geo)
 
@@ -288,13 +293,8 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
     gamma_0 = 20. * np.log10(gamma_linear)
     print(np.nanmax(gamma_0), np.nanmin(gamma_0))
 
-    outfile = (
-        f"{save_location}/"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y%m')}_"
-        f"{in_file.split('/')[-1].split('_')[1].capitalize()}_"
-        f"gamma0"
-        f"{datetime.strptime(in_file.split('/')[-1].split('_')[0], '%Y-%m-%d-%H-%M-%S').strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"_filtered{filter_size}.tif"
+    outfile = os.path.join(
+        save_location, _umbra_output_name(in_file, "gamma0", filter_size)
     )
     dump_geotiff_float(outfile, gamma_0, projref, in_geo)
 

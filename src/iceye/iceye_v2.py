@@ -1,14 +1,23 @@
 import os
+import re
 import numpy as np
 from osgeo import gdal, osr
 from datetime import datetime
 from typing import Union
 from glob import glob
-from scipy.ndimage import uniform_filter, variance
+from scipy.ndimage import uniform_filter
 import xml.etree.ElementTree as ET
 
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
+from shared_utils.file_naming import create_sar_output_filename
+
+
+# Declared nodata for the sigma0 dB product. sigmaCalib writes this value into
+# the zero-fill border so the declared nodata and the actual fill agree (the
+# same contract Capella's CAPELLA_NODATA carries). -9999.0, never 0: the output
+# is float32 dB backscatter where 0 dB is a legitimate value.
+ICEYE_NODATA = -9999.0
 
 
 def retrieve_iceye_resources(date: Union[str, datetime], bucket="csdap-iceye-delivery", prefix="disasters"):
@@ -26,6 +35,11 @@ def retrieve_iceye_resources(date: Union[str, datetime], bucket="csdap-iceye-del
 
     if isinstance(date, str):
         date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+
+    if not dates:
+        raise FileNotFoundError(
+            f"No ICEYE GRD .tif found under s3://{bucket}/{prefix}/"
+        )
 
     closest_date = min(dates, key=lambda d: abs(d - date))
     selected_files = [
@@ -47,13 +61,40 @@ def retrieve_iceye_resources(date: Union[str, datetime], bucket="csdap-iceye-del
     return [f"s3://{bucket}/{x}" for x in metadata], [f"s3://{bucket}/{x}" for x in tifs]
 
 
-def lee_filter(img, size):
-    img_mean = uniform_filter(img, (size, size))
-    img_sqr_mean = uniform_filter(img**2, (size, size))
-    img_variance = img_sqr_mean - img_mean**2
-    overall_variance = variance(img)
-    img_weights = img_variance / (img_variance + overall_variance)
-    return img_mean + img_weights * (img - img_mean)
+def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
+    """NaN-aware Lee speckle filter (window ``size`` x ``size``).
+
+    Same algorithm as ``capella_v2.lee_filter`` / ``umbra_v2.lee_filter``:
+    non-finite pixels are ignored rather than counted as zero, so the GRD
+    zero-fill border (masked to NaN by the caller) does not bleed into the
+    filtered interior, and stays NaN in the output.
+    """
+    valid = np.isfinite(img)
+    if not valid.any():
+        return img
+
+    v = valid.astype(np.float64)
+    filled = np.where(valid, img, 0.0).astype(np.float64)
+
+    # uniform_filter returns the window MEAN; dividing the filled mean by the
+    # valid-fraction recovers the mean over valid pixels only (window size
+    # cancels), so invalid neighbours are ignored rather than counted as zero.
+    frac = uniform_filter(v, size, mode="constant")
+    safe = frac > 0
+
+    local_mean = np.zeros_like(filled)
+    local_mean[safe] = uniform_filter(filled, size, mode="constant")[safe] / frac[safe]
+
+    local_sqr = np.zeros_like(filled)
+    local_sqr[safe] = uniform_filter(filled ** 2, size, mode="constant")[safe] / frac[safe]
+
+    local_var = np.clip(local_sqr - local_mean ** 2, 0.0, None)
+    overall_var = img[valid].var()
+
+    weights = local_var / (local_var + overall_var + 1e-12)
+    out = local_mean + weights * (filled - local_mean)
+
+    return np.where(valid, out, np.nan)
 
 
 def get_grd_xml(s3_metadata_paths):
@@ -107,15 +148,30 @@ def parse_grd_metadata(xml_in_file):
 
 
 def parse_corner_coordinate(value):
-    parts = value.split()
+    """Parse an ICEYE ``coord_*`` element into ``(col, row, lat, lon)``.
+
+    The metadata reference documents the value as ``[x(col), y(row), lat, lon]``
+    and shows it bracketed + comma-separated (``[16878,1,35.17738,-118.11233]``);
+    deliveries have also been seen whitespace-separated. Accept both.
+    """
+    parts = re.split(r"[\s,]+", value.strip().strip("[]").strip())
 
     if len(parts) != 4:
         raise ValueError(f"Unexpected ICEYE coordinate format: {value}")
 
-    return int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3])
+    return int(float(parts[0])), int(float(parts[1])), float(parts[2]), float(parts[3])
 
 
 def georeference_from_iceye_xml(metadata, cols, rows):
+    """Affine geotransform (EPSG:4326) fitted to the four XML corner coordinates.
+
+    Fallback for a GRD whose GeoTIFF carries no geotransform/projection (GDAL
+    reports the identity transform for a GCP/RPC-only file). The four corners
+    are the CENTRES of the first/last pixels in range and azimuth, so the
+    GDAL origin (top-left corner of the top-left pixel) is half a pixel back
+    along each axis. Approximate: ICEYE GRD is ground-range/azimuth geometry,
+    not a map projection, so an affine fit is exact only at the corners.
+    """
     required = [
         "coord_first_near", "coord_first_far",
         "coord_last_near", "coord_last_far"
@@ -162,8 +218,10 @@ def georeference_from_iceye_xml(metadata, cols, rows):
         ((lat_br - lat_bl) / dx_pixels)
     ) / 2.0
 
-    origin_lon = lon_tl - lon_per_col - lon_per_row
-    origin_lat = lat_tl - lat_per_col - lat_per_row
+    # Corner coords are pixel centres; GDAL's origin is the pixel's outer
+    # corner, i.e. half a pixel back along BOTH axes (not a full pixel).
+    origin_lon = lon_tl - 0.5 * lon_per_col - 0.5 * lon_per_row
+    origin_lat = lat_tl - 0.5 * lat_per_col - 0.5 * lat_per_row
 
     in_geo = (
         origin_lon,
@@ -185,7 +243,8 @@ def georeference_from_iceye_xml(metadata, cols, rows):
 
 
 def sigmaCalib(s3_image_paths: list[str], s3_metadata_paths: list[str],
-               save_location: str = "/tmp/s3_temp", filter_size: int = 5):
+               save_location: str = "/tmp/s3_temp", filter_size: int = 5) -> str:
+    """Calibrate an ICEYE GRD to sigma0 in dB. Returns the output GeoTIFF path."""
 
     if save_location.endswith("/"):
         save_location = save_location[:-1]
@@ -222,6 +281,8 @@ def sigmaCalib(s3_image_paths: list[str], s3_metadata_paths: list[str],
     cols = ds.RasterXSize
     rows = ds.RasterYSize
     dn = ds.GetRasterBand(1).ReadAsArray(0, 0, cols, rows)
+    # float64 BEFORE any arithmetic: the vendor DN is uint16 and DN**2 would
+    # silently wrap.
     dn = dn.astype(np.float64)
 
     in_geo = ds.GetGeoTransform()
@@ -245,30 +306,46 @@ def sigmaCalib(s3_image_paths: list[str], s3_metadata_paths: list[str],
             metadata, cols, rows
         )
 
+    # The GRD zero-fill border is not data. Mask it to NaN so the NaN-aware
+    # filter neither smooths it into the scene nor smears the scene into it.
+    dn[dn == 0] = np.nan
+
+    # sigma0 (linear) = calibration_factor * DN**2, then the speckle filter on
+    # the LINEAR intensity before the dB conversion (Capella/Umbra convention:
+    # the filter averages physical power rather than logarithms).
     dn_sqr = np.power(dn, 2)
     dn_amp = dn_sqr * calib_value
     dn_filtered = lee_filter(dn_amp, size=filter_size)
 
-    print("[INFO] Amplitude Max: ", np.max(dn_filtered))
-    print("[INFO] Amplitude Min: ", np.min(dn_filtered))
+    valid = np.isfinite(dn_filtered) & (dn_filtered > 0)
+    print("[INFO] Amplitude Max: ", np.max(dn_filtered[valid]) if valid.any() else None)
+    print("[INFO] Amplitude Min: ", np.min(dn_filtered[valid]) if valid.any() else None)
 
-    dn_db = 10.0 * np.log10(dn_filtered)
+    dn_db = np.full(dn_filtered.shape, ICEYE_NODATA, dtype=np.float64)
+    dn_db[valid] = 10.0 * np.log10(dn_filtered[valid])
 
-    print("[INFO] dB Max: ", np.max(dn_db))
-    print("[INFO] dB Min: ", np.min(dn_db))
+    finite = dn_db[valid]
+    if finite.size:
+        print(f"[INFO] dB range: {np.min(finite)} -> {np.max(finite)} dB "
+              f"(nodata {ICEYE_NODATA})")
+    else:
+        print(f"[INFO] dB: no valid pixels (all {ICEYE_NODATA})")
 
     dt = datetime.strptime(
         grd_in_file.split("_")[-1].split(".")[0],
         "%Y%m%dT%H%M%S"
     )
 
-    outfile = (
-        f"{save_location}/"
-        f"{dt.strftime('%Y%m')}_"
-        f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}_"
-        f"sigma0-dB_"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"_filtered{filter_size}.tif"
+    # One shared SAR name builder (CLAUDE.md / .clinerules.md rule 51):
+    #   ICEYE-X48_sigma0-dB_filtered5_2026-05-13T15:48:16Z.tif
+    outfile = os.path.join(
+        save_location,
+        create_sar_output_filename(
+            f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}",
+            "sigma0-dB",
+            dt,
+            filter_size,
+        ),
     )
 
     dump_geotiff_float(outfile, dn_db, projref, in_geo)

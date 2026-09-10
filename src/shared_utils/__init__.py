@@ -60,7 +60,11 @@ from shared_utils.file_naming import (
     extract_datetime_from_filename,
     categorize_file,
     create_output_filename,
+    create_nisar_filename,
+    create_sar_output_filename,
     no_change,
+    prefix_event,
+    strip_event_prefix,
 )
 
 # Web Mercator clip detection (requires rasterio).
@@ -165,7 +169,11 @@ __all__ = [
     'extract_datetime_from_filename',
     'categorize_file',
     'create_output_filename',
+    'create_nisar_filename',
+    'create_sar_output_filename',
     'no_change',
+    'prefix_event',
+    'strip_event_prefix',
     # Web Mercator clip detection (reprojection.py)
     'needs_webmerc_clip',
     'WEBMERC_VALID_LAT',

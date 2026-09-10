@@ -28,15 +28,19 @@
 # never appears in the job parameters or log. Store them once from a MAAP notebook:
 #   maap.secrets.add_secret("COP_USER", ...); maap.secrets.add_secret("COP_PASS", ...)
 #
-# algorithm_name is intentionally distinct ("sentinel-2-ogc-test") so registering
-# this does NOT overwrite the existing GUI-registered "sentinel-2" process.
+# algorithm_name: UNLIKE the other OGC configs, sentinel2 does NOT use a
+# "<sensor>-ogc-test" name. The old GUI-registered "sentinel-2" process was
+# DELETED (2026-08-11), so there is nothing to coexist with — this OGC config is
+# now the single canonical registration, named "disasters-sentinel2-process".
+# dps/sentinel2/algorithm_config.yaml (the GUI path) carries the SAME name on
+# purpose: whichever path you register from, it targets the one process.
 # =============================================================================
-algorithm_name: sentinel-2-ogc-test
+algorithm_name: disasters-sentinel2-process
 algorithm_version: dev
 algorithm_description: >-
   Download Sentinel-2 L2A/L1C scenes from the Copernicus Data Space (CDSE) by
   MGRS tile(s) + date, then process into Cloud Optimized GeoTIFF disaster-response
-  products (true color, SWIR, NDVI, water extent, etc.). OGC test build: every
+  products (true color, SWIR, NDVI, water extent, etc.). Every
   input is optional in the schema so the Submit form never blocks; run.sh enforces
   the real requirements (tile, non-placeholder activation_event, readable
   Copernicus secrets). Credentials come from MAAP secrets, never the job inputs.
@@ -58,6 +62,14 @@ outdir_max: 20
 # "Valid value required" check. Defaults mirror dps/sentinel2/run.sh; run.sh does
 # the real validation after parsing. NO Copernicus credential VALUE inputs — only
 # the NAMES of the MAAP secrets that hold them (names are not sensitive).
+#
+# source_label / dst_crs / compression_level / limit / nodata are HARDCODED in
+# run.sh and are deliberately NOT inputs (matching Capella/Satellogic): the source
+# is always Copernicus for a download-from-CDSE job, output stays in the native UTM
+# zone, ZSTD level is fixed at 9, the CDSE search $top is fixed at 50, and nodata is
+# left to the CLI's per-dtype auto-detect (uint8 composites -> 0, float indices ->
+# -9999.0, which is what the index generators actually write). To change any of
+# them, publish a new algorithm_version with the constants in run.sh changed.
 inputs:
   - name: tile
     label: MGRS tile(s)
@@ -79,26 +91,16 @@ inputs:
     doc: "Sentinel-2 processing level to download: 2 = L2A (surface reflectance), 1 = L1C (top-of-atmosphere). Default 1 for the fast test path; use 2 for atmospherically-corrected production."
     type: string?
     default: "1"
-  - name: limit
-    label: Search result limit
-    doc: "Maximum number of Copernicus search results to download for the tile/date."
-    type: int?
-    default: 50
   - name: products
     label: Products
     doc: "Space-separated list (true nat swir colorIR ndvi ndwi mndwi nbr we) or 'all'."
     type: string?
     default: "true swir"
-  - name: source_label
-    label: Source
-    doc: "Data origin, e.g. Copernicus, ESA."
+  - name: we_nstd
+    label: Water-extent std devs
+    doc: "Only used when 'we' is in products; ignored otherwise. One or more NIR std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5 2. One water-extent COG is produced per value (filename carries NSTD_<value>). Higher = higher NIR threshold = MORE pixels classified as water. Decimals use a dot (1.5, not 1,5). Default 1."
     type: string?
-    default: "Copernicus"
-  - name: dst_crs
-    label: Target CRS
-    doc: "Target CRS: native (default, no warp, preserves source projection) | EPSG:3857 | EPSG:4326."
-    type: string?
-    default: "native"
+    default: "1"
   - name: merge
     label: Merge by date/product
     doc: Mosaic scenes by date and product (-merge).
@@ -109,21 +111,6 @@ inputs:
     doc: Generate and apply a cloud mask (-mask, L2A only).
     type: boolean?
     default: false
-  - name: we_nstd
-    label: Water-extent std devs (optional)
-    doc: 'Space-separated std-dev thresholds for water extent (no quotes), e.g. 1 1.5.'
-    type: string?
-    default: ""
-  - name: compression_level
-    label: COG compression level
-    doc: "ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. Default 1 for a fast test; raise (e.g. 22 = max) for smaller production COGs."
-    type: int?
-    default: 1
-  - name: nodata
-    label: No-data value
-    doc: "No-data value for the output COGs (Sentinel-2 default 0)."
-    type: string?
-    default: "0"
 
 outputs:
   - name: output

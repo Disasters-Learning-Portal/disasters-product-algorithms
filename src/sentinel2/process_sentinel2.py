@@ -40,6 +40,23 @@ class Unbuffered(object):
 sys.stdout = Unbuffered(sys.stdout)
 sys.stderr = Unbuffered(sys.stderr)
 
+# Product directories whose output is an 8-bit colour composite. These are
+# written by gen_rgb -> dump_geotiff_rgb(..., alpha=...), so they carry a 4th
+# GCI_AlphaBand and must pass nodata=False: 0 is a legitimate uint8 sample
+# (dark water, shadow, burn scar), and a scalar nodata declared alongside an
+# alpha band shadows it (rasterio NodataShadowWarning), masking real black
+# pixels. `False` is the explicit opt-out -- `None` would auto-detect, which
+# for uint8 historically meant 0 and is exactly the bug. Matches Satellogic
+# (PR #109). Indices (NDVI/NDWI/MNDWI/NBR) are float32 and keep args.nodata.
+#
+# Lowercased basenames of the prod_dir values created below.
+COMPOSITE_PRODUCT_DIRS = {
+    'truecolor',
+    'naturalcolor',
+    'shortwaveinfrared',
+    'colorinfrared',
+}
+
 then = datetime.now()
 
 parser=argparse.ArgumentParser(
@@ -385,7 +402,7 @@ else:
             if not args.tif_only and not args.merge:
                 cog_path = convert_to_cog(
                     prod_name,
-                    nodata=args.nodata,
+                    nodata=False,  # trueColor: 8-bit composite, alpha band carries validity
                     dst_crs=dst_crs_value,
                     metadata=metadata,
                     compression=args.compression,
@@ -437,7 +454,7 @@ else:
             if not args.tif_only and not args.merge:
                 cog_path = convert_to_cog(
                     prod_name,
-                    nodata=args.nodata,
+                    nodata=False,  # naturalColor: 8-bit composite, alpha band carries validity
                     dst_crs=dst_crs_value,
                     metadata=metadata,
                     compression=args.compression,
@@ -489,7 +506,7 @@ else:
           if not args.tif_only and not args.merge:
               cog_path = convert_to_cog(
                   prod_name,
-                  nodata=args.nodata,
+                  nodata=False,  # shortwaveInfrared: 8-bit composite, alpha band carries validity
                   dst_crs=dst_crs_value,
                   metadata=metadata,
                   compression=args.compression,
@@ -541,7 +558,7 @@ else:
           if not args.tif_only and not args.merge:
               cog_path = convert_to_cog(
                   prod_name,
-                  nodata=args.nodata,
+                  nodata=False,  # colorInfrared: 8-bit composite, alpha band carries validity
                   dst_crs=dst_crs_value,
                   metadata=metadata,
                   compression=args.compression,
@@ -895,6 +912,12 @@ else:
         is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
         mask_status = args.mask if is_index else False
 
+        # A merged composite is still an 8-bit composite -- it inherits the
+        # alpha band from its inputs (gen_merge is band-count agnostic), so it
+        # needs the same nodata opt-out the per-scene branches use. Without
+        # this the merge path silently re-declares nodata=0 and undoes the fix.
+        is_composite = os.path.basename(os.path.normpath(prod_dir)).lower() in COMPOSITE_PRODUCT_DIRS
+
         # merge products of the same date
         print(f'Merging: {prod_dir} (Masking: {mask_status})')
         merged_file = s2_merge(prod_dir, mask_status)
@@ -903,7 +926,7 @@ else:
         if not args.tif_only:
             cog_path = convert_to_cog(
                 merged_file,
-                nodata=args.nodata,
+                nodata=False if is_composite else args.nodata,
                 dst_crs=dst_crs_value,
                 metadata=metadata,
                 compression=args.compression,

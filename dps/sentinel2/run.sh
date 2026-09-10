@@ -33,22 +33,41 @@ source "${basedir}/../_validate.sh"
 # event below). For a real activation, change tile / download_date / activation_event.
 ACTIVATION_EVENT="202601_KyleWx_US"
 PRODUCTS="true swir"
-SOURCE_LABEL="Copernicus"
 TILE="T17RLN T17RLM"
 DOWNLOAD_DATE="20251231"
 LEVEL="1"
-LIMIT="50"
+WE_NSTD="1"
+MERGE="true"
+MASK="false"
 # NAMES of the MAAP secrets holding the Copernicus credentials (not the values).
 # BAKED IN (not job inputs): the operator stores COP_USER / COP_PASS once with
 # maap.secrets.add_secret; run.sh fetches them by these fixed names at run time.
 COP_USER_SECRET="COP_USER"
 COP_PASS_SECRET="COP_PASS"
+# HARDCODED (NOT job inputs, not parsed from flags) -- mirrors the Capella /
+# Satellogic pattern. To change any of these, publish a new algorithm_version.
+#   SOURCE_LABEL: a download-from-CDSE job always has Copernicus as its origin.
+#   DST_CRS:      native = no warp, preserves the source UTM zone (fastest). Pass
+#                 EPSG:3857 only when the COG is headed for veda-data-airflow's
+#                 build_stac; native COGs still ingest + tile via titiler.
+#   COMPRESSION_LEVEL: ZSTD 9 -- balanced size/runtime for 10980^2 S2 tiles.
+#   LIMIT:        download_sentinel2's -limit, i.e. the OData $top on the CDSE
+#                 catalogue query. It is a PER-TILE page size, NOT a total cap, and
+#                 the download loop does not follow @odata.nextLink -- so 50 is a
+#                 generous ceiling no realistic tile+date query reaches. Getting
+#                 fewer scenes than expected is the S2 revisit (~5 days: a single
+#                 -date catches one orbit swath -- widen download_date to a range)
+#                 or a wrong level, never this number.
+#   NODATA:       intentionally UNSET. The CLI's -nodata is a single value applied
+#                 to EVERY product, but S2 products are mixed-dtype: uint8 color
+#                 composites (fill 0) and float32 indices (dump_geotiff_float
+#                 writes -9999.0, and 0 is a LEGITIMATE NDVI/NDWI value). Leaving
+#                 it off lets cog_utils.set_nodata_value auto-detect per dtype and
+#                 get both right; a blanket -nodata 0 mis-declared the indices.
+SOURCE_LABEL="Copernicus"
 DST_CRS="native"
-MERGE="true"
-MASK="false"
-WE_NSTD=""
-COMPRESSION_LEVEL="1"
-NODATA="0"
+COMPRESSION_LEVEL="9"
+LIMIT="50"
 # Publishing is ALWAYS ON and the S3 destination is LOCKED for this version --
 # neither is a job input nor parsed from a flag, so operators cannot change where
 # output goes. Sentinel-2 publishes to the MAAP staging bucket nasa-disasters-
@@ -70,15 +89,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --activation_event)      ACTIVATION_EVENT="$2"; shift 2;;
     --products)              PRODUCTS="$2"; shift 2;;
-    --source_label)          SOURCE_LABEL="$2"; shift 2;;
     --tile)                  TILE="$2"; shift 2;;
     --download_date)         DOWNLOAD_DATE="$2"; shift 2;;
     --level)                 LEVEL="$2"; shift 2;;
-    --limit)                 LIMIT="$2"; shift 2;;
-    --dst_crs)               DST_CRS="$2"; shift 2;;
     --we_nstd)               WE_NSTD="$2"; shift 2;;
-    --compression_level)     COMPRESSION_LEVEL="$2"; shift 2;;
-    --nodata)                NODATA="$2"; shift 2;;
     --merge)                 if [[ "${2:-}" =~ ^(true|false)$ ]]; then MERGE="$2"; shift 2; else MERGE="true"; shift; fi ;;
     --mask)                  if [[ "${2:-}" =~ ^(true|false)$ ]]; then MASK="$2"; shift 2; else MASK="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
@@ -97,7 +111,6 @@ PRODUCTS="${PRODUCTS//[\"\']/}"
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 validate_activation_event "${ACTIVATION_EVENT}"
-require_nonempty source_label "${SOURCE_LABEL}" "e.g. Copernicus"
 require_nonempty tile "${TILE}" 'one or more MGRS tiles, space-separated, e.g. T17RLN or: T17RLN T17RLM'
 # shellcheck disable=SC2086  # intentional word-split of the space-separated list
 for t in ${TILE}; do validate_regex tile "$t" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e.g. T17RLN'; done
@@ -106,17 +119,19 @@ for t in ${TILE}; do validate_regex tile "$t" '^T[0-9]{2}[A-Z]{3}$' 'MGRS tile e
 # shellcheck disable=SC2086
 [[ -n "${DOWNLOAD_DATE}" ]] && for d in ${DOWNLOAD_DATE}; do validate_regex download_date "$d" '^[0-9]{8}$' 'YYYYMMDD'; done
 validate_in_set level "${LEVEL}" "1 2"
-validate_int_range limit "${LIMIT}" 1 1000
-validate_dst_crs "${DST_CRS}"
-validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # optical products validated here (the CLI's own check ends in quit() -> exit 0);
 # token set mirrors the accepted list in src/sentinel2/process_sentinel2.py.
+# CASE-FOLD FIRST: the CLI is case-INSENSITIVE (it tests `p.lower() not in
+# product_variants` and every dispatch uses `p.lower()`), but validate_in_set is an
+# exact string compare. Without normalize_token, the token `colorIR` -- which this
+# algorithm's OWN input doc advertises, and which the CLI happily accepts -- died
+# here with "products 'colorIR' is invalid" before process_sentinel2 ever ran. Only
+# the validation is folded; ${PRODUCTS} is passed to the CLI unmodified.
 # shellcheck disable=SC2086
-for t in ${PRODUCTS}; do validate_in_set products "$t" \
+for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" \
   "all true tc truecolor nat natural naturalcolor colorir cir colorinfrared swir shortwaveir shortwaveinfrared ndwi mndwi ndvi nbr we waterextent"; done
 # shellcheck disable=SC2086
 [[ -n "${WE_NSTD}" ]] && for n in ${WE_NSTD}; do validate_number we_nstd "$n"; done
-[[ -n "${NODATA}"  ]] && validate_number nodata  "${NODATA}"
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
 mkdir -p "${OUT_HOME}"
@@ -164,7 +179,7 @@ args=( "${DL_DIR}"
 [[ "${MERGE}" == "true" ]] && args+=( -merge )
 [[ "${MASK}"  == "true" ]] && args+=( -mask )
 [[ -n "${WE_NSTD}" ]]      && args+=( -we_nstd ${WE_NSTD} )
-[[ -n "${NODATA}" ]]       && args+=( -nodata "${NODATA}" )
+# NOTE: no -nodata on purpose -- see the NODATA comment in the constants block.
 
 conda run --live-stream --name disasters_dps process_sentinel2 "${args[@]}"
 

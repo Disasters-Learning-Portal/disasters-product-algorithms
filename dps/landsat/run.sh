@@ -72,8 +72,14 @@ validate_dst_crs "${DST_CRS}"
 validate_int_range compression_level "${COMPRESSION_LEVEL}" 1 22
 # optical products validated here (the CLI's own check ends in quit() -> exit 0);
 # token set mirrors the accepted list in src/landsat/process_landsat89.py.
+# CASE-FOLD FIRST: the CLI is case-INSENSITIVE (it tests `p.lower() not in
+# product_variants` and every dispatch uses `p.lower()`), but validate_in_set is an
+# exact string compare. Without normalize_token, the token `colorIR` -- which this
+# algorithm's OWN input doc advertises, and which the CLI happily accepts -- died
+# here with "products 'colorIR' is invalid" before process_landsat89 ever ran. Only
+# the validation is folded; ${PRODUCTS} is passed to the CLI unmodified.
 # shellcheck disable=SC2086  # intentional word-split of the space-separated list
-for t in ${PRODUCTS}; do validate_in_set products "$t" \
+for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" \
   "all true tc truecolor pan panchromatic nat natural naturalcolor nc colorir colorinfrared cir mndwi ndvi evi ndwi nbr we waterextent"; done
 [[ -n "${PROCESS_DATE}" ]] && validate_regex process_date "${PROCESS_DATE}" '^[0-9]{8}$' 'YYYYMMDD'
 [[ -n "${PROCESS_TILE}" ]] && validate_regex process_tile "${PROCESS_TILE}" '^[0-9]{6}$' 'path/row e.g. 171035'

@@ -17,6 +17,10 @@ dependencies = [
     "psutil",
     "fsspec",
     "s3fs",
+    # Sentinel-2 STAC pipeline (sentinel2.sentinel2_odr_functions).
+    # A hard module-level import, so without it `process_sentinel2_odr`
+    # fails at import and the CI cli-smoke job goes red.
+    "pystac-client>=0.9.0",
 ]
 
 # =============================================================================
@@ -49,6 +53,7 @@ test = [
 [project.scripts]
 process_landsat89 = "landsat.cli:process_landsat89_cli"
 process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
+process_sentinel2_odr = "sentinel2.cli:process_sentinel2_odr_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 process_satellogic = "satellogic.cli:process_satellogic_cli"
 process_umbra = "umbra.cli:process_umbra_cli"
@@ -61,24 +66,19 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "iceye*", "blackmarble*", "shared_utils*", "raster_tools*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "iceye*", "shared_utils*", "raster_tools*"]
 
-# blackmarble/ is a VENDORED, self-contained package (VEDA Black Marble nighttime-
-# lights pipeline; source: github.com/HarshiniGirish/veda-black-marble). Unlike the
-# process_* sensors it deliberately has NO [project.scripts] entry and NONE of its
-# heavy deps (earthaccess/osmnx/pystac-client/obstore/typer/duckdb) in
-# [project.dependencies] or dev-conda-deps.txt. Those live ONLY in dps/environment.yml
-# so they stay isolated to the DPS worker (never the hub image, CI, or base install).
-# The DPS job invokes it as `python -m blackmarble.cli` (see dps/blackmarble/run.sh).
-# Installing the package here just ships its files + data; nothing imports it unless a
-# DPS worker (which HAS the deps) runs it.
-
-# The WRS2 descending path/row shapefile is loaded at runtime by a plain
-# Path(__file__).parent.parent / "data" / ... lookup (blackmarble/acquire/wrs_utils.py),
-# so it MUST ship next to the module as package data (pip installs unzipped -> the
-# filesystem path resolves).
+# The Sentinel-2 STAC pipeline reads its algorithm catalog from a JSON
+# file shipped alongside the code. Without this it is absent from an
+# installed copy and `process_sentinel2_odr` cannot find its default
+# --algorithm-file.
 [tool.setuptools.package-data]
-blackmarble = ["data/WRS2_descending/*"]
+sentinel2 = ["algorithms-sentinel2.json"]
+
+# NOTE: Black Marble is NOT part of this package. The VEDA Black Marble nighttime-lights
+# pipeline lives in its own upstream repo (github.com/NASA-IMPACT/veda-black-marble) and is
+# pip-installed into the DPS worker env from there (see dps/environment.yml). It used to be
+# vendored under src/blackmarble/; don't re-vendor it -- upstream is the maintainer.
 
 [tool.setuptools_scm]
 # Single source of truth for version = the git tag.
@@ -92,4 +92,7 @@ markers = [
     "gdal: tests requiring GDAL CLI tools",
     "rio_cogeo: tests requiring rio-cogeo CLI",
     "slow: slow integration tests",
+    # tests/e2e -- real network, real NASA Earthdata credentials, real downloads. Opt-in
+    # via DPS_E2E=1 + EARTHDATA_TOKEN; they skip otherwise, including in CI.
+    "e2e: end-to-end tests against live external services",
 ]

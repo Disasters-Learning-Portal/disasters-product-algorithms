@@ -14,6 +14,7 @@ What's automated today:
 | Notebook cell-0 conformance (per-sensor) | `tools/check_sensor_consistency.py` | Runs locally + in CI + as pre-commit hook |
 | Pre-commit enforcement of the consistency lint | `.pre-commit-config.yaml` (local hook) | Local, opt-in via `pre-commit install` |
 | New sensor scaffolding (one command) | `tools/new_sensor.py` | Local — operator-invoked |
+| Update a checkout to the latest release + reinstall | `tools/update.sh` | Local — operator-invoked |
 | CLI importability after `pip install .` | `.github/workflows/lint.yml` `cli-smoke` job (import-test + `--help`) | CI only |
 | GDAL execution paths (merge / COG / warp / nodata / metadata / `cog_validate`) | `.github/workflows/lint.yml` `pytest` job (real GDAL conda env, Python 3.13) | CI + local (dev image) |
 | Hub image build (prod) | `.github/workflows/build-and-push.yaml` | Push to `main` (code paths only) |
@@ -159,6 +160,28 @@ tests/`. `dev-conda-deps.txt` stays unpinned on purpose (mirrors the hub's float
 is the guard that catches when that drift breaks a code path. This closes the gap that let the #31
 stale naming tests and the Sentinel-2 merge defects (rules 26–27) sit red/undetected: the merge/COG
 suite now runs on every push + PR to `dev`/`main`.
+
+### What CI deliberately does NOT execute
+
+The `pytest` job runs `tests/`, which now includes **`tests/e2e/`** — but every test there is
+gated on an opt-in env var **and** a live credential, so the job collects them and skips:
+
+| Tier | Gate | Also needs | Where it can run |
+|---|---|---|---|
+| `tests/unit`, `tests/integration` | — | real GDAL | CI, laptop, dev image |
+| `tests/e2e -m 'not slow'` | `DPS_E2E=1` + `EARTHDATA_TOKEN` | `disasters_dps` env (upstream `blackmarble` + `libgdal-hdf5`), network | laptop, hub |
+| `tests/e2e -m slow` | same | **ambient AWS credentials** | DPS worker, MAAP hub |
+
+The `slow` tier runs whole `run.sh` pipelines. Black Marble fuses VIIRS with Landsat from the
+**requester-pays** bucket `s3://usgs-landsat`, read via `obstore`; with no credentials obstore
+falls back to the EC2 metadata service (`169.254.169.254`) and fails *after* the VIIRS download
+has already succeeded. Its fixture recognises that signature and skips with an explanation rather
+than reporting a code failure — see `.clinerules.md` rule 44.
+
+**Rule for anything added here: a test that loops over a glob must assert the glob is non-empty
+first.** The first version of the e2e suite reported COG-validity and provenance as *passed* over
+zero files while the jobs had actually failed — a `for` loop (or `any()`/`all()`) over an empty
+list asserts nothing, and silence is indistinguishable from success.
 
 The **faithful local runtime is the dev hub image** — `klesinger/disasters-jupyterhub-docker-image-dev:latest`
 (the exact deployment: **GDAL 3.12.3 / PROJ 9.7.1 / Python 3.13 / rio-cogeo 7.0.2**). `tests/` is
@@ -339,6 +362,47 @@ Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
 
 Adding new "verb prefixes" (today: `process_`, `download_`) is a one-line
 constant change at line ~50.
+
+---
+
+## Updating a checkout — `tools/update.sh`
+
+What to give an operator who asks "how do I get the new version?".
+
+```bash
+bash tools/update.sh                 # onto main (the released version)
+bash tools/update.sh --branch dev    # onto dev (unreleased tip)
+bash tools/update.sh --no-install    # pull only, skip pip
+```
+
+**The reinstall is not optional.** The version is dynamic — `setuptools-scm` derives it from the
+newest git tag, and `shared_utils.version` reads it back through `importlib.metadata`, which
+resolves at **install** time. A bare `git pull` therefore leaves `PROCESSOR_STRING` — the tag baked
+into every COG we publish — reporting the old version, and the console scripts still pointing at the
+previous tree. The script also runs `git fetch --tags --force`, since a stale tag yields a wrong
+reported version.
+
+**pip is safe here.** `[project.dependencies]` deliberately excludes GDAL/rasterio/rio-cogeo (conda
+owns those, per hard rule #6), so this installs only pure-Python deps and cannot clobber the geo
+stack with wheels. Run it inside the same env you use the tools from.
+
+**Uncommitted work** is stashed and restored around the branch switch. Two details that matter:
+
+- The stash carries a **unique per-run marker** and is popped **by that marker**, never as
+  `stash@{0}` — otherwise a stash the user already had would be restored in its place and ours
+  silently left behind. Pre-existing stashes are reported and untouched.
+- An `EXIT` trap restores the work even when the update fails partway, so a diverged branch cannot
+  strand someone's edits in a stash they don't know about. If the pop conflicts the stash is
+  **kept, never dropped**, and the exact recovery command is printed.
+
+`git pull --ff-only`, so it never invents a merge commit in someone's checkout; divergence prints
+the inspect/reset commands instead of guessing.
+
+Pinned by `tests/integration/test_update_sh.py` — seven functional tests driving real throwaway git
+repos rather than asserting on output text, including the pre-existing-stash case and the
+diverged-branch failure path (which asserts the user's work is back on disk after a non-zero exit).
+`--no-install` throughout: a real install would mutate the runner's environment for no added signal,
+so the pip step is the one part not covered.
 
 ---
 

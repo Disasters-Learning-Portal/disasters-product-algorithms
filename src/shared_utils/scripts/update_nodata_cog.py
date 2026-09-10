@@ -48,20 +48,17 @@ def update_nodata_cog(input_path: str):
 
         # Check if we need to remap data values
         needs_remapping = False
-        extreme_values = [
-            -3.4028234663852886e+38,
-            3.4028234663852886e+38,
-            -3.40282346638529e+38,
-            3.40282346638529e+38,
-            3.3999999521443642e+38,
-            -3.3999999521443642e+38
-        ]
 
-        for extreme_val in extreme_values:
-            if np.any(np.isclose(data, extreme_val, rtol=1e-6)):
-                needs_remapping = True
-                print(f"  Detected extreme value: {extreme_val}")
-                break
+        # Magnitude test rather than np.isclose against FLT_MAX: the latter
+        # computes abs(x - 3.4e38), which overflows float32 and emits
+        # "RuntimeWarning: overflow encountered in subtract" on every call.
+        # Nothing we carry legitimately exceeds 1e30, so the comparison is both
+        # safer and catches near-miss sentinels the explicit list would miss.
+        finite = data[np.isfinite(data)]
+        extreme_present = finite[np.abs(finite) >= 1e30]
+        if extreme_present.size:
+            needs_remapping = True
+            print(f"  Detected extreme value: {float(extreme_present.flat[0])}")
 
     # Create temporary file for intermediate processing
     temp_fd, temp_path = tempfile.mkstemp(suffix='.tif', dir=input_path.parent)
@@ -80,14 +77,18 @@ def update_nodata_cog(input_path: str):
                 profile = src.profile.copy()
                 profile['nodata'] = target_nodata
 
-                # Read and remap data
+                # Read and remap data. Same magnitude test as the detection
+                # above — one pass, no overflow, and it catches every sentinel
+                # in the band rather than only the enumerated ones. Non-finite
+                # fill (NaN / +-inf) is swept up too, since it is equally
+                # unmaskable once the tag says -9999.
                 data = src.read()
-                for extreme_val in extreme_values:
-                    mask = np.isclose(data, extreme_val, rtol=1e-6)
-                    if np.any(mask):
-                        num_pixels = np.sum(mask)
-                        data[mask] = target_nodata
-                        print(f"    Remapped {num_pixels} pixels from {extreme_val}")
+                mask = ~np.isfinite(data) | (np.abs(data) >= 1e30)
+                num_pixels = int(np.count_nonzero(mask))
+                if num_pixels:
+                    sample = data[mask].flat[0]
+                    data[mask] = target_nodata
+                    print(f"    Remapped {num_pixels} pixels from {sample}")
 
                 # Write to temp file
                 with rasterio.open(temp_path, 'w', **profile) as dst:
@@ -107,7 +108,14 @@ def update_nodata_cog(input_path: str):
             input_for_cog,
             final_path,
             '--cog-profile', 'zstd',
-            '--overview-level', '22',
+            # The zstd compression level belongs here, as a driver creation
+            # option. It used to be passed as `--overview-level 22`, so
+            # rio-cogeo tried to build 22 overview levels — a 2^22 decimation —
+            # and every run died with "Too many overviews levels of 1x1
+            # dimension were requested" before writing anything. Dropping that
+            # flag lets rio-cogeo derive a sane level count from the raster
+            # size and blocksize.
+            '--co', 'LEVEL=9',
             '--overview-resampling', 'nearest',
             '--blocksize', '512',
             '--nodata', str(target_nodata)

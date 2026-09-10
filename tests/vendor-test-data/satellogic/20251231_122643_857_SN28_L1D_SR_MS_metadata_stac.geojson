@@ -1,0 +1,225 @@
+{
+    "type": "Feature",
+    "stac_version": "1.0.0",
+    "id": "20251231_122643_857_SN28_L1D_SR_MS",
+    "properties": {
+        "satl:sat_id": "newsat28",
+        "satl:product_name": "L1D_SR",
+        "satl:product_version": "2.0.1",
+        "satl:outcome_id": "e1786bc5-229d-498c-9f3b-d166d2020caf",
+        "satl:exposure_sec": 0.002,
+        "eo:cloud_cover": 0.0,
+        "proj:epsg": 32637,
+        "view:off_nadir": 23.255,
+        "view:sun_azimuth": 227.322,
+        "view:sun_elevation": 26.0,
+        "view:azimuth": 61.083,
+        "view:incidence_angle": 24.6,
+        "gsd": 0.7,
+        "platform": "NewSat",
+        "satl:satellite_generation": "MarkIV",
+        "instruments": [
+            "multispectral"
+        ],
+        "constellation": "Aleph1",
+        "license": "proprietary",
+        "created": "2026-01-21T18:53:25.141755Z",
+        "providers": [
+            {
+                "name": "Satellogic",
+                "description": "High-resolution geospatial imagery and analytics",
+                "roles": [
+                    "producer",
+                    "processor"
+                ],
+                "url": "https://satellogic.com/"
+            }
+        ],
+        "datetime": "2025-12-31T12:26:43.857242Z"
+    },
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [
+                    39.5113447244944,
+                    24.02433814688917
+                ],
+                [
+                    39.48490496097753,
+                    23.902145112275544
+                ],
+                [
+                    39.48197212358315,
+                    23.88243172567023
+                ],
+                [
+                    39.47885862357888,
+                    23.87313640054279
+                ],
+                [
+                    39.47693845362312,
+                    23.859285913531412
+                ],
+                [
+                    39.47360489987622,
+                    23.849687697191907
+                ],
+                [
+                    39.46399733277359,
+                    23.806933623068126
+                ],
+                [
+                    39.5090430544757,
+                    23.80234129530884
+                ],
+                [
+                    39.52292472930196,
+                    23.86550855685103
+                ],
+                [
+                    39.525036373683385,
+                    23.871064149606774
+                ],
+                [
+                    39.528975121201775,
+                    23.893200590016257
+                ],
+                [
+                    39.55668524889379,
+                    24.020033415387385
+                ],
+                [
+                    39.5113447244944,
+                    24.02433814688917
+                ]
+            ]
+        ]
+    },
+    "links": [
+        {
+            "rel": "license",
+            "href": "https://satellogic.com/documents/satellogic-3447.pdf",
+            "type": "application/pdf"
+        }
+    ],
+    "assets": {
+        "analytic": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_TOA.vrt",
+            "type": "application/xml",
+            "title": "4-Band analytic",
+            "eo:bands": [
+                {
+                    "name": "band1",
+                    "common_name": "blue",
+                    "center_wavelength": 480,
+                    "full_width_half_max": 60
+                },
+                {
+                    "name": "band2",
+                    "common_name": "green",
+                    "center_wavelength": 545,
+                    "full_width_half_max": 70
+                },
+                {
+                    "name": "band3",
+                    "common_name": "red",
+                    "center_wavelength": 640,
+                    "full_width_half_max": 100
+                },
+                {
+                    "name": "band4",
+                    "common_name": "nir",
+                    "center_wavelength": 825,
+                    "full_width_half_max": 150
+                }
+            ],
+            "roles": [
+                "data"
+            ]
+        },
+        "cloud": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_CLOUD.vrt",
+            "type": "application/xml",
+            "title": "Cloud Mask",
+            "roles": [
+                "cloud"
+            ]
+        },
+        "thumbnail": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_thumbnail.png",
+            "type": "image/png",
+            "title": "Thumbnail",
+            "roles": [
+                "thumbnail"
+            ]
+        },
+        "preview": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_preview.png",
+            "type": "image/png",
+            "title": "Preview",
+            "roles": [
+                "overview"
+            ]
+        },
+        "geojson-metadata": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_metadata_stac.geojson",
+            "type": "application/geo+json",
+            "title": "Extended STAC Metadata",
+            "roles": [
+                "metadata"
+            ]
+        },
+        "xml-metadata": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_metadata_iso.xml",
+            "type": "application/xml",
+            "title": "Extended ISO Metadata",
+            "roles": [
+                "metadata"
+            ]
+        },
+        "footprint": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_footprint.kml",
+            "type": "application/vnd.google-earth.kml+xml",
+            "title": "Footprint",
+            "roles": [
+                "footprint"
+            ]
+        },
+        "toa-factors": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_toa_factors.geojson",
+            "type": "application/geo+json",
+            "title": "TOA factors",
+            "roles": [
+                "metadata"
+            ]
+        },
+        "solar-and-viewing-angles": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_solar_and_viewing_angles.geojson",
+            "type": "application/geo+json",
+            "title": "Solar and viewing angles",
+            "roles": [
+                "metadata"
+            ]
+        },
+        "visual": {
+            "href": "20251231_122643_857_SN28_L1D_SR_MS_VISUAL.vrt",
+            "type": "application/xml",
+            "title": "3-Band RGB visual",
+            "roles": [
+                "data"
+            ]
+        }
+    },
+    "bbox": [
+        39.46399733277359,
+        23.80234129530884,
+        39.55668524889379,
+        24.02433814688917
+    ],
+    "stac_extensions": [
+        "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+        "https://stac-extensions.github.io/view/v1.0.0/schema.json"
+    ]
+}

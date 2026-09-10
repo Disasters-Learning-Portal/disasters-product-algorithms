@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document id="root_doc">
+<Schema name="20251231_122643_857_SN28_L1D_SR_MS" id="20251231_122643_857_SN28_L1D_SR_MS">
+	<SimpleField name="DN" type="int"></SimpleField>
+</Schema>
+<Folder><name>20251231_122643_857_SN28_L1D_SR_MS</name>
+  <Placemark id="20251231_122643_857_SN28_L1D_SR_MS.1">
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#20251231_122643_857_SN28_L1D_SR_MS">
+		<SimpleData name="DN">65535</SimpleData>
+	</SchemaData></ExtendedData>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>39.5113447244944,24.0243381468892 39.4849049609775,23.9021451122755 39.4819721235831,23.8824317256702 39.4788586235789,23.8731364005428 39.4769384536231,23.8592859135314 39.4736048998762,23.8496876971919 39.4639973327736,23.8069336230681 39.5090430544757,23.8023412953088 39.522924729302,23.865508556851 39.5250363736834,23.8710641496068 39.5289751212018,23.8932005900163 39.5566852488938,24.0200334153874 39.5113447244944,24.0243381468892</coordinates></LinearRing></outerBoundaryIs></Polygon>
+  </Placemark>
+</Folder>
+</Document></kml>

@@ -147,6 +147,19 @@ class TestSensorCallSites:
             "/tmp/s3_temp/2026-08-05-03-54-47_UMBRA-07_GEC.tif", "sigma0", 5
         ) == "Umbra-07_sigma0_filtered5_2026-08-05T03:54:47Z.tif"
 
+    def test_umbra_sigma_calib_emits_backscatterdb_token(self):
+        """sigmaCalib's dB output is named `backscatterdB`, matching the
+        disasters-data umbra-gec-subdaily ingest convention
+        (`Umbra_backscatterdB_<stamp>.tif`)."""
+        from umbra.umbra_v2 import UMBRA_SIGMA_PRODUCT, _umbra_output_name
+
+        assert UMBRA_SIGMA_PRODUCT == "backscatterdB"
+        assert _umbra_output_name(
+            "/tmp/s3_temp/2026-08-05-03-54-47_UMBRA-07_GEC.tif",
+            UMBRA_SIGMA_PRODUCT,
+            5,
+        ) == "Umbra-07_backscatterdB_filtered5_2026-08-05T03:54:47Z.tif"
+
     @pytest.mark.parametrize("product", ["sigma0", "beta0", "gamma0"])
     def test_umbra_all_three_calib_products(self, product):
         from umbra.umbra_v2 import _umbra_output_name

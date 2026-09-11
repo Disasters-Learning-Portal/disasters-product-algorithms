@@ -154,6 +154,13 @@ def lee_filter(img: np.ndarray, size: int) -> np.ndarray:
     return np.where(valid, out, np.nan)
 
 
+# Product token for sigmaCalib's dB output. The Disasters ingest convention
+# (disasters-data umbra-gec-subdaily) names the delivered Umbra rasters
+# `Umbra_backscatterdB_<stamp>.tif`, so the pipeline emits the same token.
+# beta0 / gamma0 keep their own tokens.
+UMBRA_SIGMA_PRODUCT = "backscatterdB"
+
+
 def _umbra_output_name(in_file: str, product: str, filter_size: int) -> str:
     """Output basename for one calibrated Umbra product.
 
@@ -211,7 +218,7 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
 
     outfile = os.path.join(
         product_output_dir(save_location, "umbra", "sigma0"),
-        _umbra_output_name(in_file, "sigma0", filter_size)
+        _umbra_output_name(in_file, UMBRA_SIGMA_PRODUCT, filter_size)
     )
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 

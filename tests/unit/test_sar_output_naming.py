@@ -23,6 +23,7 @@ These tests exercise the calib functions' naming through the module-level
 helpers rather than through the full calibration, which needs vendor S3.
 """
 
+import os
 import re
 from datetime import datetime
 
@@ -146,6 +147,51 @@ class TestSensorCallSites:
         assert _umbra_output_name(
             "/tmp/s3_temp/2026-08-05-03-54-47_UMBRA-07_GEC.tif", "sigma0", 5
         ) == "Umbra-07_sigma0_filtered5_2026-08-05T03:54:47Z.tif"
+
+    def test_umbra_sigma_calib_emits_backscatterdb_token(self):
+        """sigmaCalib's dB output is named `backscatterdB`, matching the
+        disasters-data umbra-gec-subdaily ingest convention
+        (`Umbra_backscatterdB_<stamp>.tif`)."""
+        from umbra.umbra_v2 import UMBRA_SIGMA_PRODUCT, _umbra_output_name
+
+        assert UMBRA_SIGMA_PRODUCT == "backscatterdB"
+        assert _umbra_output_name(
+            "/tmp/s3_temp/2026-08-05-03-54-47_UMBRA-07_GEC.tif",
+            UMBRA_SIGMA_PRODUCT,
+            5,
+        ) == "Umbra-07_backscatterdB_filtered5_2026-08-05T03:54:47Z.tif"
+
+    def test_umbra_sigma_calib_writes_backscatterdb_name(self, tmp_path):
+        """Run the real sigmaCalib on a synthetic GEC band: the file it
+        writes must carry the backscatterdB token (so the umbra-gec-subdaily
+        ``filename_regex`` claims it) and still land in the ``GEC/`` product
+        directory, which is keyed on ``("umbra", "sigma0")``."""
+        import numpy as np
+        from osgeo import gdal, osr
+        from umbra.umbra_v2 import sigmaCalib
+
+        dl = tmp_path / "dl"
+        dl.mkdir()
+        gec = dl / "2026-08-05-03-54-47_UMBRA-07_GEC.tif"
+        ds = gdal.GetDriverByName("GTiff").Create(str(gec), 16, 16, 1, gdal.GDT_UInt16)
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        ds.SetProjection(srs.ExportToWkt())
+        ds.SetGeoTransform((144.0, 1e-5, 0, 13.5, 0, -1e-5))
+        ds.SetMetadataItem("DN_TO_SIGMA", "0.001")
+        ds.GetRasterBand(1).WriteArray(np.full((16, 16), 500, dtype=np.uint16))
+        ds = None
+
+        out = sigmaCalib([f"s3://b/p/{gec.name}"], str(tmp_path / "out"),
+                         filter_size=3, download_dir=str(dl))
+
+        assert os.path.basename(out) == (
+            "Umbra-07_backscatterdB_filtered3_2026-08-05T03:54:47Z.tif"
+        )
+        assert re.match(r"^Umbra(-\d+)?_backscatterdB_.*Z\.tif$",
+                        os.path.basename(out))
+        assert os.path.basename(os.path.dirname(out)) == "GEC"
+        assert os.path.exists(out)
 
     @pytest.mark.parametrize("product", ["sigma0", "beta0", "gamma0"])
     def test_umbra_all_three_calib_products(self, product):

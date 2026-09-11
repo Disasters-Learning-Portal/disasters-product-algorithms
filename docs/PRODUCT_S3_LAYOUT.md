@@ -85,7 +85,7 @@ Skysat       SkySat_<LEVEL>_<Product>[_<scene>]_<ISO>.tif
              SkySat_SR_TrueColor_2026-04-17T04:48:08Z.tif          (vendor-made composite)
              SkySat_TOA_NDVI_ssc2_u0002_2026-04-20T21:36:58Z.tif   (process_skysat)
 
-Umbra        Umbra-<NN>_sigma0_filtered<N>_<ISO>.tif
+Umbra        Umbra-<NN>_backscatterdB_filtered<N>_<ISO>.tif    (sigma0; beta0/gamma0 keep their tokens)
 Capella      Capella[-<NN>]_sigma0_<ISO>.tif
 Iceye        ICEYE_sigma0-dB_<ISO>.tif
 ```

@@ -11,6 +11,9 @@ Pins the pure-Python parts that need no vendor S3:
 3. ``sigmaCalib`` writes ``ICEYE_NODATA`` into the zero-fill border (no
    ``-inf`` from ``log10(0)``), names the output through the shared SAR
    builder, and returns a single path.
+4. ``sigmaCalib`` Lee-filters the RAW DN before squaring and calibration
+   (PR #79 order, confirmed on #148) -- this order was silently reverted
+   once already, so it is pinned.
 """
 
 import os
@@ -183,3 +186,24 @@ def test_sigma_calib_border_is_declared_nodata_and_name_is_canonical(staged_grd,
     # Un-georeferenced input -> XML fallback engaged.
     assert gt != (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     assert "4326" in proj
+
+
+def test_sigma_calib_filters_raw_dn_before_square_and_calibrate(staged_grd, tmp_path, monkeypatch):
+    """PR #79 order: lee_filter sees the raw DN (border NaN-masked), NOT
+    calibration_factor * DN**2. The fixture's calib (1.23e-05) makes the two
+    stages differ by orders of magnitude, so the max is a decisive probe."""
+    seen = {}
+    real = iceye_v2.lee_filter
+
+    def spy(img, size):
+        seen["img"] = img.copy()
+        return real(img, size)
+
+    monkeypatch.setattr(iceye_v2, "lee_filter", spy)
+    sigmaCalib(staged_grd["tifs"], staged_grd["xmls"],
+               save_location=str(tmp_path / "out"), filter_size=3)
+
+    img = seen["img"]
+    dn = staged_grd["dn"]
+    assert np.nanmax(img) == dn.max(), "lee_filter did not receive the raw DN"
+    assert np.isnan(img[dn == 0]).all(), "zero-fill border must be NaN before the filter"

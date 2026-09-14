@@ -64,7 +64,7 @@ the import path — so packages are still imported by their bare name (`import s
 - `process_satellogic` — Satellogic processing
 - `process_umbra` — Umbra SAR (sigma/beta/gamma; always-on Lee filter, `--filter_size {3,5,7}`)
 - `process_capella` — Capella SAR (sigma0; always-on Lee filter, `--filter_size {3,5,7}`)
-- `process_iceye` — ICEYE SAR GRD (sigma0 in dB; always-on Lee filter, `--filter_size {3,5,7}`; falls back to the vendor XML corner coordinates when the GRD GeoTIFF carries no geotransform)
+- `process_iceye` — ICEYE SAR GRD (sigma0 in dB; always-on Lee filter, `--filter_size {3,5,7}`; falls back to the vendor XML corner coordinates when the GRD GeoTIFF carries no geotransform). **The Lee filter runs on the raw DN before squaring + calibration** (vendor-script order, PR #79, confirmed on #148) — unlike Capella/Umbra, which filter the calibrated linear backscatter.
 - `summarize_raster` — Print min/max/mean/nodata stats for a single GeoTIFF band (`-b`, `-n`, `--json`)
 
 All sensor CLIs **except Capella and Satellogic** accept `-dst_crs <EPSG:xxxx | native>`, and **all default to `native`** (maps to `None` → preserve source projection, no warp). Satellogic dropped the flag in PR #45 and Capella in PR #76; both always use native. **Hint:** pass `-dst_crs EPSG:3857` (Web Mercator) when the COG is headed for the NASA VEDA dashboard — 3857 is optimal for the **titiler-pgstac** tiling API (its default `WebMercatorQuad` TMS ⇒ fastest tiles, no per-tile reproject) and sidesteps the `build_stac`/`rio_stac` geometry crash that `EPSG:4326` raster outputs trigger (see Critical Constraints). native COGs still ingest + tile (titiler reprojects on the fly) — just slower.

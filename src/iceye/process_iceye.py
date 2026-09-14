@@ -42,8 +42,8 @@ def main():
         default=5,
         help=(
             "Lee speckle-filter window size. Filtering is always "
-            "applied to the calibrated backscatter; only the kernel "
-            "is tunable."
+            "applied to the raw GRD digital numbers before squaring "
+            "and calibration; only the kernel is tunable."
         ),
     )
 

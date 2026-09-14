@@ -310,19 +310,20 @@ def sigmaCalib(s3_image_paths: list[str], s3_metadata_paths: list[str],
     # filter neither smooths it into the scene nor smears the scene into it.
     dn[dn == 0] = np.nan
 
-    # sigma0 (linear) = calibration_factor * DN**2, then the speckle filter on
-    # the LINEAR intensity before the dB conversion (Capella/Umbra convention:
-    # the filter averages physical power rather than logarithms).
-    dn_sqr = np.power(dn, 2)
+    # Vendor-script order (PR #79, confirmed by the calibration owner on
+    # #148): Lee filter on the RAW DN first, then square, then calibrate,
+    # then dB. This deliberately differs from Capella/Umbra, which filter the
+    # CALIBRATED linear backscatter.
+    dn_filtered = lee_filter(dn, size=filter_size)
+    dn_sqr = np.power(dn_filtered, 2)
     dn_amp = dn_sqr * calib_value
-    dn_filtered = lee_filter(dn_amp, size=filter_size)
 
-    valid = np.isfinite(dn_filtered) & (dn_filtered > 0)
-    print("[INFO] Amplitude Max: ", np.max(dn_filtered[valid]) if valid.any() else None)
-    print("[INFO] Amplitude Min: ", np.min(dn_filtered[valid]) if valid.any() else None)
+    valid = np.isfinite(dn_amp) & (dn_amp > 0)
+    print("[INFO] Amplitude Max: ", np.max(dn_amp[valid]) if valid.any() else None)
+    print("[INFO] Amplitude Min: ", np.min(dn_amp[valid]) if valid.any() else None)
 
-    dn_db = np.full(dn_filtered.shape, ICEYE_NODATA, dtype=np.float64)
-    dn_db[valid] = 10.0 * np.log10(dn_filtered[valid])
+    dn_db = np.full(dn_amp.shape, ICEYE_NODATA, dtype=np.float64)
+    dn_db[valid] = 10.0 * np.log10(dn_amp[valid])
 
     finite = dn_db[valid]
     if finite.size:

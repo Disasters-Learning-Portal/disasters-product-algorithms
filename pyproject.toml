@@ -58,6 +58,7 @@ download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"
 process_satellogic = "satellogic.cli:process_satellogic_cli"
 process_umbra = "umbra.cli:process_umbra_cli"
 process_capella = "capella.cli:process_capella_cli"
+process_iceye = "iceye.cli:process_iceye_cli"
 summarize_raster = "raster_tools.cli:summarize_raster_cli"
 
 [project.urls]
@@ -65,7 +66,7 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "shared_utils*", "raster_tools*"]
+include = ["landsat*", "sentinel2*", "satellogic*", "umbra*", "capella*", "iceye*", "shared_utils*", "raster_tools*"]
 
 # The Sentinel-2 STAC pipeline reads its algorithm catalog from a JSON
 # file shipped alongside the code. Without this it is absent from an

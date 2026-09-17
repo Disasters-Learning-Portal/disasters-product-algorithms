@@ -79,6 +79,28 @@ class TestSharedContract:
         # An existing destination object is a skip, not a failure.
         assert "isinstance(out, FileExistsError)" in cell
 
+    def test_nodata_input_spells_out_the_three_way_contract(self, nb_path):
+        """`NODATA = None` alone reads as "no nodata", which is the OPPOSITE of what
+        convert_to_cog does with it (inherit / auto-detect). The value that declares
+        none -- and strips an inherited 0 off 8-bit imagery -- is False. Both must
+        be spelled out where the operator sets it."""
+        cell = _cell(nb_path, "# ---- INPUTS ----")
+        assert "NODATA = None" in cell
+        assert "NODATA = False" in cell
+        assert "STRIP" in cell
+        assert "manual_nodata=NODATA" in _cell(nb_path, "def _process(item):")
+
+    def test_main_processor_forwards_nodata_by_identity(self, nb_path):
+        """The notebooks hand NODATA to main_processor.convert_to_cog(manual_nodata=),
+        which must pass it to cog_utils untouched -- a truthiness check there would
+        turn False (declare none) into None (inherit)."""
+        import inspect
+        from shared_utils import main_processor
+        src = inspect.getsource(main_processor.convert_to_cog)
+        assert "nodata=manual_nodata," in src
+        assert re.search(r"if\s+(not\s+)?manual_nodata\b", src) is None
+        assert "manual_nodata or" not in src and "or manual_nodata" not in src
+
     def test_verify_cell_checks_every_required_tag(self, nb_path):
         cell = _cell(nb_path, "REQUIRED_TAGS = (")
         for tag in ("ACTIVATION_EVENT", "YEAR_MONTH", "HAZARD", "LOCATION", "SOURCE", "PROCESSOR"):

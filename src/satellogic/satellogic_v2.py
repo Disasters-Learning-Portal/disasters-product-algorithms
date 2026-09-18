@@ -8,6 +8,7 @@ import json
 
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
+from shared_utils.product_paths import product_output_dir
 
 # Constants
 DEFAULT_SCALE_FACTOR = 0.0001
@@ -527,7 +528,8 @@ def build_output_name(in_file, out_dir, product):
     tokens = [t for t in ("Satellogic", satellite, product, capture_id, col_row) if t]
     stamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    return f"{out_dir}/{'_'.join(tokens)}_{stamp}.tif"
+    prod_dir = product_output_dir(out_dir, "satellogic", product)
+    return os.path.join(prod_dir, f"{'_'.join(tokens)}_{stamp}.tif")
 
 
 # Adaptive Lee smoothing filter for spectral indices (NaN-aware).

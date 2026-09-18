@@ -22,6 +22,7 @@ from lxml import etree
 from landsat.landsat89_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.product_paths import product_dir
 from tqdm import tqdm
 import traceback
 import sys
@@ -271,7 +272,7 @@ if __name__ == "__main__":
             water_variants = ['we', 'waterextent']
             if next((True for p in products if p.lower() in water_variants), False) or args.mask:
                 # check for cloud mask
-                prod_dir = os.path.join(out_date_dir, 'cloudMask')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'cloudMask'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -335,7 +336,7 @@ if __name__ == "__main__":
             true_variants = ['true', 'tc', 'truecolor']
             if next((True for p in products if p.lower() in true_variants), False):
                 # check for true color image
-                prod_dir = os.path.join(out_date_dir, 'trueColor')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'trueColor'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -387,7 +388,7 @@ if __name__ == "__main__":
                     print('* Cannot process panchromatic: No panchromatic band (B8).')
                 else:
                     # check for panchromatic image
-                    prod_dir = os.path.join(out_date_dir, 'panchromatic')
+                    prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'panchromatic'))
                     prod_dirs.append(prod_dir)
                     if not os.path.isdir(prod_dir):
                         os.mkdir(prod_dir)
@@ -432,7 +433,7 @@ if __name__ == "__main__":
             nat_variants = ['nat', 'natural', 'naturalcolor', 'nc']
             if next((True for p in products if p.lower() in nat_variants), False):
                 # check for natural color image
-                prod_dir = os.path.join(out_date_dir, 'naturalColor')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'naturalColor'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -490,7 +491,7 @@ if __name__ == "__main__":
             cir_variants = ['cir', 'colorir', 'colorinfrared']
             if next((True for p in products if p.lower() in cir_variants), False):
                 # check for color infrared image
-                prod_dir = os.path.join(out_date_dir, 'colorInfrared')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'colorInfrared'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -547,7 +548,7 @@ if __name__ == "__main__":
 
             if next((True for p in products if p.lower() == 'ndvi'), False):
                 # check for NDVI image
-                prod_dir = os.path.join(out_date_dir, 'NDVI')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'NDVI'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -604,7 +605,7 @@ if __name__ == "__main__":
 
             if next((True for p in products if p.lower() == 'ndwi'), False):
                 # check for NDWI image
-                prod_dir = os.path.join(out_date_dir, 'NDWI')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'NDWI'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -661,7 +662,7 @@ if __name__ == "__main__":
 
             if next((True for p in products if p.lower() == 'mndwi'), False):
                 # check for mNDWI image
-                prod_dir = os.path.join(out_date_dir, 'MNDWI')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'MNDWI'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -718,7 +719,7 @@ if __name__ == "__main__":
 
             if next((True for p in products if p.lower() == 'evi'), False):
                 # check for EVI image
-                prod_dir = os.path.join(out_date_dir, 'EVI')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'EVI'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -775,7 +776,7 @@ if __name__ == "__main__":
 
             if next((True for p in products if p.lower() == 'nbr'), False):
                 # check for NBR image
-                prod_dir = os.path.join(out_date_dir, 'NBR')
+                prod_dir = os.path.join(out_date_dir, product_dir('landsat', 'NBR'))
                 prod_dirs.append(prod_dir)
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
@@ -843,12 +844,12 @@ if __name__ == "__main__":
             for date_dir in date_dirs:
                 # create water extent directory
                 date = os.path.basename(date_dir)
-                prod_dir = os.path.join(out_dir, date, 'waterExtent')
+                prod_dir = os.path.join(out_dir, date, product_dir('landsat', 'waterExtent'))
                 if not os.path.isdir(prod_dir):
                     os.mkdir(prod_dir)
                 
                 # check for merged cloud mask
-                cloud_dir = os.path.join(out_dir, date, 'cloudMask')
+                cloud_dir = os.path.join(out_dir, date, product_dir('landsat', 'cloudMask'))
                 cloudMask_check = glob.glob(os.path.join(cloud_dir,'*merged.tif'))
                 if not cloudMask_check:
                     # merge all cloud masks for the given date
@@ -913,7 +914,8 @@ if __name__ == "__main__":
 
         if args.merge:
             dirs_to_merge = list(set(prod_dirs))
-            cm_dirs = [prod_dir for prod_dir in dirs_to_merge if 'cloud' in prod_dir]
+            cm_dirs = [prod_dir for prod_dir in dirs_to_merge
+                       if 'cloud' in os.path.basename(os.path.normpath(prod_dir)).lower()]
             for cm_dir in cm_dirs:
                 # merge cloud masks separately so that they are not masked themselves
                 # need to merge cloud masks first b/c this mask can be used

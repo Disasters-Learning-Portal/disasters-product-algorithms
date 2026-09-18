@@ -39,6 +39,11 @@ ENABLE_S3_UPLOAD="true"
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"
+# Sensor key for shared_utils/product_paths.py. With it set, _finalize.sh
+# publishes each product to its canonical, hard-coded destination
+# ProgramData/<Sensor>/<Product>/<filename> rather than mirroring the local
+# <date>/<product>/ tree under STAGING_DEST_BASE.
+PRODUCT_SENSOR="umbra"
 # DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
 # COG in ~/drcs_outputs is always removed to free worker disk -- the product already
 # lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.

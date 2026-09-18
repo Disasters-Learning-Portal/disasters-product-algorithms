@@ -1,8 +1,8 @@
 """
 Regression tests for the two lean "publish to nasa-disasters-staging" notebooks:
 
-    notebooks/drcs_new_transfer.ipynb   sensor-first tree, event = filename prefix
-    notebooks/drcs_transfer.ipynb       event folder, raw non-COG deliveries
+    notebooks/tools/drcs_new_transfer.ipynb   sensor-first tree, event = filename prefix
+    notebooks/tools/drcs_transfer.ipynb       event folder, raw non-COG deliveries
 
 Both end in the same place (ProgramData/<product>/Output/, event in the tags, not
 the name) and share their process/verify cells. Notebooks aren't importable, so the
@@ -23,8 +23,8 @@ pytest.importorskip("shared_utils.file_naming")  # needs the package installed
 from moto import mock_aws
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NB_NEW = REPO_ROOT / "notebooks" / "drcs_new_transfer.ipynb"
-NB_RAW = REPO_ROOT / "notebooks" / "drcs_transfer.ipynb"
+NB_NEW = REPO_ROOT / "notebooks" / "tools" / "drcs_new_transfer.ipynb"
+NB_RAW = REPO_ROOT / "notebooks" / "tools" / "drcs_transfer.ipynb"
 EVENT_PREFIX_RE = re.compile(r"^\d{6}_[A-Za-z0-9]+_[A-Za-z0-9]+_")
 
 

@@ -32,6 +32,7 @@ SENSOR_NOTEBOOKS = {
     "sentinel2_workflow.ipynb": "sentinel2",
     "sentinel2_odr_workflow.ipynb": "sentinel2",
     "satellogic_workflow.ipynb": "satellogic",
+    "skysat_workflow.ipynb": "skysat",
     "umbra_workflow.ipynb": "umbra",
     "capella_workflow.ipynb": "capella",
 }

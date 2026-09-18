@@ -81,13 +81,21 @@ Sentinel-2   [<AOI>_]<SAT>[_<LEVEL>]_<product>[_<HHMMSS>]_<TILE|merged>_<YYYY-MM
 Satellogic   Satellogic_<SAT>_<product>_<ISO>.tif
              Satellogic_SNXX_truecolor_2026-04-22T00:45:47Z.tif
 
-Skysat       SkySat_<LEVEL>_<Product>_<ISO>.tif
-             SkySat_SR_TrueColor_2026-04-17T04:48:08Z.tif
+Skysat       SkySat_<LEVEL>_<Product>[_<scene>]_<ISO>.tif
+             SkySat_SR_TrueColor_2026-04-17T04:48:08Z.tif          (vendor-made composite)
+             SkySat_TOA_NDVI_ssc2_u0002_2026-04-20T21:36:58Z.tif   (process_skysat)
 
 Umbra        Umbra-<NN>_sigma0_filtered<N>_<ISO>.tif
 Capella      Capella[-<NN>]_sigma0_<ISO>.tif
 Iceye        ICEYE_sigma0-dB_<ISO>.tif
 ```
+
+`process_skysat` names carry two tokens the vendor composites do not. `<LEVEL>` is
+`TOA` for anything derived from the `_analytic`/`_basic_analytic` asset (DN x
+`reflectance_coefficients` is top-of-atmosphere reflectance, never `SR`) and `Visual`
+for the `_visual` asset. `<scene>` (`ssc2_u0002`, or `ssc2d1_0001` for a
+`basic_analytic` tile) is kept because one collect holds several scenes that share a
+timestamp and would otherwise overwrite each other.
 
 SAR names are built by `shared_utils.file_naming.create_sar_output_filename`, which is
 also where the rationale for the shape lives (datetime last, `_`-separated product

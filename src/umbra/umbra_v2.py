@@ -26,6 +26,7 @@ from datetime import datetime
 from shared_utils.geotools import *
 from shared_utils.s3utils import *
 from shared_utils.file_naming import create_sar_output_filename
+from shared_utils.product_paths import product_output_dir
 
 def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-data-vendor-umbra", prefix : str = "disasters") -> list[str]:
     """Return every Umbra tif for the acquisition closest to ``date``.
@@ -206,7 +207,8 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
     print(np.nanmax(sigma_0), np.nanmin(sigma_0))
 
     outfile = os.path.join(
-        save_location, _umbra_output_name(in_file, "sigma0", filter_size)
+        product_output_dir(save_location, "umbra", "sigma0"),
+        _umbra_output_name(in_file, "sigma0", filter_size)
     )
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)
 
@@ -250,7 +252,8 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", 
     print(np.nanmax(beta_0), np.nanmin(beta_0))
 
     outfile = os.path.join(
-        save_location, _umbra_output_name(in_file, "beta0", filter_size)
+        product_output_dir(save_location, "umbra", "beta0"),
+        _umbra_output_name(in_file, "beta0", filter_size)
     )
     dump_geotiff_float(outfile, beta_0, projref, in_geo)
 
@@ -294,7 +297,8 @@ def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
     print(np.nanmax(gamma_0), np.nanmin(gamma_0))
 
     outfile = os.path.join(
-        save_location, _umbra_output_name(in_file, "gamma0", filter_size)
+        product_output_dir(save_location, "umbra", "gamma0"),
+        _umbra_output_name(in_file, "gamma0", filter_size)
     )
     dump_geotiff_float(outfile, gamma_0, projref, in_geo)
 

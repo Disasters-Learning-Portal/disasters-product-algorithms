@@ -19,6 +19,8 @@ import os
 
 import pytest
 
+from shared_utils.product_paths import product_dir
+
 rasterio = pytest.importorskip("rasterio")
 import numpy as np
 from rasterio.crs import CRS
@@ -88,7 +90,7 @@ def test_s2_gen_merge_singlecrs_valid_and_no_tmp(tmp_path):
     from sentinel2.sentinel2_functions import gen_merge
     import glob as _glob
 
-    d = tmp_path / "trueColor"
+    d = tmp_path / product_dir("sentinel2", "trueColor")
     d.mkdir()
     a = str(d / "S2B_MSIL2A_trueColor_a.tif")
     b = str(d / "S2B_MSIL2A_trueColor_b.tif")
@@ -113,7 +115,12 @@ def test_s2_merge_mask_returns_existing_masked_path(tmp_path):
 
     prod = tmp_path / "NDWI"
     prod.mkdir()
-    cm = tmp_path / "cloudMask"
+    # Derived, not a literal: s2_merge globs <parent>/<cloud mask dir>/ for the
+    # merged mask, so a hard-coded name here silently stops matching the moment
+    # the directory is renamed. It also hides on a case-INSENSITIVE filesystem
+    # (macOS APFS): "cloudMask" still matched a glob for "CloudMask" locally
+    # while failing on Linux CI.
+    cm = tmp_path / product_dir("sentinel2", "cloudMask")
     cm.mkdir()
     # one 1-band index scene; merge of a single file preserves its geometry
     _make_1band(str(prod / "S2B_MSIL2A_NDWI_2026-06-06.tif"), 500000, 4000000)
@@ -151,7 +158,7 @@ def test_s2_merge_no_mask_returns_merged(tmp_path):
 def test_s2_merge_empty_dir_raises(tmp_path):
     from sentinel2.sentinel2_functions import s2_merge
 
-    d = tmp_path / "shortwaveInfrared"  # a product dir whose generation produced nothing
+    d = tmp_path / product_dir("sentinel2", "shortwaveInfrared")  # a product dir whose generation produced nothing
     d.mkdir()
     with pytest.raises(FileNotFoundError):
         s2_merge(str(d))
@@ -163,7 +170,7 @@ def test_s2_merge_only_prior_merged_raises(tmp_path):
     # effectively empty and s2_merge raises (mirrors ls_merge's *merged* exclusion).
     from sentinel2.sentinel2_functions import s2_merge
 
-    d = tmp_path / "trueColor"
+    d = tmp_path / product_dir("sentinel2", "trueColor")
     d.mkdir()
     _make_3band(str(d / "S2B_MSIL2A_trueColor_merged_2026-06-06.tif"), 500000, 4000000)
     with pytest.raises(FileNotFoundError):

@@ -21,6 +21,8 @@ import os
 
 import boto3
 
+from shared_utils.product_paths import prefix_for_product_dir, product_dirs_for
+
 
 def _join_prefix(*parts):
     """Join S3 key prefix segments, dropping empties and redundant slashes."""
@@ -66,11 +68,40 @@ def resolve_authorized_path(resp, target_bucket):
     )
 
 
-def iter_upload_keys(out_home, base_prefix, include=None):
+def program_data_key(local_path, out_home, sensor):
+    """Return the canonical ``ProgramData/<Sensor>/<Product>/<file>`` key, or None.
+
+    The product directory is read off the local output path: processors write into
+    ``<out_home>/<date>/<Product>/`` (and ``.../<Product>/masked/``), so the nearest
+    enclosing directory whose name is a known product for ``sensor`` names the
+    product. The ``<date>`` level is deliberately dropped -- it groups scenes for
+    merging on disk and has no place in the published key.
+
+    Returns None when no product directory is recognized, which lets the caller
+    fall back rather than inventing a destination.
+    """
+    rel = os.path.relpath(local_path, out_home)
+    parts = rel.split(os.sep)[:-1]  # directories only
+    known = product_dirs_for(sensor)
+    for part in reversed(parts):
+        if part in known:
+            prefix = prefix_for_product_dir(sensor, part)
+            return f"{prefix}/{os.path.basename(local_path)}"
+    return None
+
+
+def iter_upload_keys(out_home, base_prefix, include=None, sensor=None):
     """Yield ``(local_path, s3_key)`` for every product COG/PNG under ``out_home``.
 
-    ``s3_key = base_prefix + relpath(local_path, out_home)`` so the sub-path under
-    ``out_home`` is preserved. Mirrors ``dps/_finalize.sh`` (``*.tif`` + ``*.png``).
+    With ``sensor`` set, each file is keyed by its canonical published destination,
+    ``ProgramData/<Sensor>/<Product>/<filename>`` (see :func:`program_data_key`), and
+    ``base_prefix`` is not used. A file whose product directory is not recognized
+    falls back to the ``base_prefix``-relative key and is reported, so nothing is
+    silently dropped or published somewhere unintended.
+
+    With ``sensor`` unset (the default), ``s3_key = base_prefix + relpath(local_path,
+    out_home)`` so the sub-path under ``out_home`` is preserved. Mirrors
+    ``dps/_finalize.sh`` (``*.tif`` + ``*.png``).
 
     ``include`` is an optional predicate taking the local path; only files it
     returns truthy for are yielded. It defaults to None (publish everything),
@@ -86,6 +117,15 @@ def iter_upload_keys(out_home, base_prefix, include=None):
     for f in files:
         if include is not None and not include(f):
             continue
+        if sensor is not None:
+            key = program_data_key(f, out_home, sensor)
+            if key is not None:
+                yield f, key
+                continue
+            print(
+                f"WARNING: {os.path.relpath(f, out_home)} is not under a known "
+                f"{sensor} product directory; falling back to the relative key."
+            )
         rel = os.path.relpath(f, out_home)
         yield f, (f"{base}/{rel}" if base else rel)
 
@@ -110,7 +150,7 @@ def _workspace_s3_client():
     return session.client("s3"), resp
 
 
-def upload_dir_to_staging(out_home, target_bucket, dest_prefix, include=None):
+def upload_dir_to_staging(out_home, target_bucket, dest_prefix, include=None, sensor=None):
     """Upload every product under ``out_home`` to ``s3://target_bucket/<prefix>/``.
 
     ``<prefix>`` = the MAAP-granted read_write prefix for ``target_bucket`` (often "")
@@ -119,13 +159,19 @@ def upload_dir_to_staging(out_home, target_bucket, dest_prefix, include=None):
 
     ``include`` is forwarded to :func:`iter_upload_keys` to skip non-product files;
     None (the default, and what every ``run.sh`` uses) publishes everything.
+
+    ``sensor`` is likewise forwarded: set it to publish to the canonical
+    ``ProgramData/<Sensor>/<Product>/`` destination instead of mirroring the local
+    tree under ``dest_prefix``.
     """
     s3, resp = _workspace_s3_client()
     entry_prefix = resolve_authorized_path(resp, target_bucket)
     base_prefix = _join_prefix(entry_prefix, dest_prefix)
 
     n = 0
-    for local_path, key in iter_upload_keys(out_home, base_prefix, include=include):
+    for local_path, key in iter_upload_keys(
+        out_home, base_prefix, include=include, sensor=sensor
+    ):
         s3.upload_file(local_path, target_bucket, key)
         print(f"Uploaded: s3://{target_bucket}/{key}")
         n += 1

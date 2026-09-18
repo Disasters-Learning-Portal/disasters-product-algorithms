@@ -18,6 +18,8 @@ from scipy.ndimage import variance
 
 from shared_utils.geotools import *
 from shared_utils.s3utils import *
+from shared_utils.file_naming import create_sar_output_filename
+from shared_utils.product_paths import product_output_dir
 
 
 # Single source of truth for Capella's nodata sentinel: sigmaCalib writes it
@@ -247,7 +249,6 @@ def sigmaCalib(
     # LINEAR backscatter, before the dB conversion, so the filter averages
     # physical power rather than logarithms.
     sigma_linear = lee_filter(sigma_linear, size=filter_size)
-    filt = f"_filtered{filter_size}"
 
     # Prevent log10(0)
     sigma_linear = np.clip(sigma_linear, 1e-10, None)
@@ -280,14 +281,11 @@ def sigmaCalib(
 
     dt = datetime.strptime(start_time, "%Y%m%d%H%M%S")
 
-    outfile = (
-        f"{save_location}/"
-        f"{dt.strftime('%Y%m')}_"
-        f"Capella-{satellite.replace('C', '')}_"
-        f"sigma0"
-        f"{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"{filt}"
-        ".tif"
+    outfile = os.path.join(
+        product_output_dir(save_location, "capella", "sigma0"),
+        create_sar_output_filename(
+            f"Capella-{satellite.replace('C', '')}", "sigma0", dt, filter_size
+        ),
     )
 
     dump_geotiff_float(outfile, sigma_0, projref, in_geo)

@@ -1,5 +1,5 @@
 """
-Regression test for notebooks/simple_disaster_staging.ipynb.
+Regression test for notebooks/tools/simple_disaster_staging.ipynb.
 
 That notebook is the ONE-PASS variant of simple_disaster_template.ipynb: raw
 non-COG source -> COG with activation tags -> final location in
@@ -26,7 +26,7 @@ nbformat = pytest.importorskip("nbformat")
 pytest.importorskip("shared_utils.file_naming")  # needs the package installed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NB_PATH = REPO_ROOT / "notebooks" / "simple_disaster_staging.ipynb"
+NB_PATH = REPO_ROOT / "notebooks" / "tools" / "simple_disaster_staging.ipynb"
 
 # The shape this notebook must never emit at the head of an output name.
 EVENT_PREFIX_RE = re.compile(r"^\d{6}_[A-Za-z0-9]+_[A-Za-z0-9]+_")
@@ -78,13 +78,31 @@ class TestDestination:
         """`drcs_activations_new` is the thing this notebook deletes.
 
         Markdown may still name it -- the header cell explains how this template
-        differs from simple_disaster_template.ipynb -- but no code may.
+        differs from simple_disaster_template.ipynb -- and so may a COMMENT: the
+        INPUTS cell documents reading FROM that sensor-first tree (the event is a
+        filename prefix there, not a folder, so the assembled <EVENT>/<product>
+        path lists nothing) via a commented-out SOURCE_PATH override. No
+        executable line may name it: the destination is never that tree.
         """
+        def executable(source):
+            return "\n".join(ln for ln in source.splitlines()
+                             if not ln.lstrip().startswith("#"))
+
         offenders = [
             i for i, c in enumerate(_cells())
-            if c.cell_type == "code" and "drcs_activations_new" in c.source
+            if c.cell_type == "code" and "drcs_activations_new" in executable(c.source)
         ]
         assert not offenders, f"drcs_activations_new survives in code cells {offenders}"
+
+    def test_listing_filters_to_this_event(self):
+        """Step 2 drops files prefixed with a DIFFERENT event and keeps unprefixed
+        ones, so a sensor-first folder shared by many activations is safe -- and
+        an empty listing says which prefix it queried instead of failing silently
+        (`aws s3 ls` exits 1 with no stderr on a prefix that has no keys)."""
+        cell = _cell_containing("aws', 's3', 'ls'", "strip_event_prefix")
+        assert "startswith(f'{EVENT_NAME}_'.lower())" in cell
+        assert "strip_event_prefix(filename) != filename" in cell
+        assert "if not files:" in cell
 
     def test_uploads_through_a_boto3_client_not_the_aws_cli(self):
         """Destination writes go through upload_to_s3 with a boto3 client.

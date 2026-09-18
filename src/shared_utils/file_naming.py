@@ -148,6 +148,51 @@ def strip_event_prefix(name: str, event_name: Optional[str] = None) -> str:
     return os.path.join(directory, stripped) if directory else stripped
 
 
+def create_sar_output_filename(
+    platform: str,
+    product: str,
+    acquired: datetime,
+    filter_size: Optional[int] = None,
+    ext: str = '.tif',
+) -> str:
+    """
+    Build the output name for a calibrated SAR backscatter product.
+
+        <platform>_<product>[_filtered<N>]_<YYYY-MM-DDTHH:MM:SSZ><ext>
+
+        >>> create_sar_output_filename(
+        ...     "Umbra-07", "sigma0", datetime(2026, 8, 5, 3, 54, 47), 5)
+        'Umbra-07_sigma0_filtered5_2026-08-05T03:54:47Z.tif'
+
+    Every part of this shape is load-bearing, and each sensor had previously
+    hand-rolled the f-string and got a different part wrong. Umbra and Capella
+    emitted `202608_Umbra-07_sigma02026-08-05T03:54:47Z_filtered5.tif`; iceye
+    had the separator but still trailed the filter token.
+
+    1. The **datetime is last**, so the stem ends in an ISO-Zulu stamp. That is
+       the repo-wide canonical form for an individual scene with a time, and it
+       is what makes _STAMPED_END_RE (and cog_utils._ISO_ZULU_END_RE) treat the
+       name as a fixed point. With a trailing `_filtered5` the stem is NOT
+       canonical, so create_output_filename / rename_with_event relocate the
+       stamp on a downstream pass and rewrite the name — the old shape came back
+       from create_output_filename as `..._sigma0_filtered5_<stamp>_hour.tif`.
+    2. The product token is separated by `_`. Welded to the date (`sigma02026-`)
+       it is unreadable, and no `_`-splitting consumer can recover either field.
+    3. There is **no `<YYYYMM>_` head**. The three sensors used to lead with the
+       acquisition year-month, which is fully redundant with the trailing stamp
+       and, worse, reads as half an activation-event prefix — an operator seeing
+       `202608_KyleWx_AL/202608_Umbra-07_...` reasonably concluded the pipeline
+       had welded the event into the filename. The activation belongs in the
+       GeoTIFF tags (`ACTIVATION_EVENT`, embedded by convert_to_cog from
+       run.sh's --metadata-json) and in the S3 prefix, not in the name.
+    """
+    tokens = [platform, product]
+    if filter_size is not None:
+        tokens.append(f'filtered{filter_size}')
+    tokens.append(acquired.strftime('%Y-%m-%dT%H:%M:%SZ'))
+    return '_'.join(tokens) + ext
+
+
 def no_change(original_path: str, event_name: str) -> str:
     """
     Pass-through filename builder: prepend the event name, preserve stem + ext.

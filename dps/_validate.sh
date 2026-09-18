@@ -121,24 +121,31 @@ validate_in_set() {
 # at least 0.05 deg (blackmarble.crs rejects a thinner box -- the processing grid
 # needs a minimum height). bash can't compare floats, so the numeric checks run in
 # a single awk pass; awk exit 1 -> the message here fires.
+# validate_bbox <value> [min_lat_span]
+#
+# min_lat_span defaults to 0.05 deg, which is Black Marble's requirement (its
+# upstream pipeline needs a taller box). Callers whose algorithm has no such
+# floor pass 0 -- Sentinel-2, for instance, returns whole 110 km tiles no matter
+# how small the requested box is, so rejecting a tight AOI over a single town
+# would be a restriction with nothing behind it.
 validate_bbox() {
-  local v="$1"
+  local v="$1" min_span="${2:-0.05}"
   [[ "$v" =~ ^[-+0-9.,\ ]+$ ]] || \
     die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)."
-  awk -v s="$v" 'BEGIN {
+  awk -v s="$v" -v ms="$min_span" 'BEGIN {
     n = split(s, a, /[, ]+/);
     if (n != 4) exit 1;
     for (i = 1; i <= 4; i++) if (a[i] !~ /^[-+]?[0-9]*\.?[0-9]+$/) exit 1;
     minlon=a[1]+0; minlat=a[2]+0; maxlon=a[3]+0; maxlat=a[4]+0;
     if (minlon < -180 || maxlon > 180 || minlat < -90 || maxlat > 90) exit 2;
     if (minlon >= maxlon || minlat >= maxlat) exit 3;
-    if (maxlat - minlat < 0.05) exit 4;
+    if (ms+0 > 0 && maxlat - minlat < ms+0) exit 4;
     exit 0;
   }' && return 0
   case $? in
     2) die "bbox '$v' is out of range (lon in [-180,180], lat in [-90,90])." ;;
     3) die "bbox '$v' must have min_lon<max_lon and min_lat<max_lat." ;;
-    4) die "bbox '$v' latitude span is < 0.05 deg; widen it (blackmarble needs a taller box)." ;;
+    4) die "bbox '$v' latitude span is < ${min_span} deg; widen it." ;;
     *) die "bbox '$v' must be four numbers 'min_lon,min_lat,max_lon,max_lat' (WGS84)." ;;
   esac
 }

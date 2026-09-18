@@ -1,0 +1,140 @@
+{
+    "composite":
+    [
+        {
+            "true_color":
+            {
+                "assets":
+                [
+                    "red",
+                    "green",
+                    "blue"
+                ],
+                "resample": false,
+                "gsd": 10
+            },
+            "color_infrared":
+            {
+                "assets":
+                [
+                    "nir",
+                    "red",
+                    "green"
+                ],
+                "resample": false,
+                "gsd": 10
+            },
+            "swir":
+            {
+                "assets":
+                [
+                    "swir22",
+                    "nir",
+                    "red"
+                ],
+                "resample": true,
+                "gsd": 20
+            },
+            "natural_color":
+            {
+                "assets":
+                [
+                    "swir16",
+                    "nir",
+                    "red"
+                ],
+                "resample": true,
+                "gsd": 20
+            }
+        }
+    ],
+    "index":
+    [
+        {
+            "ndvi":
+            {
+                "assets":
+                [
+                    "nir",
+                    "red"
+                ],
+                "formula": "normalized_difference",
+                "resample": false,
+                "gsd": 10,
+                "min": -1,
+                "max": 1,
+                "color": "YlGn"
+            },
+            "ndwi":
+            {
+                "assets":
+                [
+                    "green",
+                    "nir"
+                ],
+                "formula": "normalized_difference",
+                "resample": false,
+                "gsd": 10,
+                "min": -1,
+                "max": 1,
+                "color": "GnBu"
+            },
+            "mndwi":
+            {
+                "assets":
+                [
+                    "green",
+                    "swir16"
+                ],
+                "formula": "normalized_difference",
+                "resample": true,
+                "gsd": 20,
+                "min": -1,
+                "max": 1,
+                "color": "GnBu"
+            },
+            "nbr":
+            {
+                "assets":
+                [
+                    "nir",
+                    "swir22"
+                ],
+                "formula": "normalized_difference",
+                "resample": true,
+                "gsd": 20,
+                "min": -1,
+                "max": 1,
+                "color": "YlGn"
+            },
+            "evi":
+            {
+                "assets":
+                [
+                    "nir",
+                    "red",
+                    "blue"
+                ],
+                "formula": "evi",
+                "resample": true,
+                "gsd": 20,
+                "min": -1,
+                "max": 1,
+                "color": "YlGn"
+            }
+        }
+    ],
+    "water_extent":
+    [
+        {
+            "we": {
+                "assets": ["nir"],
+                "resample": false,
+                "gsd": 10,
+                "min": 0,
+                "max": 1,
+                "nstd": 1.0
+            }
+        }
+    ]
+}

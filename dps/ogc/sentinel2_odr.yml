@@ -1,0 +1,124 @@
+# =============================================================================
+# OGC Application Package config for Sentinel-2 (STAC path) — CLI/Action registration.
+# =============================================================================
+# Registered via MAAP-Project/ogc-app-pack-generator (.github/workflows/register-dps.yml)
+# instead of the Register Algorithm GUI. What this buys us over the GUI:
+#
+#   1. Every input is OGC-optional (the `?` type-suffix -> minOccurs:0). The GUI
+#      cannot express optional (its Type dropdown rejects `?`), so on a
+#      GUI-registered algorithm the Submit Job form errors "Valid value required"
+#      on any falsy value (a toggle left off, a blank box). Here nothing blocks
+#      Submit — you can submit with the defaults untouched. run.sh remains the
+#      real enforcement point (it rejects a placeholder activation_event, a
+#      malformed bbox, a pre-launch date, and an unknown product token).
+#
+#   2. No prebuilt image to maintain. register-dps.yml passes `dockerfile-path:
+#      dps/Dockerfile`, so the Action BUILDS the DPS worker image from the branch
+#      it runs on and pushes it to ghcr.io, then injects that image into the
+#      generated CWL. There is therefore NO algorithm_container_url field here.
+#      `run_command` is an ABSOLUTE path inside that image (the Dockerfile bakes
+#      the repo at /app/disasters-product-algorithms); the CWL baseCommand runs
+#      from the ADES job CWD, so a repo-relative path would not resolve.
+#
+# THIS IS THE SECOND SENTINEL-2 ALGORITHM, and that is deliberate.
+# `disasters-sentinel2-process` (dps/ogc/sentinel2.yml) downloads .SAFE archives
+# from the Copernicus Data Space and needs COP_USER / COP_PASS from MAAP secrets.
+# This one queries a STAC API and reads COGs straight from S3 — no download, no
+# credentials. A DISTINCT algorithm_name is what keeps both processes alive:
+# per docs/DPS.md, editing algorithm_name registers a NEW process and leaves the
+# old one runnable, so the two can be compared on real activations before the
+# .SAFE path is retired. Deleting the old one is Phase 5 of issue #144 — do not
+# do it by reusing this name.
+#
+# dps/sentinel2_odr/algorithm_config.yaml (the GUI path) carries the SAME name
+# on purpose: whichever path you register from, it targets the one process.
+# =============================================================================
+algorithm_name: disasters-sentinel2-odr-process
+algorithm_version: dev
+algorithm_description: >-
+  Generate Sentinel-2 Cloud Optimized GeoTIFF disaster-response products (true
+  color, SWIR, NDVI, EVI, water extent, etc.) by querying a STAC API (Earth
+  Search) over a bounding box and date range and reading the cloud-optimized
+  assets directly from S3 — no scene download and no Copernicus credentials.
+  Every input is optional in the schema so the Submit form never blocks; run.sh
+  enforces the real requirements (non-placeholder activation_event, well-formed
+  bbox, post-launch dates, known product tokens).
+keywords: sentinel-2, cog, disasters, flood, fire, ndvi, evi, water-extent, stac, copernicus
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: STAC/COG Sentinel-2 pipeline; registered alongside the .SAFE-based algorithm for side-by-side comparison (issue #144).
+# Absolute path INSIDE the built image (Dockerfile bakes the repo at
+# /app/disasters-product-algorithms). Not repo-relative.
+run_command: /app/disasters-product-algorithms/dps/sentinel2_odr/run.sh
+ram_min: 64
+cores_min: 8
+outdir_max: 20
+
+# INPUTS — ALL optional (`?`), so no falsy value can trip the Submit form's
+# "Valid value required" check. Defaults mirror dps/sentinel2_odr/run.sh; run.sh
+# does the real validation after parsing.
+#
+# NO credential inputs of any kind: Earth Search and the Sentinel-2 COGs on AWS
+# Open Data are both public.
+#
+# source_label / stac_api are HARDCODED in run.sh, and dst_crs / compression /
+# nodata are hardcoded in the CLI, so none are inputs. To change any of them,
+# publish a new algorithm_version.
+inputs:
+  - name: bbox
+    label: Bounding box
+    doc: "Area of interest as min_lon,min_lat,max_lon,max_lat in WGS84 (commas or spaces). Any Sentinel-2 tile intersecting it is processed in full, so a small box is fine. Pre-filled with a known-good test AOI over central Iowa."
+    type: string?
+    default: "-93.70,42.00,-93.55,42.10"
+  - name: activation_event
+    label: Activation event
+    doc: "Activation event, e.g. 202511_Flood_TX. Pre-filled with a test value so a bare Submit runs; set a REAL event for a real activation (the placeholder YYYYMM_Hazard_Location is rejected at run time). It is written into the GeoTIFF tags and the S3 prefix, NOT into the filename."
+    type: string?
+    default: "202601_KyleWx_US"
+  - name: start_date
+    label: Start date
+    doc: "Search start date, YYYY-MM-DD (inclusive). Must be 2015-06-23 or later -- Sentinel-2A launched then."
+    type: string?
+    default: "2025-08-12"
+  - name: end_date
+    label: End date
+    doc: "Search end date, YYYY-MM-DD (inclusive). Widen the window if a run finds no scenes: Sentinel-2 revisit is ~5 days, so a single day catches only one orbit swath."
+    type: string?
+    default: "2025-08-14"
+  - name: level
+    label: Processing level
+    doc: "Sentinel-2 processing level: 2 = L2A (surface reflectance, recommended), 1 = L1C (top-of-atmosphere, gets a Rayleigh-scattering correction). Cloud masking requires 2."
+    type: string?
+    default: "2"
+  - name: products
+    label: Products
+    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir. One COG per product per scene."
+    type: string?
+    default: "true_color ndvi"
+  - name: cloud_cover
+    label: Max cloud cover %
+    doc: "Only scenes below this scene-level cloud percentage are processed (0-100). Raise it if a run finds no scenes."
+    type: string?
+    default: "50"
+  - name: we_nstd
+    label: Water-extent std devs
+    doc: "Only used when 'we' is in products; ignored otherwise. One or more NIR std-dev thresholds, space-separated, no quotes, no commas -- e.g. 1 or 1 1.5 2. One water-extent COG is produced per value (filename carries NSTD_<value>). Higher = higher NIR threshold = MORE pixels classified as water. Decimals use a dot (1.5, not 1,5). Default 1."
+    type: string?
+    default: "1"
+  - name: merge
+    label: Merge tiles
+    doc: Mosaic all matched tiles into one product per date (--merge).
+    type: boolean?
+    default: true
+  - name: mask
+    label: Cloud mask
+    doc: Mask cloud, cloud-shadow and thin-cirrus pixels using the L2A Scene Classification Layer. Requires level 2.
+    type: boolean?
+    default: false
+
+outputs:
+  - name: output
+    type: Directory

@@ -38,6 +38,16 @@ def _block_network():
     """Make any outbound request raise, so a latent fetch is loud."""
     import socket
 
+    # Import requests BEFORE socket.socket is replaced. It pulls in ssl, which
+    # does `class SSLSocket(socket)`; with socket.socket already a function,
+    # that subclasses a function and dies with "TypeError: function() argument
+    # 'code' must be code, not str" -- which is not an ImportError, so it
+    # escaped the guard and failed every image build that reached this step.
+    try:
+        import requests
+    except ImportError:
+        requests = None
+
     def _blocked(*args, **kwargs):
         raise RuntimeError(
             "pyspectral attempted to use the network. Its RSR/LUT data "
@@ -48,13 +58,9 @@ def _block_network():
     socket.socket = _blocked
     socket.create_connection = _blocked
 
-    try:
-        import requests
-
+    if requests is not None:
         requests.get = _blocked
         requests.Session.request = _blocked
-    except ImportError:
-        pass
 
 
 # Must run before pyspectral is imported.

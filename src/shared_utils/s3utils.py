@@ -105,7 +105,7 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
 
     Args:
         bucket: S3 bucket name. Must contain one of 'satellogic' / 'umbra' /
-            'capella' (substring match).
+            'capella' / 'iceye' / 'skysat' (substring match).
         prefix: S3 prefix to scan (e.g. 'disasters').
         level: Satellogic processing level (e.g. 'L1D', 'L1B'). REQUIRED when
             the bucket is satellogic — the subfolder layout encodes the level
@@ -154,6 +154,12 @@ def retrieve_s3_valid_dates(bucket: str, prefix: str, level: Optional[str] = Non
         filtered_files = [x for x in files if len(x.split("/")) > 2]
         datestrings = set([x.split("/")[-1] for x in filtered_files if (x.split("/")[-1].endswith(".tif") and ("GRD" in x.split("/")[-1]))])
         dates = [datetime.strptime(x.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S") for x in datestrings]
+        dates.sort()
+        return dates
+    elif "skysat" in bucket:
+        filtered_files = [x for x in files if len(x.split("/")) > 2]
+        datestrings = set([f"{x[0]}_{x[1]}" for y in filtered_files for x in [y.split("/")[-1].split("_")]])
+        dates = [datetime.strptime(x, "%Y%m%d_%H%M%S") for x in datestrings]
         dates.sort()
         return dates
     else:

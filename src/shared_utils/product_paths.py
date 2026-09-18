@@ -85,8 +85,7 @@ PRODUCT_DIRS = {
     ("satellogic", "ndvi"): "NDVI",
     ("satellogic", "ndwi"): "NDWI",
     ("satellogic", "evi"): "EVI",
-    # -- SkySat (no processor in this repo yet; published via the operator
-    #    notebooks, which need the same destinations) ---------------------------
+    # -- SkySat (PascalCase tokens; src/skysat + the operator notebooks) --------
     ("skysat", "TrueColor"): "TrueColor",
     ("skysat", "ColorIR"): "ColorIR",
     ("skysat", "NDVI"): "NDVI",

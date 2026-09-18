@@ -201,3 +201,75 @@ def product_output_dir(save_location, sensor, product, makedirs=True):
     if makedirs:
         os.makedirs(out, exist_ok=True)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Directory classification
+#
+# The merge step asks three questions about a product directory: is it the cloud
+# mask (merge it first, and never mask it), is it an index (mask it if -mask was
+# passed), is it a composite (keep the 8-bit nodata opt-out). Each processor used
+# to answer them by hand off the directory basename -- a substring test for
+# 'cloud' and two hard-coded lowercase sets. All three silently drift the moment a
+# directory is renamed: 'cloud' in 'CloudMask'.lower() still works, but
+# 'colorinfrared' in a literal set does not once the directory is ColorIR.
+#
+# These derive the answer from PRODUCT_DIRS instead, so a rename updates them.
+# ---------------------------------------------------------------------------
+
+#: Product tokens whose output is a spectral index (maskable).
+INDEX_PRODUCT_TOKENS = {"NDVI", "NDWI", "MNDWI", "EVI", "NBR"}
+
+#: Product tokens whose output is an 8-bit RGB composite.
+COMPOSITE_PRODUCT_TOKENS = {
+    "trueColor",
+    "naturalColor",
+    "shortwaveInfrared",
+    "colorInfrared",
+}
+
+#: Product tokens whose output is a cloud mask.
+CLOUD_MASK_PRODUCT_TOKENS = {"cloudMask"}
+
+
+def _dirs_for_tokens(sensor, tokens):
+    """Directory names for ``tokens`` that ``sensor`` actually publishes."""
+    return {
+        PRODUCT_DIRS[(sensor, t)]
+        for t in tokens
+        if PRODUCT_DIRS.get((sensor, t)) is not None
+    }
+
+
+def index_dirs(sensor):
+    """Directory names under ``sensor`` holding a spectral index."""
+    return _dirs_for_tokens(sensor, INDEX_PRODUCT_TOKENS)
+
+
+def composite_dirs(sensor):
+    """Directory names under ``sensor`` holding an 8-bit RGB composite."""
+    return _dirs_for_tokens(sensor, COMPOSITE_PRODUCT_TOKENS)
+
+
+def cloud_mask_dirs(sensor):
+    """Directory names under ``sensor`` holding a cloud mask."""
+    return _dirs_for_tokens(sensor, CLOUD_MASK_PRODUCT_TOKENS)
+
+
+def _basename(path):
+    return os.path.basename(os.path.normpath(path))
+
+
+def is_index_dir(sensor, path):
+    """True if ``path``'s leaf directory holds a maskable spectral index."""
+    return _basename(path) in index_dirs(sensor)
+
+
+def is_composite_dir(sensor, path):
+    """True if ``path``'s leaf directory holds an 8-bit RGB composite."""
+    return _basename(path) in composite_dirs(sensor)
+
+
+def is_cloud_mask_dir(sensor, path):
+    """True if ``path``'s leaf directory holds a cloud mask."""
+    return _basename(path) in cloud_mask_dirs(sensor)

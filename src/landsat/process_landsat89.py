@@ -22,7 +22,11 @@ from lxml import etree
 from landsat.landsat89_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 from shared_utils.cog_metadata import load_metadata_json
-from shared_utils.product_paths import product_dir
+from shared_utils.product_paths import (
+    is_cloud_mask_dir,
+    is_index_dir,
+    product_dir,
+)
 from tqdm import tqdm
 import traceback
 import sys
@@ -915,7 +919,7 @@ if __name__ == "__main__":
         if args.merge:
             dirs_to_merge = list(set(prod_dirs))
             cm_dirs = [prod_dir for prod_dir in dirs_to_merge
-                       if 'cloud' in os.path.basename(os.path.normpath(prod_dir)).lower()]
+                       if is_cloud_mask_dir('landsat', prod_dir)]
             for cm_dir in cm_dirs:
                 # merge cloud masks separately so that they are not masked themselves
                 # need to merge cloud masks first b/c this mask can be used
@@ -970,7 +974,7 @@ if __name__ == "__main__":
                     print(f'\n* Skipping {os.path.basename(os.path.normpath(prod_dir))} -- no output generated (see errors above).')
                     continue
                 # merge products of the same date
-                is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'evi', 'nbr'}
+                is_index = is_index_dir('landsat', prod_dir)
                 mask_status = args.mask if is_index else False
 
                 print(f'Merging: {prod_dir} (Masking: {mask_status})')

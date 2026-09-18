@@ -19,7 +19,12 @@ from pathlib import Path
 from sentinel2.sentinel2_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 from shared_utils.cog_metadata import load_metadata_json
-from shared_utils.product_paths import product_dir
+from shared_utils.product_paths import (
+    is_cloud_mask_dir,
+    is_composite_dir,
+    is_index_dir,
+    product_dir,
+)
 from tqdm import tqdm
 import traceback
 import sys
@@ -50,13 +55,9 @@ sys.stderr = Unbuffered(sys.stderr)
 # for uint8 historically meant 0 and is exactly the bug. Matches Satellogic
 # (PR #109). Indices (NDVI/NDWI/MNDWI/NBR) are float32 and keep args.nodata.
 #
-# Lowercased basenames of the prod_dir values created below.
-COMPOSITE_PRODUCT_DIRS = {
-    'truecolor',
-    'naturalcolor',
-    'shortwaveir',
-    'colorir',
-}
+# Which directories hold composites is derived from PRODUCT_DIRS by
+# shared_utils.product_paths.composite_dirs(), so renaming a product
+# directory cannot silently desynchronise this check.
 
 then = datetime.now()
 
@@ -863,7 +864,7 @@ else:
      print('\n')
      dirs_to_merge = list(set(prod_dirs))
      cm_dirs = [prod_dir for prod_dir in dirs_to_merge
-                if 'cloud' in os.path.basename(os.path.normpath(prod_dir)).lower()]
+                if is_cloud_mask_dir('sentinel2', prod_dir)]
      for cm_dir in cm_dirs:
         # merge cloud masks separately so that they are not masked themselves
         # need to merge cloud masks first b/c this mask can be used
@@ -911,14 +912,14 @@ else:
             print(f'\n* Skipping {os.path.basename(os.path.normpath(prod_dir))} -- no output generated (see errors above).')
             continue
         # Determine if this product should be masked (indices only)
-        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
+        is_index = is_index_dir('sentinel2', prod_dir)
         mask_status = args.mask if is_index else False
 
         # A merged composite is still an 8-bit composite -- it inherits the
         # alpha band from its inputs (gen_merge is band-count agnostic), so it
         # needs the same nodata opt-out the per-scene branches use. Without
         # this the merge path silently re-declares nodata=0 and undoes the fix.
-        is_composite = os.path.basename(os.path.normpath(prod_dir)).lower() in COMPOSITE_PRODUCT_DIRS
+        is_composite = is_composite_dir('sentinel2', prod_dir)
 
         # merge products of the same date
         print(f'Merging: {prod_dir} (Masking: {mask_status})')

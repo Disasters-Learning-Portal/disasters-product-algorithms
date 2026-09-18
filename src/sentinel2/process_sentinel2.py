@@ -19,6 +19,12 @@ from pathlib import Path
 from sentinel2.sentinel2_functions import *
 from shared_utils.cog_utils import convert_to_cog, rename_with_event, get_final_filename
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.product_paths import (
+    is_cloud_mask_dir,
+    is_composite_dir,
+    is_index_dir,
+    product_dir,
+)
 from tqdm import tqdm
 import traceback
 import sys
@@ -49,13 +55,9 @@ sys.stderr = Unbuffered(sys.stderr)
 # for uint8 historically meant 0 and is exactly the bug. Matches Satellogic
 # (PR #109). Indices (NDVI/NDWI/MNDWI/NBR) are float32 and keep args.nodata.
 #
-# Lowercased basenames of the prod_dir values created below.
-COMPOSITE_PRODUCT_DIRS = {
-    'truecolor',
-    'naturalcolor',
-    'shortwaveinfrared',
-    'colorinfrared',
-}
+# Which directories hold composites is derived from PRODUCT_DIRS by
+# shared_utils.product_paths.composite_dirs(), so renaming a product
+# directory cannot silently desynchronise this check.
 
 then = datetime.now()
 
@@ -316,7 +318,7 @@ else:
          cloudMask = None
       else:
         # check for cloud mask
-        prod_dir = os.path.join(out_date_dir, 'cloudMask')
+        prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'cloudMask'))
         prod_dirs.append(prod_dir)
         if not os.path.isdir(prod_dir):
             os.mkdir(prod_dir)
@@ -372,7 +374,7 @@ else:
     true_variants = ['true','tc', 'truecolor'] 
     if next((True for p in products if p.lower() in true_variants), False):
       # check for true color image
-      prod_dir = os.path.join(out_date_dir, 'trueColor')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'trueColor'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -424,7 +426,7 @@ else:
     nat_variants = ['nat', 'natural', 'naturalcolor']
     if next((True for p in products if p.lower() in nat_variants), False):
       # check for natural color image
-      prod_dir = os.path.join(out_date_dir, 'naturalColor')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'naturalColor'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -476,7 +478,7 @@ else:
     swir_variants = ['swir', 'shortwaveir', 'shortwaveinfrared']
     if next((True for p in products if p.lower() in swir_variants), False):
       # check for SWIR image
-      prod_dir = os.path.join(out_date_dir, 'shortwaveInfrared')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'shortwaveInfrared'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -528,7 +530,7 @@ else:
     cir_variants = ['cir', 'colorir', 'colorinfrared']
     if next((True for p in products if p.lower() in cir_variants), False):
       # check for color infrared image
-      prod_dir = os.path.join(out_date_dir, 'colorInfrared')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'colorInfrared'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -579,7 +581,7 @@ else:
     
     if next((True for p in products if p.lower() == 'ndwi'), False):
       # check for NDWI
-      prod_dir = os.path.join(out_date_dir, 'NDWI')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'NDWI'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -630,7 +632,7 @@ else:
     
     if next((True for p in products if p.lower() == 'mndwi'), False):
       # check for mNDWI image
-      prod_dir = os.path.join(out_date_dir, 'MNDWI')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'MNDWI'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -681,7 +683,7 @@ else:
     
     if next((True for p in products if p.lower() == 'ndvi'), False):
       # check for NDVI
-      prod_dir = os.path.join(out_date_dir, 'NDVI')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'NDVI'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -732,7 +734,7 @@ else:
     
     if next((True for p in products if p.lower() == 'nbr'), False):
       # check for NBR image
-      prod_dir = os.path.join(out_date_dir, 'NBR')
+      prod_dir = os.path.join(out_date_dir, product_dir('sentinel2', 'NBR'))
       prod_dirs.append(prod_dir)
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
@@ -795,12 +797,12 @@ else:
       date = os.path.basename(date_dir)
 
       # create water extent directory
-      prod_dir = os.path.join(out_dir, date, 'waterExtent')
+      prod_dir = os.path.join(out_dir, date, product_dir('sentinel2', 'waterExtent'))
       if not os.path.isdir(prod_dir):
           os.mkdir(prod_dir)
       
       # check for merged cloud mask
-      cloud_dir = os.path.join(out_dir, date, 'cloudMask')
+      cloud_dir = os.path.join(out_dir, date, product_dir('sentinel2', 'cloudMask'))
       cloudMask_check = glob.glob(os.path.join(cloud_dir,'*merged.tif'))
       if not cloudMask_check:
          # merge all cloud masks for a given daye
@@ -861,7 +863,8 @@ else:
   if args.merge:
      print('\n')
      dirs_to_merge = list(set(prod_dirs))
-     cm_dirs = [prod_dir for prod_dir in dirs_to_merge if 'cloud' in prod_dir]
+     cm_dirs = [prod_dir for prod_dir in dirs_to_merge
+                if is_cloud_mask_dir('sentinel2', prod_dir)]
      for cm_dir in cm_dirs:
         # merge cloud masks separately so that they are not masked themselves
         # need to merge cloud masks first b/c this mask can be used
@@ -909,14 +912,14 @@ else:
             print(f'\n* Skipping {os.path.basename(os.path.normpath(prod_dir))} -- no output generated (see errors above).')
             continue
         # Determine if this product should be masked (indices only)
-        is_index = os.path.basename(os.path.normpath(prod_dir)).lower() in {'ndvi', 'ndwi', 'mndwi', 'nbr'}
+        is_index = is_index_dir('sentinel2', prod_dir)
         mask_status = args.mask if is_index else False
 
         # A merged composite is still an 8-bit composite -- it inherits the
         # alpha band from its inputs (gen_merge is band-count agnostic), so it
         # needs the same nodata opt-out the per-scene branches use. Without
         # this the merge path silently re-declares nodata=0 and undoes the fix.
-        is_composite = os.path.basename(os.path.normpath(prod_dir)).lower() in COMPOSITE_PRODUCT_DIRS
+        is_composite = is_composite_dir('sentinel2', prod_dir)
 
         # merge products of the same date
         print(f'Merging: {prod_dir} (Masking: {mask_status})')

@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
 from shared_utils.file_naming import create_sar_output_filename
+from shared_utils.product_paths import product_output_dir
 
 
 def retrieve_iceye_resources(date: Union[str, datetime], bucket="csdap-iceye-delivery", prefix="disasters"):
@@ -123,7 +124,7 @@ def sigmaCalib(s3_image_paths : list[str], s3_metadata_paths : list[str], save_p
     dt = datetime.strptime(grd_in_file.split("_")[-1].split(".")[0], "%Y%m%dT%H%M%S")
     
     outfile_base = os.path.join(
-        save_location,
+        product_output_dir(save_location, "iceye", "sigma0"),
         create_sar_output_filename(
             f"ICEYE-{grd_in_file.split('/')[-1].split('_')[1]}",
             "sigma0",

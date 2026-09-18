@@ -29,6 +29,11 @@ guessing. See ``UNDECIDED_NOTES`` for why each one is open.
 
 import os
 
+#: The one bucket every product is published to. Hard-coded here so a notebook or
+#: a run.sh never carries its own copy -- the three sensor notebooks had drifted
+#: onto two different buckets and two different prefixes.
+STAGING_BUCKET = "nasa-disasters-staging"
+
 PROGRAM_DATA_ROOT = "ProgramData"
 
 #: Sensor key -> ``<Sensor>`` directory, spelled as the bucket spells it.
@@ -69,6 +74,9 @@ PRODUCT_DIRS = {
     ("sentinel2", "NDWI"): "NDWI",
     ("sentinel2", "MNDWI"): "mNDWI",
     ("sentinel2", "NBR"): "NBR",
+    # Reachable only through the STAC/ODR workflow; the legacy
+    # process_sentinel2 CLI has no EVI product and never creates this directory.
+    ("sentinel2", "EVI"): "EVI",
     ("sentinel2", "dNBR"): "dNBR",
     ("sentinel2", "waterExtent"): "WaterExtent",
     # -- Satellogic (product tokens are lowercase in this processor) ------------

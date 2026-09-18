@@ -230,12 +230,15 @@ class TestClassificationMatchesThePreviousBehaviour:
             product_dir("landsat", p) for p in ("NDVI", "NDWI", "MNDWI", "EVI", "NBR")
         }
 
-    def test_sentinel2_index_set_is_unchanged(self):
-        # S2 never had EVI; the derived set must not quietly acquire it.
-        assert index_dirs("sentinel2") == {
-            product_dir("sentinel2", p) for p in ("NDVI", "NDWI", "MNDWI", "NBR")
-        }
-        assert ("sentinel2", "EVI") not in PRODUCT_DIRS
+    def test_sentinel2_index_set_covers_the_legacy_four(self):
+        # The legacy process_sentinel2 CLI masks exactly these four. EVI is also
+        # in the set because the STAC/ODR workflow can produce it, but that CLI
+        # never creates an EVI directory, so the extra entry is unreachable there
+        # and masking behaviour is unchanged.
+        legacy = {product_dir("sentinel2", p) for p in ("NDVI", "NDWI", "MNDWI", "NBR")}
+        assert legacy <= index_dirs("sentinel2")
+        assert index_dirs("sentinel2") - legacy == {product_dir("sentinel2", "EVI")}
+        assert "EVI" not in {p for s, p in _product_lookups(PROCESSORS["sentinel2"])}
 
     def test_sentinel2_composite_set_is_unchanged(self):
         assert composite_dirs("sentinel2") == {

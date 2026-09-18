@@ -1,5 +1,5 @@
 """
-Regression test for notebooks/simple_disaster_staging.ipynb.
+Regression test for notebooks/tools/simple_disaster_staging.ipynb.
 
 That notebook is the ONE-PASS variant of simple_disaster_template.ipynb: raw
 non-COG source -> COG with activation tags -> final location in
@@ -26,7 +26,7 @@ nbformat = pytest.importorskip("nbformat")
 pytest.importorskip("shared_utils.file_naming")  # needs the package installed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NB_PATH = REPO_ROOT / "notebooks" / "simple_disaster_staging.ipynb"
+NB_PATH = REPO_ROOT / "notebooks" / "tools" / "simple_disaster_staging.ipynb"
 
 # The shape this notebook must never emit at the head of an output name.
 EVENT_PREFIX_RE = re.compile(r"^\d{6}_[A-Za-z0-9]+_[A-Za-z0-9]+_")

@@ -154,9 +154,14 @@ OUTPUT_DIR = "/tmp/s2_stac_output"
 # ------------------------------------------------------------------------------
 
 ENABLE_S3_UPLOAD = False
-S3_BUCKET = "nasa-disasters"
-S3_DEST_BASE = "drcs_activations_new"
-S3_PREFIX = f"{S3_DEST_BASE}/{EVENT_NAME}"
+# The bucket and every product directory are hard-coded once, in
+# shared_utils.product_paths; nothing here keeps its own copy. Products publish
+# to s3://<bucket>/ProgramData/Sentinel-2/<Product>/<filename>.tif -- no event
+# and no date level, because the activation lives in the GeoTIFF tags.
+from shared_utils.product_paths import STAGING_BUCKET
+
+S3_BUCKET = STAGING_BUCKET
+PRODUCT_SENSOR = "sentinel2"   # key into shared_utils.product_paths
 '''),
     code('''
 # ==============================================================================
@@ -436,17 +441,22 @@ reviewing the outputs above.
 # ==============================================================================
 # UPLOAD TO S3 (optional)
 # ==============================================================================
-# Publishes to s3://{S3_BUCKET}/{S3_PREFIX}/sentinel-2/<product_folder>/<filename>
+# Publishes to s3://{S3_BUCKET}/ProgramData/Sentinel-2/<Product>/<filename>
 from shared_utils import upload_file_to_s3
 
 # Maps the filename product token -> its S3 folder. Keys must match the
 # camelCase token _build_output_filename writes, and every product in PRODUCTS
 # needs an entry or its COGs are silently skipped.
-PRODUCT_FOLDERS = {
+# Filename product token -> the product key in shared_utils.product_paths. The
+# directory itself is NOT written here: product_dir() resolves it, so this
+# notebook cannot drift from the published layout the way the old hard-coded
+# folder map did (it had colorIR, SWIR, MNDWI and waterExtent, none of which
+# match the bucket).
+_PRODUCT_KEYS = {
     "trueColor": "trueColor",
     "naturalColor": "naturalColor",
-    "colorInfrared": "colorIR",
-    "swir": "SWIR",
+    "colorInfrared": "colorInfrared",
+    "swir": "shortwaveInfrared",
     "ndvi": "NDVI",
     "ndwi": "NDWI",
     "mndwi": "MNDWI",
@@ -454,6 +464,10 @@ PRODUCT_FOLDERS = {
     "evi": "EVI",
     "waterExtent": "waterExtent",
 }
+PRODUCT_FOLDERS = {
+    token: product_dir(PRODUCT_SENSOR, key) for token, key in _PRODUCT_KEYS.items()
+}
+
 
 _unmapped = {
     p for p, on in PRODUCTS.items() if on
@@ -498,11 +512,12 @@ else:
             continue
 
         upload_file_to_s3(
-            f, f"s3://{S3_BUCKET}/{S3_PREFIX}/sentinel-2/{subfolder}/{filename}"
+            f, f"s3://{S3_BUCKET}/{prefix_for_product_dir(PRODUCT_SENSOR, subfolder)}/{filename}"
         )
         uploaded += 1
 
-    print(f"\\nUploaded {uploaded} COG(s) to s3://{S3_BUCKET}/{S3_PREFIX}/sentinel-2/")
+    print(f"\\nUploaded {uploaded} COG(s) to "
+          f"s3://{S3_BUCKET}/ProgramData/Sentinel-2/<Product>/")
     if skipped:
         raise RuntimeError(
             f"{len(skipped)} COG(s) had no product folder and were NOT "

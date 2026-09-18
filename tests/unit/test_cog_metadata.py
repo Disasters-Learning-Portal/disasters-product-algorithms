@@ -248,7 +248,7 @@ class TestConvertToCogMetadata:
 
 class TestInMemoryThreadSafety:
     """The bytes->bytes path (create_cog_with_metadata + validate_cog_in_memory)
-    is fanned out across a thread pool by notebooks/bake_event_metadata.ipynb
+    is fanned out across a thread pool by notebooks/tools/bake_event_metadata.ipynb
     (map_threaded, PROCESS_WORKERS=8). /vsimem is a *process-global* filesystem,
     so constant vsimem paths race: concurrent bakes clobber each other's
     input/output/validate buffers and torn reads surface as IndexError,

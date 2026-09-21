@@ -943,3 +943,185 @@ class TestCreationOptionParity:
             for k, v in cog_utils.build_creation_options('ZSTD', 9).items()
         }
         assert expected <= passed, f"subprocess backend dropped {expected - passed}"
+
+
+# --------------------------------------------------------------------------- #
+# Overview depth derived from raster size (was a hardcoded 5)                  #
+# --------------------------------------------------------------------------- #
+
+def _write_sized(path, width, height, count=1, dtype='uint8', fill=40, epsg=32617):
+    """Like _write, but at an arbitrary size -- overview depth depends on it."""
+    import rasterio
+    from rasterio.transform import from_bounds
+    from rasterio.crs import CRS
+    data = np.full((count, height, width), fill, dtype=dtype)
+    transform = from_bounds(500000, 3200000, 500000 + 10 * width, 3200000 + 10 * height,
+                            width, height)
+    with rasterio.open(str(path), 'w', driver='GTiff', height=height, width=width,
+                       count=count, dtype=dtype, crs=CRS.from_epsg(epsg),
+                       transform=transform) as dst:
+        dst.write(data)
+    return str(path)
+
+
+def _capture_rio_cogeo_argv(monkeypatch):
+    """Patch subprocess.run to record the `rio cogeo create` argv while still
+    producing the output file the caller expects. Same trick as
+    TestCreationOptionParity."""
+    import subprocess as _sp
+    from shared_utils import cog_utils
+    captured = {}
+    real_run = _sp.run
+
+    def fake_run(cmd, *a, **k):
+        if isinstance(cmd, list) and cmd[:3] == ['rio', 'cogeo', 'create']:
+            captured['cmd'] = cmd
+            real_run(['rio', 'cogeo', 'create', cmd[3], cmd[4]], check=True)
+            return _sp.CompletedProcess(cmd, 0, stdout='', stderr='')
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(cog_utils.subprocess, 'run', fake_run)
+    return captured
+
+
+def _flag(cmd, name):
+    return cmd[cmd.index(name) + 1]
+
+
+class TestOverviewDepthFromRasterSize:
+    """convert_to_cog hardcoded overview_levels=5 regardless of raster size.
+
+    That is fine up to ~16,000 px and badly wrong past it: planet-ndvi-daily
+    (65,792 x 29,440) shipped with 4 levels where 8 are needed, leaving every
+    zoomed-out tile to decimate a 4,112 px window in RAM; a 139,850 px Vantor
+    mosaic would need 9. The count is now derived so the coarsest overview
+    fits one 512 px block on the LONGER side -- GDAL's own rule -- via the
+    max-based calculate_overview_factors this repo already used elsewhere.
+    """
+
+    # (width, height, expected levels). The 70000x8000 row is the one that
+    # separates the max-based rule (8) from rio-cogeo's min-based default (4).
+    SIZES = [
+        (32, 32, 3),              # tiny: the [2, 4, 8] fallback
+        (1510, 764, 2),           # ecostress-lst-subdaily
+        (9216, 9216, 5),          # sentinel2-truecolor-subdaily
+        (9550, 5004, 5),          # aviris3-charash-daily
+        (65792, 29440, 8),        # planet-ndvi-daily -- was 4 in production
+        (70000, 8000, 8),         # non-square: min() rule would say 4
+        (139850, 57582, 9),       # vantor 3x10 mosaic
+    ]
+
+    @pytest.mark.parametrize('w,h,expect', SIZES)
+    def test_derived_count_follows_the_longer_side(self, w, h, expect):
+        from shared_utils.cog_utils import resolve_overview_count
+        assert resolve_overview_count(w, h) == expect
+
+    @pytest.mark.parametrize('w,h,expect', [s for s in SIZES if max(s[:2]) > 512])
+    def test_coarsest_overview_fits_one_block(self, w, h, expect):
+        # The rule's whole point: max(w, h) / 2**levels <= 512.
+        assert max(w, h) / 2 ** expect <= 512
+        # ...and one fewer level would NOT have fit.
+        assert max(w, h) / 2 ** (expect - 1) > 512
+
+    def test_explicit_count_still_wins(self):
+        from shared_utils.cog_utils import resolve_overview_count
+        assert resolve_overview_count(139850, 57582, explicit=5) == 5
+        assert resolve_overview_count(32, 32, explicit=0) == 0
+
+    def test_subprocess_backend_passes_the_derived_count(self, tmp_path, monkeypatch):
+        """1200x300 -> factors [2, 4] -> 2 levels. Not the old 5."""
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "wide.tif", 1200, 300, count=3)
+        cog_utils.convert_to_cog(src, str(tmp_path / "wide_cog.tif"),
+                                 dst_crs=None, quiet=True)
+        assert _flag(captured['cmd'], '--overview-level') == '2'
+
+    def test_explicit_count_reaches_the_subprocess(self, tmp_path, monkeypatch):
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "wide.tif", 1200, 300, count=3)
+        cog_utils.convert_to_cog(src, str(tmp_path / "wide_cog.tif"),
+                                 dst_crs=None, quiet=True, overview_levels=5)
+        assert _flag(captured['cmd'], '--overview-level') == '5'
+
+    def test_produced_cog_overviews_reach_block_size(self, tmp_path):
+        """End to end: the file on disk carries the derived pyramid and its
+        coarsest level fits a 512 px block."""
+        import rasterio
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write_sized(tmp_path / "wide.tif", 1200, 300, count=3)
+        out = convert_to_cog(src, str(tmp_path / "wide_cog.tif"),
+                             dst_crs=None, quiet=True)
+        with rasterio.open(out) as cog:
+            ovr = cog.overviews(1)
+            assert ovr == [2, 4], ovr
+            assert max(cog.width, cog.height) / max(ovr) <= 512
+
+    def test_categorical_raster_gets_mode_overviews_without_a_warp(self, tmp_path, monkeypatch):
+        """Regression: overview_resampling was only resolved inside the warp
+        branch, so with dst_crs=None a classification got 'average' overviews
+        -- class codes averaged into codes that do not exist. The filename
+        keyword 'mask' routes determine_resampling_method to ('nearest', 'mode')."""
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "flood_mask.tif", 600, 600, count=1)
+        cog_utils.convert_to_cog(src, str(tmp_path / "flood_mask_cog.tif"),
+                                 dst_crs=None, quiet=True)
+        assert _flag(captured['cmd'], '--overview-resampling') == 'mode'
+
+    def test_caller_supplied_near_is_translated_for_overviews(self, tmp_path, monkeypatch):
+        """'near' is valid for gdalwarp -r and documented for resampling_method,
+        but `rio cogeo create --overview-resampling` rejects it (it wants
+        'nearest'). Copying the caller's string verbatim would fail the run."""
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "plain.tif", 600, 600, count=1)
+        cog_utils.convert_to_cog(src, str(tmp_path / "plain_cog.tif"),
+                                 dst_crs=None, quiet=True, resampling_method='near')
+        assert _flag(captured['cmd'], '--overview-resampling') == 'nearest'
+
+
+class TestBigTiffForcedAboveThreshold:
+    """BIGTIFF=IF_SAFER is a GDAL heuristic that 'might not always work'. Above
+    BIGTIFF_FORCE_GB of raw output we force YES; below it nothing changes, so
+    the existing IF_SAFER assertions still hold."""
+
+    def test_default_and_small_keep_if_safer(self):
+        from shared_utils.cog_utils import build_creation_options
+        assert build_creation_options('ZSTD', 9)['BIGTIFF'] == 'IF_SAFER'
+        assert build_creation_options('ZSTD', 9, raw_size_gb=1.0)['BIGTIFF'] == 'IF_SAFER'
+
+    def test_large_raw_output_forces_yes(self):
+        from shared_utils.cog_utils import build_creation_options, BIGTIFF_FORCE_GB
+        assert build_creation_options('ZSTD', 9, raw_size_gb=BIGTIFF_FORCE_GB + 0.5)['BIGTIFF'] == 'YES'
+        # The vantor 3x10 mosaic: ~129 GB raw.
+        assert build_creation_options('ZSTD', 9, raw_size_gb=129.0)['BIGTIFF'] == 'YES'
+
+    @pytest.mark.parametrize('compression', ['ZSTD', 'DEFLATE', 'LZW'])
+    def test_in_process_profile_stays_in_parity_when_forced(self, compression):
+        """Both backends must reach the same BIGTIFF decision for a large raster."""
+        from shared_utils.cog_utils import build_creation_options, _build_cog_translate_profile
+        opts = build_creation_options(compression, 9, raw_size_gb=50.0)
+        profile = _build_cog_translate_profile(compression, 9, raw_size_gb=50.0)
+        assert opts['BIGTIFF'] == 'YES'
+        missing = {k: v for k, v in opts.items() if profile.get(k) != v}
+        assert not missing, f"in-process profile dropped {missing}"
+
+
+class TestGdalBackendOverviewCount:
+    """backend='gdal' used to hardcode OVERVIEW_COUNT=5 and silently drop the
+    value convert_to_cog was handed."""
+
+    def _cmd(self, **kw):
+        from shared_utils.gdal_cog_processor import build_gdal_translate_command
+        return build_gdal_translate_command('in.tif', 'out.tif', None, 'ZSTD', 9, 512, **kw)
+
+    def test_omits_overview_count_when_unset_so_gdal_derives_it(self):
+        cmd = self._cmd()
+        assert not any(tok.startswith('OVERVIEW_COUNT=') for tok in cmd), cmd
+
+    def test_passes_an_explicit_count_through(self):
+        cmd = self._cmd(overview_count=7)
+        assert 'OVERVIEW_COUNT=7' in cmd
+        assert cmd[cmd.index('OVERVIEW_COUNT=7') - 1] == '-co'

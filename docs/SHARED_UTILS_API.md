@@ -303,7 +303,7 @@ Both are preceded by subprocess `gdalwarp` (`NUM_THREADS=ALL_CPUS`) when a repro
 Every caller passing `metadata=` or `--metadata-json` takes the second path — both `simple_disaster`
 notebooks and every sensor CLI.
 
-**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None)`,
+**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None, band_count=None)`,
 consumed by BOTH backends** so they cannot drift. It always includes:
 
 - **`NUM_THREADS=ALL_CPUS`** — `.clinerules.md` rule #8. Without it GDAL compresses single-threaded
@@ -319,6 +319,11 @@ consumed by BOTH backends** so they cannot drift. It always includes:
   GDAL documents `IF_SAFER` as "only a heuristic that might not always work depending on compression
   ratios", and on a 100+ GB mosaic the failure is `TIFFAppendToStrip: Maximum TIFF file size exceeded`,
   hours into the run. `convert_to_cog` computes `raw_size_gb` from the post-warp raster.
+- **`INTERLEAVE=BAND` when `band_count > 3`** — a >3-band raster is rendered as a band subset (titiler
+  `bidx=5,3,2` of 8). With the default `PIXEL` interleave every block holds all bands, so that read still
+  decodes all 8: 4.19 MB per 512 px uint16 block instead of 1.57 MB, 2.7x on every tile. `BAND` stores
+  each band's blocks separately. Verified valid COG, same size, byte-identical pixels. Rasters of 3 bands
+  or fewer keep `PIXEL` (an RGB read wants all of them together).
 
 Historically the in-process backend built its own profile and had **neither** of these. If you add a
 `--co` to one backend, add it to `build_creation_options` instead — the parity test captures the real

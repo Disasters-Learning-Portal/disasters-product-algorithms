@@ -318,7 +318,11 @@ COG_GDAL_CONFIG = {
 }
 
 
-def build_creation_options(compression: str, compression_level: int) -> dict:
+def build_creation_options(
+    compression: str,
+    compression_level: int,
+    raw_size_gb: Optional[float] = None,
+) -> dict:
     """
     Single source of truth for the GDAL creation options used by BOTH
     ``convert_to_cog`` backends -- the subprocess ``rio cogeo create`` branch
@@ -352,10 +356,25 @@ def build_creation_options(compression: str, compression_level: int) -> dict:
 
         Note this is invisible for small test rasters -- it only bites when
         raw size + overviews straddles 4 GB, which is why it shipped unnoticed.
+
+    ``raw_size_gb`` -> ``BIGTIFF=YES``
+        ``IF_SAFER`` is, per the GDAL GTiff docs, "only a heuristic that might
+        not always work depending on compression ratios". Above
+        ``BIGTIFF_FORCE_GB`` of raw (uncompressed) output we stop guessing and
+        force BigTIFF. Raw size is the right yardstick precisely because
+        rio-cogeo's scratch dataset is uncompressed. Internal overviews share
+        the same 32-bit offset space, so they count toward the 4 GiB ceiling.
+        The failure mode this pre-empts is ``TIFFAppendToStrip: Maximum TIFF
+        file size exceeded`` -- typically hours into a large mosaic. Same
+        threshold as ``compression.py`` / ``profiles.py``.
     """
+    bigtiff = (
+        'YES' if raw_size_gb is not None and raw_size_gb > BIGTIFF_FORCE_GB
+        else 'IF_SAFER'
+    )
     opts = {
         'NUM_THREADS': 'ALL_CPUS',
-        'BIGTIFF': 'IF_SAFER',
+        'BIGTIFF': bigtiff,
     }
     if compression.upper() == 'DEFLATE':
         opts['PREDICTOR'] = 2
@@ -368,7 +387,11 @@ def build_creation_options(compression: str, compression_level: int) -> dict:
     return opts
 
 
-def _build_cog_translate_profile(compression: str, compression_level: int) -> dict:
+def _build_cog_translate_profile(
+    compression: str,
+    compression_level: int,
+    raw_size_gb: Optional[float] = None,
+) -> dict:
     """
     Build a rio_cogeo profile dict that matches what the subprocess
     `rio cogeo create ... --co PREDICTOR=2 --co ZSTD_LEVEL=N` path produces.
@@ -382,8 +405,59 @@ def _build_cog_translate_profile(compression: str, compression_level: int) -> di
     from rio_cogeo.profiles import cog_profiles
 
     profile = dict(cog_profiles.get(compression.lower()))
-    profile.update(build_creation_options(compression, compression_level))
+    profile.update(build_creation_options(compression, compression_level, raw_size_gb))
     return profile
+
+
+# gdalwarp's ``-r`` names versus the rasterio/rio-cogeo ``Resampling`` enum. A
+# caller's warp resampling is reused for overview building, but
+# ``rio cogeo create --overview-resampling`` is a strict Choice over the
+# rasterio names, and ``near`` -- documented as valid for ``resampling_method``
+# -- is not one of them. gdalwarp accepts both spellings; rio-cogeo does not.
+_OVERVIEW_RESAMPLING_ALIASES = {
+    'near': 'nearest',
+    'cubicspline': 'cubic_spline',
+}
+
+# Raw (uncompressed) output size above which BIGTIFF is forced instead of
+# left to GDAL's IF_SAFER heuristic. Same threshold as compression.py and
+# profiles.py, which convert_to_cog previously did not use.
+BIGTIFF_FORCE_GB = 3.0
+
+
+def resolve_overview_count(width: int, height: int, explicit: Optional[int] = None) -> int:
+    """
+    Number of overview levels to build for a raster of the given size.
+
+    An explicit count always wins. Otherwise the count is derived so that the
+    coarsest overview fits within one 512 px COG block on its LONGER side:
+
+        levels = ceil(log2(max(width, height) / 512))
+
+    via ``reprojection.calculate_overview_factors``, the max-based rule this
+    repo already used for its other COG writers and which matches what GDAL's
+    COG driver does when ``OVERVIEW_COUNT`` is left unset.
+
+    Why not the old fixed 5, and why not rio-cogeo's own default:
+
+    - A fixed 5 ignores size. On a 139,850 px Vantor mosaic it leaves the
+      coarsest overview at 4,370 px, so rendering ONE zoomed-out 256 px tile
+      makes GDAL read a ~350 MB, ~100-block window and decimate it in RAM.
+      With the derived 9 levels the same tile is one ~1.4 MB block.
+      ``planet-ndvi-daily`` (65,792 x 29,440) shipped with 4 levels and needs
+      8 -- this was already live, not hypothetical.
+    - rio-cogeo's default (``overview_level=None``) stops on the SHORTER side
+      (``min()`` in ``rasterio.rio.overview.get_maximum_overview_level``), so
+      a strongly non-square mosaic still comes out under-built.
+
+    Small rasters get FEWER levels than before (a 1,510 px scene: 2, not 5),
+    which is correct -- over-building a tiny raster is what produced
+    ``Too many overviews levels of 1x1 dimension`` in update_nodata_cog.py.
+    """
+    if explicit is not None:
+        return int(explicit)
+    from shared_utils.reprojection import calculate_overview_factors
+    return len(calculate_overview_factors(width, height))
 
 
 def convert_to_cog(
@@ -395,7 +469,7 @@ def convert_to_cog(
     clip_to_webmerc: Optional[bool] = None,
     compression: str = 'ZSTD',
     compression_level: int = 22,
-    overview_levels: int = 5,
+    overview_levels: Optional[int] = None,
     quiet: bool = False,
     backend: str = 'rio',
     metadata: Optional[Dict[str, str]] = None,
@@ -449,7 +523,11 @@ def convert_to_cog(
             EPSG:3857, no-op for regional rasters that already fit.
         compression: Compression type (default: ZSTD)
         compression_level: Compression level (default: 22 for ZSTD)
-        overview_levels: Number of overview levels (default: 5, minimum)
+        overview_levels: Number of overview levels. Default None derives it
+            from the OUTPUT raster's size (post-warp) via resolve_overview_count
+            so the coarsest overview fits one 512 px block on the longer side;
+            an explicit int is used verbatim. Was a fixed 5, which under-built
+            anything wider than ~16,000 px.
         quiet: Suppress output messages
         backend: Backend to use for COG creation. 'rio' (default) uses rio-cogeo
             CLI, 'gdal' delegates to shared_utils.gdal_cog_processor.create_cog_gdal.
@@ -504,6 +582,7 @@ def convert_to_cog(
             nodata=nodata,
             compress=compression,
             compress_level=compression_level,
+            overview_levels=overview_levels,
             reproject_to_4326=(dst_crs == 'EPSG:4326') if dst_crs else False,
             verbose=not quiet,
         )
@@ -764,10 +843,30 @@ def convert_to_cog(
                 else:
                     print(f"  Reprojection: Not needed (already in target CRS)")
             print(f"  Compression: {compression} (level {compression_level})")
-            print(f"  Overview levels: {overview_levels}")
+            print(
+                "  Overview levels: "
+                + (str(overview_levels) if overview_levels is not None
+                   else "auto (derived from output size)")
+            )
 
-    # Default overview resampling (may be overridden during reprojection)
-    overview_resampling = 'average'
+    # Resolve resampling up front, for the warp AND the overviews. This used to
+    # live inside the `if needs_reprojection:` branch, so without a warp
+    # (dst_crs=None, or a source already in the target CRS) overviews were
+    # always built with 'average' -- averaging a classification's class codes
+    # into codes that do not exist. The 'mode' branch of
+    # determine_resampling_method was unreachable on that path.
+    if resampling_method is None:
+        resampling_method, overview_resampling = determine_resampling_method(input_tif)
+        if not quiet:
+            print(f"  Resampling method: {resampling_method} (auto-detected)")
+    else:
+        # Reuse the caller's warp resampling for overviews, translated from
+        # gdalwarp's vocabulary to rio-cogeo's where they differ ('near').
+        overview_resampling = _OVERVIEW_RESAMPLING_ALIASES.get(
+            resampling_method, resampling_method
+        )
+        if not quiet:
+            print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
     # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
     # already declares one. A VRT is a lazy XML header — no pixel copy — so this
@@ -799,17 +898,6 @@ def convert_to_cog(
     # Step 1: Reproject if needed (warp to dst_crs)
     if needs_reprojection:
         warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
-
-        # Resolve resampling: explicit override > auto-detect from file content.
-        if resampling_method is None:
-            resampling_method, overview_resampling = determine_resampling_method(input_tif)
-            if not quiet:
-                print(f"  Resampling method: {resampling_method} (auto-detected)")
-        else:
-            # If caller specified resampling, also use it for overview building.
-            overview_resampling = resampling_method
-            if not quiet:
-                print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
         # When the warp was forced purely to rewrite the fill, dst_crs may be
         # None or identical to the source; keep the pixels where they are.
@@ -875,13 +963,31 @@ def convert_to_cog(
             print(error_msg)
             raise RuntimeError(error_msg)
 
+    # Overview depth and BIGTIFF are decided from what will actually be
+    # written -- the post-warp raster -- not from the source. Raw size is the
+    # uncompressed footprint, which is exactly what rio-cogeo's scratch
+    # dataset occupies (see build_creation_options).
+    with rasterio.open(input_for_cog) as cog_src:
+        out_w, out_h = cog_src.width, cog_src.height
+        raw_size_gb = (
+            out_w * out_h * cog_src.count
+            * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
+        )
+    overview_count = resolve_overview_count(out_w, out_h, overview_levels)
+    if not quiet:
+        print(
+            f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
+            f"{overview_count} overview levels, "
+            f"BIGTIFF={build_creation_options(compression, compression_level, raw_size_gb)['BIGTIFF']}"
+        )
+
     # Step 2: Build rio cogeo create command (using warped file if reprojected)
     cmd = [
         'rio', 'cogeo', 'create',
         input_for_cog,  # Use warped file if reprojection occurred
         temp_output,
         '--cog-profile', compression.lower(),
-        '--overview-level', str(overview_levels),
+        '--overview-level', str(overview_count),
         '--overview-resampling', overview_resampling,
     ]
 
@@ -892,7 +998,7 @@ def convert_to_cog(
     # Creation options come from the ONE builder both branches share, so the
     # subprocess path and the in-process cog_translate path cannot diverge
     # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
-    for key, value in build_creation_options(compression, compression_level).items():
+    for key, value in build_creation_options(compression, compression_level, raw_size_gb).items():
         cmd.extend(['--co', f'{key}={value}'])
 
     # Execute COG creation.
@@ -931,13 +1037,13 @@ def convert_to_cog(
             if not quiet:
                 print(f"  Embedded tags: {sorted(full_metadata.keys())}")
 
-            profile = _build_cog_translate_profile(compression, compression_level)
+            profile = _build_cog_translate_profile(compression, compression_level, raw_size_gb)
             cog_translate(
                 input_for_cog,
                 temp_output,
                 profile,
                 nodata=nodata,
-                overview_level=overview_levels,
+                overview_level=overview_count,
                 overview_resampling=overview_resampling,
                 web_optimized=False,
                 additional_cog_metadata=full_metadata,

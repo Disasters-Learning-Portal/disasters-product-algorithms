@@ -145,6 +145,7 @@ def create_cog_gdal(
         try:
             with rasterio.open(input_path) as src:
                 dtype = src.dtypes[0]
+                band_count = src.count
             resampling, overview_resampling = get_resampling_for_dtype(dtype)
             if verbose:
                 print(f"   [GDAL-COG] Data type: {dtype} → Resampling: {resampling}, Overviews: {overview_resampling}")
@@ -152,6 +153,7 @@ def create_cog_gdal(
             # Fallback if can't detect
             resampling = 'bilinear'
             overview_resampling = 'average'
+            band_count = None
 
         # Set optimal environment
         env = set_optimal_gdal_env()
@@ -164,7 +166,7 @@ def create_cog_gdal(
                 compress, compress_level, blocksize,
                 resampling, overview_resampling,
                 env, verbose, target_crs=effective_crs,
-                overview_levels=overview_levels,
+                overview_levels=overview_levels, band_count=band_count,
             )
 
         # Direct COG creation without reprojection
@@ -174,7 +176,7 @@ def create_cog_gdal(
             input_path, output_path, nodata,
             compress, compress_level, blocksize,
             overview_resampling=overview_resampling,
-            overview_count=overview_levels
+            overview_count=overview_levels, band_count=band_count
         )
 
         if verbose:
@@ -218,7 +220,8 @@ def create_cog_with_reprojection(
     env: Dict[str, str],
     verbose: bool,
     target_crs: str = 'EPSG:4326',
-    overview_levels: Optional[int] = None
+    overview_levels: Optional[int] = None,
+    band_count: Optional[int] = None
 ) -> bool:
     """
     Create COG with reprojection using two-stage process.
@@ -309,7 +312,7 @@ def create_cog_with_reprojection(
             temp_file, output_path, nodata,
             compress, compress_level, blocksize,
             overview_resampling=overview_resampling,
-            overview_count=overview_levels
+            overview_count=overview_levels, band_count=band_count
         )
 
         result = subprocess.run(
@@ -347,7 +350,8 @@ def build_gdal_translate_command(
     compress_level: int,
     blocksize: int,
     overview_resampling: str = 'average',
-    overview_count: Optional[int] = None
+    overview_count: Optional[int] = None,
+    band_count: Optional[int] = None
 ) -> List[str]:
     """
     Build gdal_translate command with optimal COG parameters.
@@ -369,6 +373,10 @@ def build_gdal_translate_command(
     ]
     if overview_count is not None:
         cmd.extend(['-co', f'OVERVIEW_COUNT={int(overview_count)}'])
+    # >3 bands are rendered as a subset; BAND interleave keeps a 3-of-8 read
+    # from decoding all 8. Same rule as cog_utils.build_creation_options.
+    if band_count is not None and band_count > 3:
+        cmd.extend(['-co', 'INTERLEAVE=BAND'])
 
     # Add compression-specific options
     # Note: COG driver doesn't support ZSTD_LEVEL, it's only for GTiff driver

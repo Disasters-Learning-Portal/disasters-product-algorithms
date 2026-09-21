@@ -286,7 +286,7 @@ convert_to_cog(
     clip_to_webmerc: bool = None,           # ±85° lat clip; None = auto-detect
     compression: str = 'ZSTD',
     compression_level: int = 22,
-    overview_levels: int = 5,
+    overview_levels: Optional[int] = None,  # None = derived from output size (coarsest <= 512 px)
     quiet: bool = False,
     backend: str = 'rio'                    # 'rio' or 'gdal'
 ) -> str                                    # Returns path to created COG
@@ -303,7 +303,7 @@ Both are preceded by subprocess `gdalwarp` (`NUM_THREADS=ALL_CPUS`) when a repro
 Every caller passing `metadata=` or `--metadata-json` takes the second path — both `simple_disaster`
 notebooks and every sensor CLI.
 
-**Creation options come from one builder, `build_creation_options(compression, compression_level)`,
+**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None)`,
 consumed by BOTH backends** so they cannot drift. It always includes:
 
 - **`NUM_THREADS=ALL_CPUS`** — `.clinerules.md` rule #8. Without it GDAL compresses single-threaded
@@ -315,6 +315,10 @@ consumed by BOTH backends** so they cannot drift. It always includes:
   on disk. A 1.2 Gpx SkySat scene (3.70 GB raw, 4.38 GB with overviews) went from >27 min stuck to
   28.9 s. Invisible on small fixtures; pinned by `TestCreationOptionParity`. See
   disasters-portal#405.
+  Above `BIGTIFF_FORCE_GB` (3 GB) of **raw** output, `raw_size_gb=` promotes this to `BIGTIFF=YES`:
+  GDAL documents `IF_SAFER` as "only a heuristic that might not always work depending on compression
+  ratios", and on a 100+ GB mosaic the failure is `TIFFAppendToStrip: Maximum TIFF file size exceeded`,
+  hours into the run. `convert_to_cog` computes `raw_size_gb` from the post-warp raster.
 
 Historically the in-process backend built its own profile and had **neither** of these. If you add a
 `--co` to one backend, add it to `build_creation_options` instead — the parity test captures the real

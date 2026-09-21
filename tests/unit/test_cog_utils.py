@@ -1125,3 +1125,88 @@ class TestGdalBackendOverviewCount:
         cmd = self._cmd(overview_count=7)
         assert 'OVERVIEW_COUNT=7' in cmd
         assert cmd[cmd.index('OVERVIEW_COUNT=7') - 1] == '-co'
+
+
+# --------------------------------------------------------------------------- #
+# INTERLEAVE=BAND for >3-band outputs                                          #
+# --------------------------------------------------------------------------- #
+
+class TestBandInterleaveForMultibandCogs:
+    """An 8-band COG written PIXEL-interleaved makes a render-time bidx [5,3,2]
+    read decode all 8 bands: 4.19 MB per 512 px uint16 block instead of
+    1.57 MB, 2.7x on every tile. BAND interleave stores each band's blocks
+    separately. Rasters of <=3 bands keep the PIXEL default -- an RGB read
+    wants all of them together."""
+
+    @pytest.mark.parametrize('count,expect', [(1, None), (3, None), (4, 'BAND'), (8, 'BAND'), (None, None)])
+    def test_creation_option_follows_band_count(self, count, expect):
+        from shared_utils.cog_utils import build_creation_options
+        assert build_creation_options('ZSTD', 9, band_count=count).get('INTERLEAVE') == expect
+
+    def test_in_process_profile_drops_the_conflicting_lowercase_key(self):
+        """rio-cogeo's base profile carries `interleave: pixel`; GDAL creation
+        options are case-insensitive, so both keys present = two values."""
+        from shared_utils.cog_utils import _build_cog_translate_profile
+        p8 = _build_cog_translate_profile('ZSTD', 9, band_count=8)
+        assert p8['INTERLEAVE'] == 'BAND' and 'interleave' not in p8
+        p3 = _build_cog_translate_profile('ZSTD', 9, band_count=3)
+        assert 'INTERLEAVE' not in p3 and p3.get('interleave') == 'pixel'
+
+    @pytest.mark.parametrize('compression', ['ZSTD', 'DEFLATE', 'LZW'])
+    def test_backend_parity_holds_for_8_band(self, compression):
+        from shared_utils.cog_utils import build_creation_options, _build_cog_translate_profile
+        opts = build_creation_options(compression, 9, band_count=8)
+        profile = _build_cog_translate_profile(compression, 9, band_count=8)
+        missing = {k: v for k, v in opts.items() if profile.get(k) != v}
+        assert not missing, f"in-process profile dropped {missing}"
+
+    def test_subprocess_backend_passes_band_interleave_for_8_band(self, tmp_path, monkeypatch):
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "ms8.tif", 600, 600, count=8, dtype='uint16', fill=1200)
+        cog_utils.convert_to_cog(src, str(tmp_path / "ms8_cog.tif"), nodata=0, dst_crs=None, quiet=True)
+        cos = {captured['cmd'][i + 1] for i, t in enumerate(captured['cmd']) if t == '--co'}
+        assert 'INTERLEAVE=BAND' in cos
+
+    def test_subprocess_backend_leaves_rgb_on_pixel(self, tmp_path, monkeypatch):
+        from shared_utils import cog_utils
+        captured = _capture_rio_cogeo_argv(monkeypatch)
+        src = _write_sized(tmp_path / "rgb.tif", 600, 600, count=3)
+        cog_utils.convert_to_cog(src, str(tmp_path / "rgb_cog.tif"), dst_crs=None, quiet=True)
+        cos = {captured['cmd'][i + 1] for i, t in enumerate(captured['cmd']) if t == '--co'}
+        assert not any(c.startswith('INTERLEAVE=') for c in cos)
+
+    def test_produced_8_band_cog_is_band_interleaved_and_lossless(self, tmp_path):
+        """End to end on the metadata= path (what the hub uses): the file on
+        disk is BAND-interleaved, still a valid COG, and every band reads back
+        byte-identical to the source."""
+        import rasterio
+        from rasterio.enums import Interleaving
+        from rio_cogeo.cogeo import cog_validate
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write_sized(tmp_path / "ms8.tif", 600, 600, count=8, dtype='uint16', fill=1200)
+        with rasterio.open(src, 'r+') as s:               # give bands distinct content
+            for b in range(1, 9):
+                s.write(np.full((600, 600), 100 * b, dtype='uint16'), b)
+        out = convert_to_cog(src, str(tmp_path / "ms8_cog.tif"), nodata=0, dst_crs=None, quiet=True,
+                             metadata={'ACTIVATION_EVENT': '202606_Earthquake_Venezuela', 'SOURCE': 'test'})
+        with rasterio.open(out) as cog, rasterio.open(src) as ref:
+            assert cog.interleaving is Interleaving.band
+            assert cog.count == 8
+            for b in (2, 3, 5, 7):
+                assert np.array_equal(cog.read(b), ref.read(b)), f"band {b} changed"
+        assert cog_validate(out)[0]
+
+
+class TestGdalBackendBandInterleave:
+    def _cmd(self, **kw):
+        from shared_utils.gdal_cog_processor import build_gdal_translate_command
+        return build_gdal_translate_command('in.tif', 'out.tif', None, 'ZSTD', 9, 512, **kw)
+
+    def test_8_band_gets_band_interleave(self):
+        cmd = self._cmd(band_count=8)
+        assert 'INTERLEAVE=BAND' in cmd and cmd[cmd.index('INTERLEAVE=BAND') - 1] == '-co'
+
+    @pytest.mark.parametrize('count', [None, 1, 3])
+    def test_3_or_fewer_bands_left_on_driver_default(self, count):
+        assert not any(t.startswith('INTERLEAVE=') for t in self._cmd(band_count=count))

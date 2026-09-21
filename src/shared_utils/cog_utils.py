@@ -322,6 +322,7 @@ def build_creation_options(
     compression: str,
     compression_level: int,
     raw_size_gb: Optional[float] = None,
+    band_count: Optional[int] = None,
 ) -> dict:
     """
     Single source of truth for the GDAL creation options used by BOTH
@@ -367,6 +368,17 @@ def build_creation_options(
         The failure mode this pre-empts is ``TIFFAppendToStrip: Maximum TIFF
         file size exceeded`` -- typically hours into a large mosaic. Same
         threshold as ``compression.py`` / ``profiles.py``.
+
+    ``band_count`` > 3 -> ``INTERLEAVE=BAND``
+        A raster with more than three bands is, by definition, rendered as a
+        band SUBSET -- titiler reads e.g. bidx 5,3,2 out of 8. With the GTiff
+        default ``PIXEL`` interleave every block stores all bands together, so
+        a 3-of-8 read still fetches and decodes all 8 (4.19 MB per 512 px
+        block of uint16 instead of 1.57 MB: 2.7x, on every tile at every
+        zoom). ``BAND`` interleave stores each band's blocks separately and the
+        read touches only the bands asked for. Verified: valid COG, identical
+        size, byte-identical pixels. Rasters of 3 bands or fewer are left on
+        the default -- an RGB read wants all of them together.
     """
     bigtiff = (
         'YES' if raw_size_gb is not None and raw_size_gb > BIGTIFF_FORCE_GB
@@ -376,6 +388,8 @@ def build_creation_options(
         'NUM_THREADS': 'ALL_CPUS',
         'BIGTIFF': bigtiff,
     }
+    if band_count is not None and band_count > 3:
+        opts['INTERLEAVE'] = 'BAND'
     if compression.upper() == 'DEFLATE':
         opts['PREDICTOR'] = 2
         opts['ZLEVEL'] = compression_level
@@ -391,6 +405,7 @@ def _build_cog_translate_profile(
     compression: str,
     compression_level: int,
     raw_size_gb: Optional[float] = None,
+    band_count: Optional[int] = None,
 ) -> dict:
     """
     Build a rio_cogeo profile dict that matches what the subprocess
@@ -405,7 +420,13 @@ def _build_cog_translate_profile(
     from rio_cogeo.profiles import cog_profiles
 
     profile = dict(cog_profiles.get(compression.lower()))
-    profile.update(build_creation_options(compression, compression_level, raw_size_gb))
+    opts = build_creation_options(compression, compression_level, raw_size_gb, band_count)
+    if 'INTERLEAVE' in opts:
+        # rio-cogeo's base profile carries a lowercase `interleave: pixel`.
+        # GDAL creation options are case-insensitive, so leaving both keys in
+        # would hand the driver two conflicting values. Ours wins.
+        profile.pop('interleave', None)
+    profile.update(opts)
     return profile
 
 
@@ -969,6 +990,7 @@ def convert_to_cog(
     # dataset occupies (see build_creation_options).
     with rasterio.open(input_for_cog) as cog_src:
         out_w, out_h = cog_src.width, cog_src.height
+        out_count = cog_src.count
         raw_size_gb = (
             out_w * out_h * cog_src.count
             * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
@@ -978,7 +1000,8 @@ def convert_to_cog(
         print(
             f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
             f"{overview_count} overview levels, "
-            f"BIGTIFF={build_creation_options(compression, compression_level, raw_size_gb)['BIGTIFF']}"
+            f"BIGTIFF={build_creation_options(compression, compression_level, raw_size_gb, out_count)['BIGTIFF']}, "
+            f"INTERLEAVE={'BAND' if out_count > 3 else 'PIXEL'}"
         )
 
     # Step 2: Build rio cogeo create command (using warped file if reprojected)
@@ -998,7 +1021,7 @@ def convert_to_cog(
     # Creation options come from the ONE builder both branches share, so the
     # subprocess path and the in-process cog_translate path cannot diverge
     # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
-    for key, value in build_creation_options(compression, compression_level, raw_size_gb).items():
+    for key, value in build_creation_options(compression, compression_level, raw_size_gb, out_count).items():
         cmd.extend(['--co', f'{key}={value}'])
 
     # Execute COG creation.
@@ -1037,7 +1060,7 @@ def convert_to_cog(
             if not quiet:
                 print(f"  Embedded tags: {sorted(full_metadata.keys())}")
 
-            profile = _build_cog_translate_profile(compression, compression_level, raw_size_gb)
+            profile = _build_cog_translate_profile(compression, compression_level, raw_size_gb, out_count)
             cog_translate(
                 input_for_cog,
                 temp_output,

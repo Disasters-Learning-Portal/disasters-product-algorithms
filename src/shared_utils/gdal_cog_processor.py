@@ -95,6 +95,7 @@ def create_cog_gdal(
     compress: str = 'ZSTD',
     compress_level: int = 22,
     blocksize: int = 512,
+    overview_levels: Optional[int] = None,
     reproject_to_4326: bool = True,
     target_crs: Optional[str] = None,
     verbose: bool = True
@@ -110,6 +111,12 @@ def create_cog_gdal(
         compress: Compression type (ZSTD, LZW, DEFLATE, etc.)
         compress_level: Compression level (1-22 for ZSTD)
         blocksize: Tile block size
+        overview_levels: Number of overview levels. None (default) omits
+            OVERVIEW_COUNT so GDAL's COG driver derives it from the raster --
+            halving until the coarsest overview fits one BLOCKSIZE on the
+            longer side, which is the correct rule. Previously a hardcoded 5,
+            and this backend silently ignored the value convert_to_cog was
+            handed.
         reproject_to_4326: Whether to reproject to EPSG:4326 (ignored if target_crs is set)
         target_crs: Target CRS string (e.g. 'EPSG:4326'). None = keep original CRS.
             Overrides reproject_to_4326 when set.
@@ -156,7 +163,8 @@ def create_cog_gdal(
                 input_path, output_path, nodata,
                 compress, compress_level, blocksize,
                 resampling, overview_resampling,
-                env, verbose, target_crs=effective_crs
+                env, verbose, target_crs=effective_crs,
+                overview_levels=overview_levels,
             )
 
         # Direct COG creation without reprojection
@@ -165,7 +173,8 @@ def create_cog_gdal(
         cmd = build_gdal_translate_command(
             input_path, output_path, nodata,
             compress, compress_level, blocksize,
-            overview_resampling=overview_resampling
+            overview_resampling=overview_resampling,
+            overview_count=overview_levels
         )
 
         if verbose:
@@ -208,7 +217,8 @@ def create_cog_with_reprojection(
     overview_resampling: str,
     env: Dict[str, str],
     verbose: bool,
-    target_crs: str = 'EPSG:4326'
+    target_crs: str = 'EPSG:4326',
+    overview_levels: Optional[int] = None
 ) -> bool:
     """
     Create COG with reprojection using two-stage process.
@@ -298,7 +308,8 @@ def create_cog_with_reprojection(
         cog_cmd = build_gdal_translate_command(
             temp_file, output_path, nodata,
             compress, compress_level, blocksize,
-            overview_resampling=overview_resampling
+            overview_resampling=overview_resampling,
+            overview_count=overview_levels
         )
 
         result = subprocess.run(
@@ -335,11 +346,17 @@ def build_gdal_translate_command(
     compress: str,
     compress_level: int,
     blocksize: int,
-    overview_resampling: str = 'average'
+    overview_resampling: str = 'average',
+    overview_count: Optional[int] = None
 ) -> List[str]:
     """
     Build gdal_translate command with optimal COG parameters.
     Uses appropriate overview resampling based on data type.
+
+    ``overview_count=None`` deliberately omits ``OVERVIEW_COUNT`` so the COG
+    driver computes it from the raster size (coarsest overview <= BLOCKSIZE on
+    the longer side). A fixed count under-builds large mosaics: at 5 levels a
+    139,850 px raster's coarsest overview is still 4,370 px wide.
     """
     cmd = [
         'gdal_translate',
@@ -349,8 +366,9 @@ def build_gdal_translate_command(
         '-co', 'BIGTIFF=IF_SAFER',
         '-co', f'BLOCKSIZE={blocksize}',
         '-co', f'OVERVIEW_RESAMPLING={overview_resampling}',  # Use appropriate method
-        '-co', 'OVERVIEW_COUNT=5'
     ]
+    if overview_count is not None:
+        cmd.extend(['-co', f'OVERVIEW_COUNT={int(overview_count)}'])
 
     # Add compression-specific options
     # Note: COG driver doesn't support ZSTD_LEVEL, it's only for GTiff driver

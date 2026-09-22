@@ -247,6 +247,7 @@ class TestDataKindDetection:
         ("distalert_veganommax_crop.tif", "continuous"),
         ("distalert_status_palette_crop.tif", "categorical"),
         ("hydrosar_watermask_int8_crop.tif", "categorical"),
+        ("dswx_chngmap_float32_classcodes_crop.tif", "categorical"),
         ("gaia_atlanta_sample.tif", "continuous"),
         ("umbra_guam_sar_db_crop.tif", "continuous"),
         ("iceye_guam_sar_db_crop.tif", "continuous"),
@@ -285,6 +286,39 @@ class TestDataKindDetection:
             assert src.dtypes[0] == "int8"
         assert get_resampling_for_dtype("int8")[1] == "average"   # the old answer
         assert determine_resampling_method(int8_mask)[1] == "mode"  # the new one
+
+    def test_float32_can_be_categorical_on_the_real_product_crop(self):
+        """(a), on the GENUINE product rather than a re-coded Int8 raster.
+
+        Cropped from `OPERA_DSWx-S1_BWTR_ChngMap_date1_2024-10-03_to_2024-10-11_day.tif`
+        (16384x33792, Float32), whose exact whole-raster histogram is
+        `-1: 1,175,607 / 0: 89,981,533 / +1: 991,124`, 461,499,864 nodata.
+
+        This is the end-to-end test of the float branch: float dtype, three
+        distinct values, all integral -> categorical. A "float means
+        continuous" shortcut fails right here.
+        """
+        path = os.path.join(FIXTURE_DIR, "dswx_chngmap_float32_classcodes_crop.tif")
+        with rasterio.open(path) as src:
+            assert src.dtypes[0] == "float32"
+            band = src.read(1)
+            valid = band[band != src.nodata]
+        assert sorted(set(np.unique(valid).tolist())) == [-1.0, 0.0, 1.0]
+
+        assert detect_data_kind(path) == "categorical"
+        assert determine_resampling_method(path) == ("nearest", "mode")
+
+    def test_change_map_filename_and_pixels_agree_without_an_alarm(self, capsys):
+        """Both halves of the design on ONE real file, which until now had only
+        ever been exercised separately: the `ChngMap` token says categorical,
+        the Float32 `{-1,0,+1}` pixels say categorical, and no disagreement
+        alarm fires."""
+        path = os.path.join(FIXTURE_DIR, "dswx_chngmap_float32_classcodes_crop.tif")
+        assert filename_data_kind(path) == "categorical"
+        assert detect_data_kind(path) == "categorical"
+        assert resolve_data_kind(path) == "categorical"
+        out = capsys.readouterr().out
+        assert "WARNING" not in out, out
 
     def test_float32_can_be_categorical(self, tmp_path):
         """(a) OPERA DSWx change maps are Float32 holding exactly {-1, 0, +1}.
@@ -358,6 +392,61 @@ class TestDataKindDetection:
             if kind == "unknown":
                 undecided.append(os.path.basename(path))
         assert not undecided, f"no verdict for: {undecided}"
+
+
+REAL_CHANGE_MAP = os.path.expanduser(
+    "~/Downloads/OPERA_DSWx-S1_BWTR_ChngMap_date1_2024-10-03_to_2024-10-11_day.tif"
+)
+
+
+class TestRealFloat32ChangeMap:
+    """The full-size genuine product, when it is on the machine.
+
+    16384x33792 Float32, nodata -9999, exact whole-raster histogram
+    `-1: 1,175,607 / 0: 89,981,533 / +1: 991,124` over 461,499,864 nodata
+    pixels. The committed crop covers this in CI; these assertions are the
+    ones that can only be made against the real thing.
+
+    This local copy is the PRE-REPAIR original -- it still carries 4 AVERAGE
+    overviews where the rule calls for 7 -- so it doubles as the audit's
+    real-world positive case. It is the user's file and is only ever read.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_real_product(self):
+        if not os.path.exists(REAL_CHANGE_MAP):
+            pytest.skip(f"real product not present: {REAL_CHANGE_MAP}")
+
+    def test_detects_categorical_on_the_full_size_product(self):
+        with rasterio.open(REAL_CHANGE_MAP) as src:
+            assert src.dtypes[0] == "float32"
+            assert (src.width, src.height) == (16384, 33792)
+        assert detect_data_kind(REAL_CHANGE_MAP) == "categorical"
+        assert determine_resampling_method(REAL_CHANGE_MAP) == ("nearest", "mode")
+
+    def test_filename_and_pixels_agree_with_no_alarm(self, capsys):
+        assert filename_data_kind(REAL_CHANGE_MAP) == "categorical"
+        assert resolve_data_kind(REAL_CHANGE_MAP) == "categorical"
+        assert "WARNING" not in capsys.readouterr().out
+
+    def test_detection_is_cheap_on_553_megapixels(self):
+        """553.6 Mpx; measured at ~88 ms because the block sample is bounded
+        and the raster is 83% nodata. Generous ceiling so this pins the
+        bounded-sampling property, not the machine."""
+        import time
+
+        started = time.time()
+        detect_data_kind(REAL_CHANGE_MAP)
+        assert time.time() - started < 10.0
+
+    def test_audit_catches_the_pre_repair_defects(self):
+        """Averaging a 3-value float class map is spectacularly wrong: the
+        coarsest AVERAGE overview holds hundreds of fractional codes
+        (-0.9375, -0.87109375, ...) that cannot exist in a band whose only
+        values are -1, 0 and +1."""
+        problems = audit_cog_output(REAL_CHANGE_MAP)
+        assert any("AVERAGED" in p for p in problems), problems
+        assert any("overview count" in p for p in problems), problems
 
 
 # ---------------------------------------------------------------------------

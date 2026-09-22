@@ -50,6 +50,7 @@ EXPECTED = {
     "distalert_veganommax_crop.tif": (512, 512, 1, "uint8", 3857, 0.0, False, True),
     "distalert_status_palette_crop.tif": (256, 256, 1, "uint8", 3857, 255.0, False, True),
     "hydrosar_watermask_int8_crop.tif": (256, 256, 1, "int8", 32617, None, False, True),
+    "dswx_chngmap_float32_classcodes_crop.tif": (256, 256, 1, "float32", 3857, -9999.0, False, True),
 }
 
 # The crops whose whole point is which resampling they must get. Asserted as a
@@ -61,6 +62,7 @@ RESAMPLING_KIND = {
     "distalert_veganommax_crop.tif": "continuous",
     "distalert_status_palette_crop.tif": "categorical",
     "hydrosar_watermask_int8_crop.tif": "categorical",
+    "dswx_chngmap_float32_classcodes_crop.tif": "categorical",
 }
 
 # Fixtures that already carry a baked activation event -- the idempotent-skip inputs.
@@ -214,3 +216,38 @@ def test_the_distalert_pair_disagrees():
     anomaly = determine_resampling_method(_path("distalert_veganommax_crop.tif"))
     assert status[1] == "mode"
     assert anomaly[1] == "average"
+
+
+def test_float32_change_map_still_holds_exactly_three_integral_codes():
+    """The FLOAT-CATEGORICAL fixture, and the only one that can prove rule 4.
+
+    Cropped from the genuine OPERA product
+    `OPERA_DSWx-S1_BWTR_ChngMap_date1_2024-10-03_to_2024-10-11_day.tif`
+    (16384x33792), whose exact whole-raster histogram is
+    `-1: 1,175,607 / 0: 89,981,533 / +1: 991,124` with 461,499,864 nodata.
+
+    Three properties have to survive any re-crop or this fixture stops testing
+    anything:
+
+      * dtype stays **float32** -- on an integer dtype the detector takes a
+        different branch entirely and the "float means continuous" shortcut is
+        no longer what is being disproved;
+      * the valid values stay exactly `{-1, 0, +1}` and every one is INTEGRAL,
+        which is the condition rule 4 turns on;
+      * nodata pixels are still present, so the crop also exercises the
+        nodata exclusion that the audit's invented-code check depends on.
+    """
+    import numpy as np
+
+    path = _path("dswx_chngmap_float32_classcodes_crop.tif")
+    with rasterio.open(path) as src:
+        assert src.dtypes[0] == "float32"
+        band = src.read(1)
+        assert src.nodata == -9999.0
+        nodata_px = int((band == src.nodata).sum())
+        valid = band[band != src.nodata]
+
+    assert sorted(set(np.unique(valid).tolist())) == [-1.0, 0.0, 1.0]
+    assert all(float(v).is_integer() for v in np.unique(valid))
+    assert nodata_px > 0, "crop lost its nodata pixels"
+    assert valid.size > 0

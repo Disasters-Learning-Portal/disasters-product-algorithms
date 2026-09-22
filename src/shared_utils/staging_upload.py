@@ -14,10 +14,25 @@ maap-py is a DPS-ONLY dependency (pinned in ``dps/environment.yml``; absent from
 ``_workspace_s3_client`` -- importing this module never requires maap-py; only calling
 ``upload_dir_to_staging`` (i.e. inside a live DPS job) does. Same lazy pattern as
 ``dps/_get_secret.py``. Auth is ambient in a DPS job (the wrapper injects ``MAAP_PGT``).
+
+TWO ENTRY POINTS, ONE KEYING. Both consume ``iter_upload_keys``, so they produce
+identical keys; they differ only in whose credentials do the PutObject:
+
+* ``upload_dir_to_staging`` -- MAAP workspace credentials. The DPS path, and the only
+  one that works there: ``dps-verdi-role`` cannot write ``nasa-disasters-staging``.
+* ``upload_dir_ambient`` -- the default boto3 credential chain, plus a per-prefix write
+  preflight. The NOTEBOOK/hub path. maap-py needs ``MAAP_PGT``, which the DPS wrapper
+  injects and the hub never does, so the MAAP call 401s for every hub operator.
+
+The choice is an explicit function name rather than a flag on purpose: a notebook reader
+can see which identity is about to write. Implicit credential fallback is what made
+``s3_operations.initialize_s3_client`` unusable (it silently used ambient credentials
+while reporting success), and this module should not reintroduce it.
 """
 
 import glob
 import os
+import posixpath
 
 import boto3
 
@@ -168,12 +183,72 @@ def upload_dir_to_staging(out_home, target_bucket, dest_prefix, include=None, se
     entry_prefix = resolve_authorized_path(resp, target_bucket)
     base_prefix = _join_prefix(entry_prefix, dest_prefix)
 
+    pairs = iter_upload_keys(out_home, base_prefix, include=include, sensor=sensor)
+    return _upload_pairs(s3, target_bucket, pairs, base_prefix)
+
+
+def _upload_pairs(s3, target_bucket, pairs, base_prefix):
+    """Upload ``(local_path, key)`` pairs with a caller-supplied client. Returns the count."""
     n = 0
-    for local_path, key in iter_upload_keys(
-        out_home, base_prefix, include=include, sensor=sensor
-    ):
+    for local_path, key in pairs:
         s3.upload_file(local_path, target_bucket, key)
         print(f"Uploaded: s3://{target_bucket}/{key}")
         n += 1
-    print(f"Uploaded {n} file(s) to s3://{target_bucket}/{base_prefix}/")
+    # base_prefix is "" whenever sensor= keyed the files by their canonical
+    # ProgramData destination, which is the notebook case -- don't print "bucket//".
+    dest = f"s3://{target_bucket}/{base_prefix}/" if base_prefix else f"s3://{target_bucket}/"
+    print(f"Uploaded {n} file(s) to {dest}")
     return n
+
+
+def upload_dir_ambient(out_home, target_bucket, dest_prefix="", include=None,
+                       sensor=None, preflight=True):
+    """Upload every product under ``out_home`` using AMBIENT AWS credentials.
+
+    Identical keying to :func:`upload_dir_to_staging` -- both consume
+    :func:`iter_upload_keys`, so a notebook run and a DPS run land on the same keys --
+    but with a plain ``boto3.client('s3')`` (the default credential chain) instead of
+    MAAP workspace credentials.
+
+    **This is the notebook / hub path.** maap-py authenticates from the ``MAAP_PGT``
+    environment variable, which the DPS wrapper injects and the Disasters hub never
+    does (it is per-user and secret, so it cannot be baked into the image, and the
+    ``maapToken`` in MAAP Settings lives in the JupyterLab frontend SettingRegistry --
+    a notebook kernel never sees it). ``upload_dir_to_staging`` therefore raises
+    ``HTTPError: 401`` for every hub operator. On the hub the pod already assumes
+    ``disasters-prod``, so ambient credentials are both the working path and the one
+    any hub user gets -- the same choice ``notebooks/tools/simple_disaster_staging.ipynb``
+    and the two ``*_transfer`` notebooks make against this bucket.
+
+    DPS keeps :func:`upload_dir_to_staging`, where ``dps-verdi-role`` genuinely cannot
+    write ``nasa-disasters-staging`` and ``MAAP_PGT`` genuinely is present.
+
+    With ``preflight`` (the default) a real zero-byte ``PutObject`` is attempted under
+    every distinct destination prefix before anything is uploaded, and a failure raises.
+    Grants on this bucket are **per prefix**, and ``head_bucket`` succeeds for a
+    read-only identity -- so a cheap probe is the only thing that actually proves the
+    write, and failing up front beats dying part-way through the loop.
+    """
+    # Imported here, not at module scope, to keep this module's import graph flat --
+    # s3_operations pulls in fsspec, which nothing else in staging_upload needs.
+    from shared_utils.s3_operations import can_write_to_bucket
+
+    s3 = boto3.client("s3")
+    base_prefix = _join_prefix(dest_prefix)
+
+    # Materialized once: the preflight needs every destination prefix up front, and
+    # re-running iter_upload_keys would glob the tree a second time.
+    pairs = list(iter_upload_keys(out_home, base_prefix, include=include, sensor=sensor))
+
+    if preflight and pairs:
+        for prefix in sorted({posixpath.dirname(key) for _, key in pairs}):
+            ok, detail = can_write_to_bucket(s3, target_bucket, prefix, verbose=False)
+            if not ok:
+                raise RuntimeError(
+                    f"cannot write to s3://{target_bucket}/{prefix}/ with the current "
+                    f"(ambient) AWS credentials: {detail}. Nothing was uploaded. On the "
+                    f"Disasters hub, check the pod's identity with "
+                    f"boto3.client('sts').get_caller_identity() -- it should be disasters-prod."
+                )
+
+    return _upload_pairs(s3, target_bucket, pairs, base_prefix)

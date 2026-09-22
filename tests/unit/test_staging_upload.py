@@ -171,3 +171,141 @@ def test_iter_upload_keys_include_merge_only(tmp_path):
 
     keys = {k for _, k in iter_upload_keys(str(out_home), "p", include=merged_products)}
     assert keys == {"p/20260117/trueColor/S2B_MSIL2A_trueColor_T17RLN_merged_x.tif"}
+
+
+class TestAmbientUpload:
+    """``upload_dir_ambient`` -- the notebook/hub path.
+
+    Same keying as ``upload_dir_to_staging`` (both consume ``iter_upload_keys``),
+    different credentials: the default boto3 chain instead of maap-py. The MAAP
+    path needs ``MAAP_PGT`` in the environment, which the DPS wrapper injects and
+    the Disasters hub never does, so a notebook calling it got HTTP 401 every
+    time. These pin the split so it cannot quietly collapse back.
+    """
+
+    @staticmethod
+    def _bucket(name="nasa-disasters-staging"):
+        boto3 = pytest.importorskip("boto3")
+        moto = pytest.importorskip("moto")
+        mock = moto.mock_aws()
+        mock.start()
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=name)
+        return mock, name
+
+    def test_keys_match_the_maap_path_exactly(self, tmp_path, monkeypatch):
+        """The two entry points differ in credentials only -- never in destination."""
+        out_home = _s2_tree(tmp_path)
+        mock, bucket = self._bucket()
+        try:
+            n = staging_upload.upload_dir_ambient(
+                str(out_home), bucket, "dps_output/202601_Flood_TX", preflight=False
+            )
+            import boto3
+            listed = {
+                o["Key"] for o in boto3.client("s3", region_name="us-east-1")
+                .list_objects_v2(Bucket=bucket)["Contents"]
+            }
+        finally:
+            mock.stop()
+
+        expected = {
+            k for _, k in iter_upload_keys(str(out_home), "dps_output/202601_Flood_TX")
+        }
+        assert listed == expected
+        assert n == len(expected) == 5
+
+    @staticmethod
+    def _published_tree(tmp_path):
+        """A tree whose product directories are named as product_paths spells them.
+
+        Processors write into a directory named EXACTLY as the published
+        <Product> segment -- that is the mechanism program_data_key() uses to
+        derive the key by walking up the local path. Derive the names from the
+        table rather than hardcoding them, so a rename cannot leave this stale.
+        """
+        from shared_utils import product_paths as pp
+
+        out_home = tmp_path / "published"
+        for key in ("trueColor", "waterExtent"):
+            d = out_home / "20260117" / pp.product_dir("sentinel2", key)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"S2B_MSIL2A_{key}_T17RLN_x.tif").write_text("t")
+        return out_home
+
+    def test_sensor_keying_produces_the_canonical_program_data_destination(self, tmp_path):
+        out_home = self._published_tree(tmp_path)
+        mock, bucket = self._bucket()
+        try:
+            staging_upload.upload_dir_ambient(
+                str(out_home), bucket, "", sensor="sentinel2", preflight=False
+            )
+            import boto3
+            listed = {
+                o["Key"] for o in boto3.client("s3", region_name="us-east-1")
+                .list_objects_v2(Bucket=bucket)["Contents"]
+            }
+        finally:
+            mock.stop()
+
+        assert any(k.startswith("ProgramData/Sentinel-2/TrueColor/") for k in listed)
+        # No event and no date level: the activation lives in the GeoTIFF tags.
+        assert not any("202601" in k or "20260117" in k for k in listed)
+
+    def test_never_touches_maap(self, tmp_path, monkeypatch):
+        """A stray maap import would reintroduce the 401 on the hub."""
+        out_home = _s2_tree(tmp_path)
+        monkeypatch.setattr(
+            staging_upload, "_workspace_s3_client",
+            lambda: pytest.fail("upload_dir_ambient must not request MAAP credentials"),
+        )
+        mock, bucket = self._bucket()
+        try:
+            staging_upload.upload_dir_ambient(str(out_home), bucket, "p", preflight=False)
+        finally:
+            mock.stop()
+
+    def test_failed_preflight_raises_before_uploading_anything(self, tmp_path):
+        """A per-prefix grant is the thing that actually fails, so probe first.
+
+        head_bucket succeeds for a read-only identity, so only a real PutObject
+        is evidence. Failing up front beats dying part-way through the loop with
+        some products published and some not.
+        """
+        out_home = _s2_tree(tmp_path)
+        mock, bucket = self._bucket()
+        try:
+            import boto3
+            from shared_utils import s3_operations
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(s3_operations, "can_write_to_bucket",
+                           lambda *a, **k: (False, "AccessDenied: no grant here"))
+                with pytest.raises(RuntimeError, match="AccessDenied"):
+                    staging_upload.upload_dir_ambient(
+                        str(out_home), bucket, "p", preflight=True
+                    )
+
+            resp = boto3.client("s3", region_name="us-east-1").list_objects_v2(Bucket=bucket)
+            assert resp.get("KeyCount", 0) == 0, "nothing may be uploaded after a failed probe"
+        finally:
+            mock.stop()
+
+    def test_preflight_probes_every_distinct_prefix(self, tmp_path):
+        """Grants are per-prefix, so one probe on one prefix proves nothing."""
+        out_home = self._published_tree(tmp_path)
+        mock, bucket = self._bucket()
+        seen = []
+        try:
+            from shared_utils import s3_operations
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(s3_operations, "can_write_to_bucket",
+                           lambda s3, b, prefix, **k: (seen.append(prefix), (True, None))[1])
+                staging_upload.upload_dir_ambient(
+                    str(out_home), bucket, "", sensor="sentinel2", preflight=True
+                )
+        finally:
+            mock.stop()
+
+        assert len(seen) == len(set(seen)) >= 2, f"expected one probe per prefix, got {seen}"
+        assert all(p.startswith("ProgramData/Sentinel-2/") for p in seen), seen

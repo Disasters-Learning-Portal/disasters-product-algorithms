@@ -40,11 +40,14 @@ from rasterio.enums import ColorInterp
 from rasterio.transform import from_origin
 
 from shared_utils.cog_utils import (
+    audit_cog_output,
     build_creation_options,
     carries_alpha_band,
     convert_to_cog,
     detect_data_kind,
     determine_resampling_method,
+    filename_data_kind,
+    resolve_data_kind,
     resolve_overview_count,
 )
 
@@ -871,3 +874,273 @@ class TestConcurrentConversionsAreIsolated:
 
         leaked = sorted({m for p in patterns for m in glob.glob(p)})
         assert not leaked, f"temp files leaked: {leaked}"
+
+
+# ---------------------------------------------------------------------------
+# 12. The filename CROSS-CHECK layer
+# ---------------------------------------------------------------------------
+
+class TestFilenameCrossCheck:
+    """The filename is a cross-check on the pixels, never the primary signal.
+
+    Four measured counter-examples make that non-negotiable; each has a test
+    below. The tables live in cog_utils with the counter-examples written next
+    to them precisely so nobody "simplifies" this into filename-only matching.
+    """
+
+    def test_grayscale_name_gets_no_opinion(self):
+        """COUNTER-EXAMPLE 1. `UAVSAR_Grayscale_...` reads as continuous
+        imagery but holds five class codes {0,29,76,150,173}. There is
+        deliberately no `gray` token, so the filename abstains and the pixels
+        decide. A `gray` token would get this exactly backwards."""
+        assert filename_data_kind(
+            "UAVSAR_Grayscale_flight25023_mosaic_2025-07-09_day.tif"
+        ) is None
+
+    def test_classified_name_is_categorical(self):
+        """COUNTER-EXAMPLE 2, name half: the name is right here."""
+        assert filename_data_kind(
+            "ClassifiedUAVSARI_CopyRas_2025-07_monthly.tif"
+        ) == "categorical"
+
+    def test_flattened_classification_is_called_out(self, tmp_path, capsys):
+        """COUNTER-EXAMPLE 2, data half. Name and pixels AGREE on categorical,
+        so the disagreement alarm cannot see this one -- the classes were
+        flattened to a single code, most likely by an ArcGIS Copy Raster
+        export that dropped the color table."""
+        arr = np.zeros((512, 512), dtype="uint8")
+        arr[:6, :] = 255                       # 1.1%-ish, one class, rest nodata
+        path = _write(tmp_path / "ClassifiedThing_CopyRas.tif", arr, nodata=0)
+
+        assert resolve_data_kind(path) == "categorical"
+        out = capsys.readouterr().out
+        assert "FLATTENED" in out, out
+
+    def test_flatten_notice_does_not_fire_on_sparse_non_class_products(self, tmp_path, capsys):
+        """The gate is the `class` family, not every categorical token.
+        `FloodMap` and `damage` layers are LEGITIMATELY single-code and sparse
+        -- gating on the whole table gave three false positives out of four
+        hits on the real samples, and an alarm that is wrong three times in
+        four is one nobody reads."""
+        arr = np.zeros((512, 512), dtype="uint8")
+        arr[:6, :] = 1
+        path = _write(tmp_path / "OPERA_DSWx_HLS_FloodMap_2024-04-21_day.tif",
+                      arr, nodata=0)
+        resolve_data_kind(path)
+        assert "FLATTENED" not in capsys.readouterr().out
+
+    def test_change_map_token_is_categorical(self):
+        """COUNTER-EXAMPLE 3. Float32 {-1,0,+1}; the dtype says nothing."""
+        assert filename_data_kind(
+            "OPERA_DSWx-S1_BWTR_ChngMap_date1_2024-10-03_to_2024-10-11_day.tif"
+        ) == "categorical"
+
+    def test_distalert_siblings_get_opposite_opinions(self):
+        """COUNTER-EXAMPLE 4. One directory, two products, opposite kinds.
+        The names differ only in the middle, which is why these are substring
+        tokens and not a per-directory lookup."""
+        assert filename_data_kind(
+            "OPERA-DIST-ALERT-HLS-VEG-DIST-STATUS_2025-06-26_day.tif"
+        ) == "categorical"
+        assert filename_data_kind(
+            "OPERA-DIST-ALERT-HLS-VEG-ANOM-MAX_2025-06-26_day.tif"
+        ) == "continuous"
+
+    def test_unet_alone_is_not_a_categorical_signal(self):
+        """`predicted_score` comes out of a U-Net and is Float32 continuous,
+        so only `unet_class` is a token, never bare `unet`."""
+        assert filename_data_kind(
+            "sangab_30412_L090_UNet_predicted_score_2025-07-09_day.tif"
+        ) == "continuous"
+        assert filename_data_kind(
+            "uavsar_guadal_L090_UNet_class_2025-07-09_day.tif"
+        ) == "categorical"
+
+    def test_colourised_sibling_abstains_but_colour_imagery_does_not(self):
+        """`dnbr/` is continuous float; `dnbr/dnbrColor/` is its 3-band
+        colourised sibling with 5 discrete levels per band. Whether a
+        colourised product is discrete or smooth is a PIXEL question, so the
+        filename abstains -- otherwise it raises a false alarm on every one.
+
+        But TrueColor/ColorIR are colour imagery in their own right and must
+        keep their `continuous` opinion; without the carve-out `truecolor`
+        would trip the rule against itself, since it ends in "color".
+        """
+        assert filename_data_kind(
+            "Palisades_AV3_provisional_dNBR_866nm_2198nm_color_2024-09-05_day.tif"
+        ) is None
+        assert filename_data_kind("AV3_dNBRColor_2025-01-16_day.tif") is None
+        assert filename_data_kind(
+            "Palisades_AV3_provisional_dNBR_866nm_2198nm_2024-09-05_day.tif"
+        ) == "continuous"
+        assert filename_data_kind("Satellogic_TrueColor_2025-01-16_day.tif") == "continuous"
+        assert filename_data_kind("SkySat_ColorIR_2025-01-16_day.tif") == "continuous"
+
+    def test_colour_word_is_matched_token_wise_not_as_a_suffix(self):
+        """The real name is `..._dNBR_866nm_2198nm_color_2024-09-05_..._day`,
+        so the colour word sits in the MIDDLE with dates after it. The first
+        version of this rule used str.endswith and silently did nothing."""
+        from shared_utils.cog_utils import _has_colour_word
+
+        assert _has_colour_word("x_dnbr_866nm_color_2024-09-05_day")
+        assert _has_colour_word("av3_dnbrcolor_2025-01-16_day")
+        assert not _has_colour_word("uavsar_grayscale_mosaic_2025-07-09_day")
+
+    def test_no_real_filename_matches_both_tables(self):
+        """A name hitting both tables would make the opinion arbitrary. None
+        of the 32 real samples does; this pins it for the committed crops."""
+        from shared_utils.cog_utils import (
+            CATEGORICAL_FILENAME_TOKENS, CONTINUOUS_FILENAME_TOKENS,
+        )
+
+        conflicts = []
+        for name in os.listdir(FIXTURE_DIR):
+            if not name.lower().endswith(".tif"):
+                continue
+            stem = os.path.splitext(name)[0].lower()
+            cat = [t for t in CATEGORICAL_FILENAME_TOKENS if t in stem]
+            con = [t for t in CONTINUOUS_FILENAME_TOKENS if t in stem]
+            if cat and con:
+                conflicts.append((name, cat, con))
+        assert not conflicts, f"tokens collide: {conflicts}"
+
+    @pytest.mark.parametrize("name,expected", TestDataKindDetection.REAL_FIXTURES)
+    def test_pixels_always_win_over_the_filename(self, name, expected):
+        """The whole contract in one assertion: whatever the name says, the
+        resolved kind equals the pixel verdict."""
+        path = os.path.join(FIXTURE_DIR, name)
+        assert resolve_data_kind(path) == detect_data_kind(path) == expected
+
+    def test_filename_breaks_the_tie_when_pixels_are_inconclusive(self, tmp_path):
+        """Job 1 of the layer. A float raster with two NON-integral values is
+        `unknown` to the pixel layer; a categorical name settles it."""
+        arr = np.where(
+            np.random.default_rng(11).random((512, 512)) < 0.5, 0.25, 1.75
+        ).astype("float32")
+        undecided = _write(tmp_path / "ambiguous_product.tif", arr)
+        assert detect_data_kind(undecided) == "unknown"
+        assert resolve_data_kind(undecided) == "unknown"
+
+        named = _write(tmp_path / "S1_reclassified_WM_2024-10-03.tif", arr)
+        assert detect_data_kind(named) == "unknown"
+        assert resolve_data_kind(named) == "categorical"
+
+    def test_disagreement_warns_loudly_and_keeps_the_pixel_answer(self, tmp_path, capsys):
+        """Job 2. A name saying NDVI over class-code pixels is usually a data
+        problem worth surfacing, not a detection problem to paper over."""
+        arr = np.where(
+            np.random.default_rng(12).random((512, 512)) < 0.5, 1, 3
+        ).astype("uint8")
+        path = _write(tmp_path / "SomeSensor_NDVI_2025-01-01_day.tif", arr, nodata=0)
+
+        assert filename_data_kind(path) == "continuous"
+        assert resolve_data_kind(path) == "categorical"
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "PIXELS" in out
+
+
+# ---------------------------------------------------------------------------
+# 13. Output-side guards -- refuse to write a known-wrong COG silently
+# ---------------------------------------------------------------------------
+
+class TestOutputAudit:
+    """Every defect in this session was found months later in a rendered map.
+    Each is cheap to see in the output file the moment it is written."""
+
+    def test_a_correct_cog_reports_nothing(self, categorical_source, tmp_path):
+        out = str(tmp_path / "good.tif")
+        convert_to_cog(categorical_source, out, dst_crs=None, quiet=True)
+        assert audit_cog_output(out) == []
+
+    def test_averaged_overviews_on_categorical_data_are_caught(self, categorical_source, tmp_path):
+        out = str(tmp_path / "averaged.tif")
+        convert_to_cog(categorical_source, out, dst_crs=None,
+                       resampling_method="bilinear", quiet=True)
+        problems = audit_cog_output(out)
+        assert any("AVERAGED" in p for p in problems), problems
+
+    def test_wrong_overview_count_is_caught(self, categorical_source, tmp_path):
+        out = str(tmp_path / "underbuilt.tif")
+        convert_to_cog(categorical_source, out, dst_crs=None,
+                       overview_levels=1, quiet=True)
+        problems = audit_cog_output(out)
+        assert any("overview count" in p for p in problems), problems
+
+    def test_untiled_and_uncompressed_are_caught(self, tmp_path):
+        arr = np.random.default_rng(13).integers(1, 6, (1024, 2048), dtype="uint8")
+        striped = _write(tmp_path / "striped.tif", arr, nodata=0,
+                         tiled=False, blockysize=1)
+        problems = audit_cog_output(striped)
+        assert any("NOT tiled" in p for p in problems), problems
+        assert any("UNCOMPRESSED" in p for p in problems), problems
+
+    def test_flt_max_fill_under_a_different_declared_nodata_is_caught(self, tmp_path):
+        arr = (np.random.default_rng(14).random((1024, 1024)) * 10).astype("float32")
+        arr[:256, :] = FLT_MAX
+        path = _write(tmp_path / "fltmax_raw.tif", arr, nodata=-9999.0,
+                      tiled=True, blockxsize=512, blockysize=512, compress="deflate")
+        problems = audit_cog_output(path)
+        assert any("FLT_MAX" in p for p in problems), problems
+
+    def test_a_declared_nodata_that_simply_never_occurs_is_NOT_flagged(self, tmp_path):
+        """A fully-valid scene legitimately declares a nodata it never uses.
+        Warning on those would make this whole audit noise, so the check keys
+        on fill being PRESENT, not on the declared value being absent."""
+        arr = (np.random.default_rng(15).random((1024, 1024)) * 10).astype("float32")
+        out = str(tmp_path / "fully_valid.tif")
+        convert_to_cog(_write(tmp_path / "fv.tif", arr, nodata=-9999.0),
+                       out, dst_crs=None, nodata=-9999.0, quiet=True)
+        with rasterio.open(out) as src:
+            assert not (src.read(1) == np.float32(-9999.0)).any()
+        assert audit_cog_output(out) == []
+
+    def test_nodata_is_not_mistaken_for_an_invented_class(self):
+        """Regression. The band's value set excludes nodata by construction,
+        so if the overview's set does not, every masked mosaic self-reports as
+        averaged. Caught on 11 of 12 already-correct OPERA DSWx COGs.
+
+        The committed DSWx crop is a real masked class raster (nodata 0,
+        classes {1,3,251,255})."""
+        crop = os.path.join(FIXTURE_DIR, "dswx_s1_wtr_classcodes_crop.tif")
+        with rasterio.open(crop) as src:
+            assert src.nodata == 0.0
+            assert 0 in np.unique(src.read(1)).tolist()
+        assert not any("AVERAGED" in p for p in audit_cog_output(crop))
+
+    def test_small_rasters_are_exempt_from_the_overview_count_check(self):
+        """`calculate_overview_factors` returns its [2,4,8] fallback below the
+        blocksize, where the rule itself gives 0, so demanding a count there
+        would flag every small crop."""
+        for name in ("dswx_s1_wtr_classcodes_crop.tif", "gaia_atlanta_sample.tif"):
+            problems = audit_cog_output(os.path.join(FIXTURE_DIR, name))
+            assert not any("overview count" in p for p in problems), (name, problems)
+
+    def test_strict_output_raises_instead_of_warning(self, categorical_source, tmp_path):
+        with pytest.raises(RuntimeError, match="OUTPUT AUDIT FAILED"):
+            convert_to_cog(
+                categorical_source, str(tmp_path / "strict.tif"), dst_crs=None,
+                overview_levels=1, strict_output=True, quiet=True,
+            )
+
+    def test_default_warns_unmissably_but_still_writes(self, categorical_source, tmp_path, capsys):
+        """Default is warn, not raise: this runs inside DPS jobs during live
+        activations, where aborting a finished conversion is worse than the
+        defect it found."""
+        out = str(tmp_path / "warned.tif")
+        convert_to_cog(categorical_source, out, dst_crs=None,
+                       overview_levels=1, quiet=True)
+        captured = capsys.readouterr().out
+        assert "OUTPUT AUDIT FAILED" in captured
+        assert os.path.exists(out)
+
+    @pytest.mark.parametrize("backend", ["rio", "gdal"])
+    def test_both_backends_audit_their_output(self, categorical_source, tmp_path, backend):
+        """backend='gdal' returns early, so without its own call it would be
+        the one path that writes unchecked."""
+        with pytest.raises(RuntimeError, match="OUTPUT AUDIT FAILED"):
+            convert_to_cog(
+                categorical_source, str(tmp_path / f"s_{backend}.tif"),
+                dst_crs=None, backend=backend, overview_levels=1,
+                strict_output=True, quiet=True,
+            )

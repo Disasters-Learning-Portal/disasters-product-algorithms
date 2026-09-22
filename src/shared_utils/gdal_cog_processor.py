@@ -14,10 +14,63 @@ import numpy as np
 # Setup logging
 logger = logging.getLogger(__name__)
 
+# Cache for cog_driver_supports_interleave(); the probe shells out once.
+_COG_INTERLEAVE_SUPPORT: Optional[bool] = None
+
+
+def cog_driver_supports_interleave() -> bool:
+    """True when the installed COG driver honours ``-co INTERLEAVE``.
+
+    This has to be probed, not assumed, because the failure is SILENT. The COG
+    driver gained INTERLEAVE in GDAL 3.11; before that it accepts the option,
+    prints a warning, and writes PIXEL anyway. Measured here:
+
+        GDAL 3.10.3: gdal_translate -of COG -co INTERLEAVE=BAND
+            Warning 6: driver COG does not support creation option INTERLEAVE
+            -> INTERLEAVE=PIXEL in the output
+        GDAL 3.12.3: same command, no warning
+            -> INTERLEAVE=BAND in the output
+
+    So any code that sets INTERLEAVE=BAND through the COG driver on an older
+    GDAL produces a file that looks band-interleaved in the command line and
+    is not in the file. The rio backend is unaffected -- rio-cogeo creates
+    through the GTiff driver, which has always supported the option.
+
+    The probe reads the driver's own creation-option list via
+    ``gdalinfo --format COG``, which describes the SUBPROCESS binary rather
+    than whatever GDAL rasterio happens to bundle. Those can differ: one env
+    here has gdalinfo 3.10.3 alongside a rasterio built against 3.12.4, so a
+    ``rasterio.__gdal_version__`` check would give the wrong answer for the
+    subprocess path this module uses.
+
+    Returns:
+        True if the option is honoured; False if it would be silently dropped
+        (including when the probe itself fails -- assume the weaker driver).
+    """
+    global _COG_INTERLEAVE_SUPPORT
+    if _COG_INTERLEAVE_SUPPORT is None:
+        try:
+            result = subprocess.run(
+                ['gdalinfo', '--format', 'COG'],
+                capture_output=True, text=True, timeout=30,
+            )
+            _COG_INTERLEAVE_SUPPORT = 'INTERLEAVE' in result.stdout.upper()
+        except (OSError, subprocess.SubprocessError):
+            _COG_INTERLEAVE_SUPPORT = False
+    return _COG_INTERLEAVE_SUPPORT
+
 
 def get_resampling_for_dtype(dtype: str) -> Tuple[str, str]:
     """
     Get appropriate resampling methods based on data type.
+
+    NOTE: the COG path no longer calls this -- ``create_cog_gdal`` resolves
+    resampling through ``cog_utils.determine_resampling_method``, which reads
+    the pixels. Deciding from the dtype alone cannot work: Int8 {0,1,2,3,4}
+    water masks and UInt16 {1,999} cloud masks are categorical but land in the
+    "integer, probably continuous" bucket below, and Float32 {-1,0,+1} change
+    maps are categorical despite being float. Kept as a cheap dtype-only
+    default for callers that have no file to look at.
 
     Args:
         dtype: NumPy data type string (e.g., 'float32', 'uint8', 'int16')
@@ -98,11 +151,13 @@ def create_cog_gdal(
     overview_levels: Optional[int] = None,
     reproject_to_4326: bool = True,
     target_crs: Optional[str] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    resampling: Optional[str] = None,
+    overview_resampling: Optional[str] = None,
 ) -> bool:
     """
     Create COG using GDAL's native COG driver for maximum performance.
-    Automatically selects appropriate resampling based on data type.
+    Automatically selects appropriate resampling from the PIXELS.
 
     Args:
         input_path: Input file path (can be /vsis3/ path)
@@ -121,9 +176,20 @@ def create_cog_gdal(
         target_crs: Target CRS string (e.g. 'EPSG:4326'). None = keep original CRS.
             Overrides reproject_to_4326 when set.
         verbose: Print progress messages
+        resampling: Warp resampling. None (default) auto-detects.
+        overview_resampling: Overview resampling. None (default) auto-detects.
+            An explicit value always wins over detection.
 
     Returns:
         True if successful, False otherwise
+
+    Resampling is resolved by ``cog_utils.determine_resampling_method``, the
+    same function the rio backend uses, so the two backends cannot disagree.
+    This used to call ``get_resampling_for_dtype``, which decides from the
+    dtype alone and therefore got two whole product families wrong: a HydroSAR
+    water mask is Int8 {0,1,2,3,4} and a cloud mask is UInt16 {1,999}, and both
+    fall in that function's "integer, probably continuous" bucket -> AVERAGE
+    over class codes. ``determine_resampling_method`` reads the pixels instead.
     """
     try:
         # Resolve effective CRS: target_crs takes precedence over reproject_to_4326
@@ -141,19 +207,33 @@ def create_cog_gdal(
         if verbose:
             print(f"   [GDAL-COG] Creating COG with native GDAL driver...")
 
-        # Detect data type and get appropriate resampling
+        # Resolve resampling from the pixels, unless the caller named one.
+        # Imported here, not at module scope: cog_utils reaches back into this
+        # module for the 'gdal' backend, so a top-level import would close the
+        # cycle.
+        from shared_utils.cog_utils import determine_resampling_method
+
         try:
             with rasterio.open(input_path) as src:
                 dtype = src.dtypes[0]
                 band_count = src.count
-            resampling, overview_resampling = get_resampling_for_dtype(dtype)
+                colorinterp = src.colorinterp
+            if resampling is None or overview_resampling is None:
+                detected_method, detected_overview = determine_resampling_method(input_path)
+                resampling = resampling or detected_method
+                overview_resampling = overview_resampling or detected_overview
+                source = 'auto-detected'
+            else:
+                source = 'caller-supplied'
             if verbose:
-                print(f"   [GDAL-COG] Data type: {dtype} → Resampling: {resampling}, Overviews: {overview_resampling}")
-        except:
+                print(f"   [GDAL-COG] Data type: {dtype} → Resampling: {resampling}, "
+                      f"Overviews: {overview_resampling} ({source})")
+        except Exception:
             # Fallback if can't detect
-            resampling = 'bilinear'
-            overview_resampling = 'average'
+            resampling = resampling or 'bilinear'
+            overview_resampling = overview_resampling or 'average'
             band_count = None
+            colorinterp = None
 
         # Set optimal environment
         env = set_optimal_gdal_env()
@@ -167,6 +247,7 @@ def create_cog_gdal(
                 resampling, overview_resampling,
                 env, verbose, target_crs=effective_crs,
                 overview_levels=overview_levels, band_count=band_count,
+                colorinterp=colorinterp,
             )
 
         # Direct COG creation without reprojection
@@ -176,7 +257,8 @@ def create_cog_gdal(
             input_path, output_path, nodata,
             compress, compress_level, blocksize,
             overview_resampling=overview_resampling,
-            overview_count=overview_levels, band_count=band_count
+            overview_count=overview_levels, band_count=band_count,
+            colorinterp=colorinterp,
         )
 
         if verbose:
@@ -221,7 +303,8 @@ def create_cog_with_reprojection(
     verbose: bool,
     target_crs: str = 'EPSG:4326',
     overview_levels: Optional[int] = None,
-    band_count: Optional[int] = None
+    band_count: Optional[int] = None,
+    colorinterp=None,
 ) -> bool:
     """
     Create COG with reprojection using two-stage process.
@@ -312,7 +395,8 @@ def create_cog_with_reprojection(
             temp_file, output_path, nodata,
             compress, compress_level, blocksize,
             overview_resampling=overview_resampling,
-            overview_count=overview_levels, band_count=band_count
+            overview_count=overview_levels, band_count=band_count,
+            colorinterp=colorinterp,
         )
 
         result = subprocess.run(
@@ -351,7 +435,8 @@ def build_gdal_translate_command(
     blocksize: int,
     overview_resampling: str = 'average',
     overview_count: Optional[int] = None,
-    band_count: Optional[int] = None
+    band_count: Optional[int] = None,
+    colorinterp=None,
 ) -> List[str]:
     """
     Build gdal_translate command with optimal COG parameters.
@@ -362,6 +447,8 @@ def build_gdal_translate_command(
     the longer side). A fixed count under-builds large mosaics: at 5 levels a
     139,850 px raster's coarsest overview is still 4,370 px wide.
     """
+    from shared_utils.cog_utils import carries_alpha_band
+
     cmd = [
         'gdal_translate',
         '-of', 'COG',  # Use COG driver
@@ -374,9 +461,28 @@ def build_gdal_translate_command(
     if overview_count is not None:
         cmd.extend(['-co', f'OVERVIEW_COUNT={int(overview_count)}'])
     # >3 bands are rendered as a subset; BAND interleave keeps a 3-of-8 read
-    # from decoding all 8. Same rule as cog_utils.build_creation_options.
-    if band_count is not None and band_count > 3:
-        cmd.extend(['-co', 'INTERLEAVE=BAND'])
+    # from decoding all 8. Same rule as cog_utils.build_creation_options --
+    # including the alpha carve-out, since an RGBA rendering is read whole.
+    #
+    # Unlike the rio backend, this one writes through the COG driver, which
+    # IGNORES INTERLEAVE below GDAL 3.11 while still exiting 0. Emitting the
+    # option there would produce a PIXEL-interleaved file that every log line
+    # and argv capture claims is BAND, so probe first and say so instead.
+    wants_band_interleave = (
+        band_count is not None
+        and band_count > 3
+        and not carries_alpha_band(colorinterp)
+    )
+    if wants_band_interleave:
+        if cog_driver_supports_interleave():
+            cmd.extend(['-co', 'INTERLEAVE=BAND'])
+        else:
+            logger.warning(
+                "INTERLEAVE=BAND requested for a %d-band raster but this "
+                "GDAL's COG driver ignores it (added in 3.11); the output "
+                "will be PIXEL-interleaved. Use backend='rio', which writes "
+                "through GTiff and honours it.", band_count
+            )
 
     # Add compression-specific options
     # Note: COG driver doesn't support ZSTD_LEVEL, it's only for GTiff driver

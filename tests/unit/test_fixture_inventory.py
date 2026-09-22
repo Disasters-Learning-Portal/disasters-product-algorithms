@@ -25,6 +25,7 @@ import os
 import pytest
 
 rasterio = pytest.importorskip("rasterio")
+from rasterio.enums import ColorInterp
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures")
@@ -42,6 +43,24 @@ EXPECTED = {
     "mwir_rotated_geotransform_crop.tif": (256, 256, 3, "uint8", 4326, 0.0, True, True),
     "cloudmask_byte_nodata255.tif": (327, 543, 1, "uint8", 4326, 255.0, False, True),
     "satellogic_truecolor_striped_noncog_600.tif": (600, 600, 3, "uint8", 32655, 0.0, False, False),
+    # Resampling auto-detect crops (tests/unit/test_cog_defect_autocorrect.py).
+    # Each pins one signal the detector has to get right from the PIXELS.
+    "dswx_s1_wtr_classcodes_crop.tif": (256, 256, 1, "uint8", 3857, 0.0, False, True),
+    "distalert_vegdiststatus_crop.tif": (256, 256, 1, "uint8", 3857, 0.0, False, True),
+    "distalert_veganommax_crop.tif": (512, 512, 1, "uint8", 3857, 0.0, False, True),
+    "distalert_status_palette_crop.tif": (256, 256, 1, "uint8", 3857, 255.0, False, True),
+    "hydrosar_watermask_int8_crop.tif": (256, 256, 1, "int8", 32617, None, False, True),
+}
+
+# The crops whose whole point is which resampling they must get. Asserted as a
+# set so a re-crop that flattened one into the wrong data kind is caught here,
+# not three modules away.
+RESAMPLING_KIND = {
+    "dswx_s1_wtr_classcodes_crop.tif": "categorical",
+    "distalert_vegdiststatus_crop.tif": "categorical",
+    "distalert_veganommax_crop.tif": "continuous",
+    "distalert_status_palette_crop.tif": "categorical",
+    "hydrosar_watermask_int8_crop.tif": "categorical",
 }
 
 # Fixtures that already carry a baked activation event -- the idempotent-skip inputs.
@@ -142,3 +161,56 @@ def test_non_north_up_fixtures_exist():
         "umbra_guam_sar_db_crop.tif",
         "mwir_rotated_geotransform_crop.tif",
     }
+
+
+@pytest.mark.parametrize("name", sorted(RESAMPLING_KIND))
+def test_resampling_crops_still_hold_the_property_they_were_cut_for(name):
+    """These five are only useful while their VALUE DISTRIBUTIONS hold.
+
+    A re-crop onto a different window would keep the filename, keep opening
+    fine, and silently stop discriminating `mode` from `average`. So assert the
+    distribution directly, not just the profile:
+
+      * the categorical ones must stay at or below the 32-value threshold;
+      * VEG-ANOM-MAX must stay above it (it is the nearest continuous product,
+        at 66 distinct values natively, 64 in this crop);
+      * the palette one must keep its color table, which is the one signal that
+        decides without reading pixels at all.
+    """
+    import numpy as np
+
+    from shared_utils.cog_utils import MAX_CATEGORICAL_VALUES, detect_data_kind
+
+    path = _path(name)
+    assert detect_data_kind(path) == RESAMPLING_KIND[name]
+
+    with rasterio.open(path) as src:
+        band = src.read(1)
+        valid = band[band != src.nodata] if src.nodata is not None else band.ravel()
+        distinct = len(np.unique(valid))
+        has_colormap = src.colorinterp[0] == ColorInterp.palette
+
+    if name == "distalert_status_palette_crop.tif":
+        assert has_colormap, "palette fixture lost its color table"
+    elif RESAMPLING_KIND[name] == "categorical":
+        assert distinct <= MAX_CATEGORICAL_VALUES, (
+            f"{name} now has {distinct} distinct values and no longer sits on "
+            f"the categorical side of the threshold"
+        )
+    else:
+        assert distinct > MAX_CATEGORICAL_VALUES, (
+            f"{name} now has only {distinct} distinct values and no longer "
+            f"discriminates the threshold"
+        )
+
+
+def test_the_distalert_pair_disagrees():
+    """Both crops come out of ONE product directory and need OPPOSITE
+    resampling. If a re-crop ever made them agree, the per-file guarantee would
+    stop being tested anywhere."""
+    from shared_utils.cog_utils import determine_resampling_method
+
+    status = determine_resampling_method(_path("distalert_vegdiststatus_crop.tif"))
+    anomaly = determine_resampling_method(_path("distalert_veganommax_crop.tif"))
+    assert status[1] == "mode"
+    assert anomaly[1] == "average"

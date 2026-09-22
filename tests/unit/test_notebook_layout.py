@@ -16,6 +16,7 @@ Two things are pinned here:
 """
 
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -64,6 +65,34 @@ def _code_cells(path):
             if not l.lstrip().startswith(("!", "%"))
         ))
     return out
+
+
+def _undefined_names():
+    """The symtable guard from tests/integration/test_dispatch_undefined_names.py.
+
+    Loaded by path rather than re-implemented: that module already solved
+    "every name referenced at module scope is bound", including the
+    ``from X import *`` and builtins cases, for the sensor dispatch scripts.
+    """
+    path = os.path.join(REPO_ROOT, "tests", "integration",
+                        "test_dispatch_undefined_names.py")
+    spec = importlib.util.spec_from_file_location("_dispatch_undefined_names", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.undefined_names
+
+
+# Names a notebook gets from the IPython kernel, not from its own source.
+IPYTHON_GLOBALS = {"get_ipython", "display", "In", "Out", "exit", "quit"}
+
+# `if "POLYGON" in globals() and POLYGON:` -- a name the notebook deliberately
+# leaves unbound (an alternative the operator uncomments) and guards before use.
+# Guarded like that it cannot raise NameError, so it is not the bug class here.
+_GUARDED_RE = re.compile(r"""["'](\w+)["']\s+in\s+globals\(\)""")
+
+
+def _guarded_names(source):
+    return set(_GUARDED_RE.findall(source))
 
 
 def _all_source(path):
@@ -154,7 +183,29 @@ class TestSensorNotebooksOwnNoPaths:
         src = _code(os.path.join(NB_DIR, nb))
         assert ("prefix_for_product_dir" in src) or ("sensor=PRODUCT_SENSOR" in src), (
             f"{nb} must key its uploads by the canonical destination, either via "
-            f"prefix_for_product_dir() or by passing sensor= to upload_dir_to_staging()"
+            f"prefix_for_product_dir() or by passing sensor= to upload_dir_ambient()"
+        )
+
+    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    def test_upload_cell_has_no_unbound_names(self, nb):
+        """Every name a notebook uses must be bound by the notebook itself.
+
+        sentinel2_odr_workflow.ipynb called product_dir() and
+        prefix_for_product_dir() while importing neither -- shared_utils
+        re-exports upload_file_to_s3 but not those two -- so the upload cell
+        raised NameError for an operator on the hub. Notebooks are neither
+        linted nor executed in CI, and the resolver check above passes on a
+        name that is merely CALLED, so nothing else catches this.
+        """
+        path = os.path.join(NB_DIR, nb)
+        # Cells run in order and share one namespace, so the notebook as a
+        # whole is the scope a name has to be bound in.
+        source = "\n".join(_code_cells(path))
+        allowed = IPYTHON_GLOBALS | _guarded_names(source)
+        missing = [n for n in _undefined_names()(source, path) if n not in allowed]
+        assert missing == [], (
+            f"{nb}: names referenced but never bound: {missing}. "
+            f"Import them in the cell that uses them."
         )
 
     @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
@@ -173,6 +224,77 @@ class TestSensorNotebooksOwnNoPaths:
                 ast.parse(src)
             except SyntaxError as e:  # pragma: no cover - the failure message is the point
                 pytest.fail(f"{nb} cell {i} does not parse: {e}")
+
+
+class TestNotebookUploadsUseAmbientCredentials:
+    """No notebook may publish through the DPS MAAP-credential path.
+
+    ``staging_upload.upload_dir_to_staging`` authenticates through maap-py,
+    which reads ``MAAP_PGT`` from the process environment. The DPS wrapper
+    injects it; the Disasters hub never does -- it is per-user and secret, so
+    it cannot be baked into the image, and the ``maapToken`` in MAAP Settings
+    lives in the JupyterLab frontend SettingRegistry where a kernel never sees
+    it. landsat/sentinel2 called it anyway and returned HTTP 401 for every hub
+    operator, deterministically, for six weeks.
+
+    Assertions run over the AST, not the text, so the upload cells can name the
+    banned helper in a comment explaining why not to use it.
+    """
+
+    MAAP_ONLY = {"upload_dir_to_staging", "workspace_bucket_credentials",
+                 "_workspace_s3_client"}
+
+    @staticmethod
+    def _referenced(path):
+        """Every name imported or called by a notebook's code cells."""
+        names = set()
+        for cell in _code_cells(path):
+            try:
+                tree = ast.parse(cell)
+            except SyntaxError:  # pragma: no cover - test_every_code_cell_parses owns this
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    names.update(a.name for a in node.names)
+                elif isinstance(node, ast.Import):
+                    names.update(a.name for a in node.names)
+                elif isinstance(node, ast.Call):
+                    fn = node.func
+                    names.add(getattr(fn, "id", None) or getattr(fn, "attr", ""))
+        return names - {None, ""}
+
+    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    def test_no_notebook_uses_the_maap_credential_path(self, nb):
+        used = self._referenced(os.path.join(NB_DIR, nb)) & self.MAAP_ONLY
+        assert not used, (
+            f"{nb} reaches the MAAP-credential path ({sorted(used)}), which 401s "
+            f"on the hub. Use staging_upload.upload_dir_ambient, or "
+            f"upload_file_to_s3 with prefix_for_product_dir."
+        )
+
+    def test_the_tools_notebooks_stay_ambient_too(self):
+        for name in sorted(os.listdir(TOOLS_DIR)):
+            if not name.endswith(".ipynb"):
+                continue
+            used = self._referenced(os.path.join(TOOLS_DIR, name)) & self.MAAP_ONLY
+            assert not used, f"{name} reaches the MAAP-credential path ({sorted(used)})"
+
+    @pytest.mark.parametrize("nb", ["landsat_workflow.ipynb", "sentinel2_workflow.ipynb"])
+    def test_directory_publishers_use_the_ambient_helper(self, nb):
+        """These two publish a whole tree, so they keep staging_upload's keying."""
+        assert "upload_dir_ambient" in self._referenced(os.path.join(NB_DIR, nb))
+
+    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    def test_upload_is_opt_in(self, nb):
+        """Publishing to the production bucket is never the default.
+
+        sentinel2_workflow.ipynb shipped ENABLE_S3_UPLOAD = True, so a
+        top-to-bottom run published without the operator choosing to.
+        """
+        src = _code(os.path.join(NB_DIR, nb))
+        assert re.search(r"^ENABLE_S3_UPLOAD\s*=\s*False\s*$", src, re.MULTILINE), (
+            f"{nb} must ship ENABLE_S3_UPLOAD = False"
+        )
 
 
 class TestOdrGeneratorStaysInSync:

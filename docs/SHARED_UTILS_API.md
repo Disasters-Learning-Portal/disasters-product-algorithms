@@ -303,7 +303,7 @@ Both are preceded by subprocess `gdalwarp` (`NUM_THREADS=ALL_CPUS`) when a repro
 Every caller passing `metadata=` or `--metadata-json` takes the second path — both `simple_disaster`
 notebooks and every sensor CLI.
 
-**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None)`,
+**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None, band_count=None)`,
 consumed by BOTH backends** so they cannot drift. It always includes:
 
 - **`NUM_THREADS=ALL_CPUS`** — `.clinerules.md` rule #8. Without it GDAL compresses single-threaded
@@ -319,6 +319,11 @@ consumed by BOTH backends** so they cannot drift. It always includes:
   GDAL documents `IF_SAFER` as "only a heuristic that might not always work depending on compression
   ratios", and on a 100+ GB mosaic the failure is `TIFFAppendToStrip: Maximum TIFF file size exceeded`,
   hours into the run. `convert_to_cog` computes `raw_size_gb` from the post-warp raster.
+- **`INTERLEAVE=BAND` when `band_count > 3`** — a >3-band raster is rendered as a band subset (titiler
+  `bidx=5,3,2` of 8). With the default `PIXEL` interleave every block holds all bands, so that read still
+  decodes all 8: 4.19 MB per 512 px uint16 block instead of 1.57 MB, 2.7x on every tile. `BAND` stores
+  each band's blocks separately. Verified valid COG, same size, byte-identical pixels. Rasters of 3 bands
+  or fewer keep `PIXEL` (an RGB read wants all of them together).
 
 Historically the in-process backend built its own profile and had **neither** of these. If you add a
 `--co` to one backend, add it to `build_creation_options` instead — the parity test captures the real
@@ -523,11 +528,22 @@ Download an `s3://…` object to `save_location`, returning the local path. The 
 
 ### staging_upload
 
-Publish a DPS job's product COGs/PNGs to a MAAP **org bucket** (`nasa-disasters-staging`) using short-lived credentials from `maap.aws.workspace_bucket_credentials()`. The DPS worker's own role (`dps-verdi-role`) can't write that bucket, so an ambient `upload_file_to_s3` would `AccessDenied`. `maap-py` is imported **lazily inside** the credential call, so importing this module never requires maap-py (it's a DPS-only dep) — only a live DPS job invokes it. Used by `dps/_finalize.sh` step 3 for every sensor. See `docs/DPS.md` "All sensors → nasa-disasters-staging" and `.clinerules.md` rule 36.
+Publish product COGs/PNGs to `nasa-disasters-staging`. **Two entry points, one keying:** both consume `iter_upload_keys`, so they produce identical keys and differ only in whose credentials do the `PutObject`.
+
+| caller | function | credentials |
+|---|---|---|
+| `dps/_finalize.sh` (every sensor) | `upload_dir_to_staging` | MAAP workspace, via `maap.aws.workspace_bucket_credentials()` |
+| operator notebooks | `upload_dir_ambient` | ambient (default boto3 chain) + a per-prefix write preflight |
+
+DPS needs the MAAP path because the worker role (`dps-verdi-role`) can't write that bucket. A **notebook must not** use it: maap-py authenticates from `MAAP_PGT`, which the DPS wrapper injects and the Disasters hub never does (it's per-user and secret, and the `maapToken` in MAAP Settings lives in the JupyterLab frontend SettingRegistry, which a kernel never sees) — so it returns `HTTPError: 401` for every hub operator. On the hub the pod already assumes `disasters-prod`, so ambient is the working path. `maap-py` is imported **lazily inside** the credential call, so importing this module never requires maap-py (it's a DPS-only dep). See `docs/DPS.md` "All sensors → nasa-disasters-staging" and `.clinerules.md` rules 36 and 57.
 
 #### `upload_dir_to_staging(out_home, target_bucket, dest_prefix) -> int`
 
 Request workspace credentials, confirm `target_bucket` is granted `read_write` in `resp["authorized_s3_paths"]` (else raise, listing what *was* authorized), then upload every `**/*.tif`+`**/*.png` under `out_home` to `s3://target_bucket/<granted_prefix>/<dest_prefix>/<relpath>` — keyed by the `out_home`-relative path (collision-safe, same rule as `_finalize.sh`). Returns the number of files uploaded. Callers pass `dest_prefix = "dps_output/<activation_event>"`.
+
+#### `upload_dir_ambient(out_home, target_bucket, dest_prefix="", include=None, sensor=None, preflight=True) -> int`
+
+The notebook/hub twin of the above, with `boto3.client('s3')` in place of MAAP credentials. Same `include`/`sensor` semantics, same keys. With `preflight` (the default) it attempts a real zero-byte `PutObject` under **every distinct destination prefix** before uploading anything and raises on the first failure — grants on this bucket are per-prefix and `head_bucket` succeeds for a read-only identity, so only a real write is evidence, and failing up front beats dying part-way through the loop. Pinned by `tests/unit/test_staging_upload.py::TestAmbientUpload`.
 
 #### `resolve_authorized_path(resp, target_bucket) -> str`
 

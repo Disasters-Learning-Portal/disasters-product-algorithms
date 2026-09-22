@@ -442,12 +442,15 @@ reviewing the outputs above.
 # UPLOAD TO S3 (optional)
 # ==============================================================================
 # Publishes to s3://{S3_BUCKET}/ProgramData/Sentinel-2/<Product>/<filename>
+# with AMBIENT AWS credentials (on the hub the pod already assumes
+# disasters-prod). Both product_paths helpers must be imported HERE: the
+# shared_utils package re-exports upload_file_to_s3 but not these two.
 from shared_utils import upload_file_to_s3
+from shared_utils.product_paths import prefix_for_product_dir, product_dir
 
-# Maps the filename product token -> its S3 folder. Keys must match the
-# camelCase token _build_output_filename writes, and every product in PRODUCTS
-# needs an entry or its COGs are silently skipped.
-# Filename product token -> the product key in shared_utils.product_paths. The
+# Filename product token -> the product key in shared_utils.product_paths. Keys
+# must match the camelCase token _build_output_filename writes, and every
+# product in PRODUCTS needs an entry or its COGs are silently skipped. The
 # directory itself is NOT written here: product_dir() resolves it, so this
 # notebook cannot drift from the published layout the way the old hard-coded
 # folder map did (it had colorIR, SWIR, MNDWI and waterExtent, none of which

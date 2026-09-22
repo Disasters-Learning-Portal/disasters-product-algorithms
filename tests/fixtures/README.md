@@ -38,6 +38,11 @@ untiled, so it genuinely fails validation with
 | `satellogic_truecolor_nodata0_crop.tif` | 256², 3x uint8, EPSG:32655, nodata 0 | `is_bare_8bit_imagery` says "no nodata" while the source tag says `0` — pins which wins |
 | `skysat_colorir_nodata0_crop.tif` | 256², 3x uint8, EPSG:32655, nodata 0 | Same conflict on SkySat SR, the vendor that genuinely reserves 0 as collect-geometry fill |
 | `satellogic_colorir_tagged_cog_crop.tif` | 256², 3x uint8, real COG | Already carries all six activation tags → the idempotent-skip path in `bake_event_metadata` |
+| `dswx_s1_wtr_classcodes_crop.tif` | 256², 1x uint8, EPSG:3857, nodata 0 | OPERA DSWx S1 WTR class codes `{1,3,251,255}` — the raster whose AVERAGE overviews invented class 2 == (1+3)/2. Categorical with high sentinel codes |
+| `distalert_vegdiststatus_crop.tif` | 256², 1x uint8, EPSG:3857, nodata 0 | DIST-ALERT VEG-DIST-STATUS: 3 class codes in only 2,135 valid pixels → **categorical while sparse**. Pins that the valid-pixel floor does not misfire on a sparse class layer |
+| `distalert_veganommax_crop.tif` | 512², 1x uint8, EPSG:3857, nodata 0 | DIST-ALERT VEG-ANOM-MAX: 64 distinct values → **continuous**. Same source directory as the row above, opposite verdict — the pair is what forbids per-directory or per-collection resampling |
+| `distalert_status_palette_crop.tif` | 256², 1x uint8, EPSG:3857, nodata 255, **color table** | Palette raster: the pixel values ARE legend indices, so it is categorical with no pixel read at all |
+| `hydrosar_watermask_int8_crop.tif` | 256², 1x **int8**, EPSG:32617, **no nodata** | HydroSAR water mask `{0,1,2,3,4}`. `get_resampling_for_dtype` buckets int8 as "probably continuous" → AVERAGE over class codes; the dtype-only rule cannot see this |
 | `blackmarble_brdf_tagged_cog_crop.tif` | 256², 1x float32, **EPSG:3857**, nodata -9999 | The only Web-Mercator + already-tagged COG fixture |
 | `mwir_rotated_geotransform_crop.tif` | 256², 3x uint8, EPSG:4326, nodata 0, **rotated** | Non-north-up 8-bit imagery (airborne MWIR scan) |
 | `cloudmask_byte_nodata255.tif` | 327x543, 1x uint8, **nodata 255** | Single-band uint8 whose nodata is *not* 0 — the counter-case to the bare-8-bit carve-out |

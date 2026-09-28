@@ -257,7 +257,7 @@ class TestCliCogContract:
         monkeypatch.setattr(cog_utils, "convert_to_cog",
                             lambda path, **kw: calls.append(kw) or path)
         monkeypatch.setattr(skysat_v2, "retrieve_skysat_resources", lambda date, **kw: [ANALYTIC])
-        monkeypatch.setattr(skysat_v2, "calc_ndwi", lambda tifs, out: ["ndwi.tif"])
+        monkeypatch.setattr(skysat_v2, "calc_ndwi", lambda tifs, out, **kw: ["ndwi.tif"])
         monkeypatch.setattr(sys, "argv", ["process_skysat", "--date", "2026-04-20 21:36:58",
                                           "--output", str(tmp_path / "out"), *argv])
 
@@ -301,3 +301,19 @@ def test_valid_dates_recognizes_the_skysat_bucket(monkeypatch):
         datetime(2026, 3, 23, 17, 35, 45),
         datetime(2026, 4, 20, 21, 36, 58),
     ]
+
+
+class TestRpcTempCleanup:
+    """basic_analytic writes a full-size temp RGB next to the output before
+    orthorectifying it. It was removed only on success, so every failed or
+    interrupted run left one in the operator's OUTPUT_DIR."""
+
+    def test_temp_rgb_removed_when_rpc_step_fails(self, tmp_path):
+        from skysat.skysat_v2 import georeference_rgb_with_rpc
+
+        src = _analytic(tmp_path)  # a normal GeoTIFF: carries NO RPC metadata
+        outfile = str(tmp_path / "out.tif")
+        band = np.zeros((8, 8), dtype=np.uint8)
+        with pytest.raises(ValueError, match="No RPC metadata"):
+            georeference_rgb_with_rpc(src, outfile, band, band, band, 8, 8)
+        assert not os.path.exists(f"{outfile}.tmp.tif")

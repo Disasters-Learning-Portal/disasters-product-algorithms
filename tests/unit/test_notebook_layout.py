@@ -308,3 +308,40 @@ class TestOdrGeneratorStaysInSync:
         assert "from shared_utils.product_paths import STAGING_BUCKET" in src
         assert "_PRODUCT_KEYS" in src
         assert "S3_PREFIX" not in src and "S3_DEST_BASE" not in src
+
+
+# The vendor workflows keep OUTPUT_DIR under /tmp and publish everything in it.
+# Without a reset, every earlier run's COGs piled up there -- filling /tmp and
+# being re-uploaded by the upload cell on every later run.
+VENDOR_NOTEBOOKS = ("capella_workflow.ipynb", "umbra_workflow.ipynb",
+                    "skysat_workflow.ipynb", "satellogic_workflow.ipynb")
+_CLI_OUTPUT_RE = re.compile(r"""["']--output["']\s*,\s*OUTPUT_DIR""")
+
+
+class TestTmpHygiene:
+    @pytest.mark.parametrize("nb", VENDOR_NOTEBOOKS)
+    def test_output_dir_reset_before_the_cli_writes_to_it(self, nb):
+        reset_seen = False
+        dispatched = False
+        for src in _code_cells(os.path.join(NB_DIR, nb)):
+            reset_at = src.find("reset_output_dir(OUTPUT_DIR)")
+            m = _CLI_OUTPUT_RE.search(src)
+            if m:
+                dispatched = True
+                assert reset_seen or (0 <= reset_at < m.start()), (
+                    f"{nb}: the processing cell writes to OUTPUT_DIR without "
+                    f"calling reset_output_dir(OUTPUT_DIR) first"
+                )
+            if reset_at >= 0:
+                reset_seen = True
+        assert dispatched, f"{nb}: no cell passes --output OUTPUT_DIR to the CLI"
+
+    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    def test_no_mkstemp(self, nb):
+        # mkstemp minted a new activation_meta_*.json in /tmp on every run of the
+        # config cell; a fixed per-sensor name is overwritten instead.
+        assert "mkstemp" not in _code(os.path.join(NB_DIR, nb))
+
+    def test_s2_odr_generator_has_no_mkstemp(self):
+        gen = os.path.join(REPO_ROOT, "tools", "_build_s2_odr_notebook.py")
+        assert "mkstemp" not in open(gen, encoding="utf-8").read()

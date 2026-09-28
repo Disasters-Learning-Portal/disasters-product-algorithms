@@ -1551,278 +1551,283 @@ def convert_to_cog(
         if not quiet:
             print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
-    # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
-    # already declares one. A VRT is a lazy XML header — no pixel copy — so this
-    # costs nothing but makes the opt-out actually stick: without it both
-    # `rio cogeo create` and cog_translate re-read the source's nodata tag.
-    if strip_source_nodata:
-        nodata_stripped_vrt = os.path.join(
-            tempfile.gettempdir(),
-            f'{os.path.basename(input_tif)}.{run_token}.nonodata.tmp.vrt',
-        )
-        translate_cmd = [
-            'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
-            input_tif, nodata_stripped_vrt,
-        ]
-        try:
-            subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
-            )
-        # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
-        # at the real file because its BASENAME is load-bearing downstream —
-        # resolve_metadata() parses the activation event out of it, and
-        # determine_resampling_method() reads it.
-        input_for_cog = nodata_stripped_vrt
-
-    # Pixel source for the warp step (the nodata-stripped VRT when opting out).
-    warp_source = input_for_cog
-
-    # Step 1: Reproject if needed (warp to dst_crs)
-    if needs_reprojection:
-        warped_file = os.path.join(
-            '/tmp', f'{os.path.basename(input_tif)}.{run_token}.warped.tmp.tif'
-        )
-
-        # When the warp was forced purely to rewrite the fill, dst_crs may be
-        # None or identical to the source; keep the pixels where they are.
-        warp_target_crs = dst_crs if dst_crs is not None else str(src_crs)
-
-        if not quiet:
-            print(f"  Warping to {warp_target_crs}...")
-
-        # Build gdalwarp command (chosen over `rio warp` so we can use
-        # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
-        warp_cmd = [
-            'gdalwarp',
-            '-t_srs', warp_target_crs,
-            '-r', resampling_method,
-            '-multi',
-            '-wo', 'NUM_THREADS=ALL_CPUS',
-            '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
-            '-overwrite',
-        ]
-
-        # Clamp output extent to Web Mercator's valid domain when source
-        # exceeds it (global Mollweide, polar stereographic, etc.).
-        if clip_webmerc:
-            warp_cmd.extend([
-                '-te',
-                f'-{WEBMERC_EXTENT_M}', f'-{WEBMERC_EXTENT_M}',
-                f'{WEBMERC_EXTENT_M}', f'{WEBMERC_EXTENT_M}',
-                '-te_srs', 'EPSG:3857',
-            ])
-
-        # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata).
-        # These are normally the same value — the warp is not meant to change
-        # what counts as fill. The exception is a pending FLT_MAX remap, where
-        # -srcnodata must name the value actually sitting in the pixels so
-        # gdalwarp rewrites it to the safe -dstnodata on the way out. Using
-        # `nodata` on both sides there would match nothing and silently keep
-        # the corrupt fill.
-        if nodata is not None:
-            src_nodata_arg = (
-                remap_extreme_fill if remap_extreme_fill is not None else nodata
-            )
-            warp_cmd.extend(['-srcnodata', repr(float(src_nodata_arg))])
-            warp_cmd.extend(['-dstnodata', str(nodata)])
-
-        warp_cmd.extend([warp_source, warped_file])
-
-        try:
-            result = subprocess.run(
-                warp_cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            if not quiet and result.stdout:
-                print(f"  {result.stdout.strip()}")
-
-            # Use warped file as input for COG conversion
-            input_for_cog = warped_file
-
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Error warping to {dst_crs}: {e.stderr}"
-            print(error_msg)
-            raise RuntimeError(error_msg)
-
-    # Overview depth and BIGTIFF are decided from what will actually be
-    # written -- the post-warp raster -- not from the source. Raw size is the
-    # uncompressed footprint, which is exactly what rio-cogeo's scratch
-    # dataset occupies (see build_creation_options).
-    with rasterio.open(input_for_cog) as cog_src:
-        out_w, out_h = cog_src.width, cog_src.height
-        out_count = cog_src.count
-        out_colorinterp = cog_src.colorinterp
-        raw_size_gb = (
-            out_w * out_h * cog_src.count
-            * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
-        )
-    overview_count = resolve_overview_count(out_w, out_h, overview_levels)
-    _opts = build_creation_options(
-        compression, compression_level, raw_size_gb, out_count, out_colorinterp
-    )
-    if not quiet:
-        print(
-            f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
-            f"{overview_count} overview levels, "
-            f"BIGTIFF={_opts['BIGTIFF']}, "
-            f"INTERLEAVE={_opts.get('INTERLEAVE', 'PIXEL')}"
-        )
-
-    # Step 2: Build rio cogeo create command (using warped file if reprojected)
-    cmd = [
-        'rio', 'cogeo', 'create',
-        input_for_cog,  # Use warped file if reprojection occurred
-        temp_output,
-        '--cog-profile', compression.lower(),
-        '--overview-level', str(overview_count),
-        '--overview-resampling', overview_resampling,
-    ]
-
-    # Add no-data value
-    if nodata is not None:
-        cmd.extend(['--nodata', str(nodata)])
-
-    # Creation options come from the ONE builder both branches share, so the
-    # subprocess path and the in-process cog_translate path cannot diverge
-    # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
-    for key, value in _opts.items():
-        cmd.extend(['--co', f'{key}={value}'])
-
-    # Execute COG creation.
-    #
-    # Two paths:
-    #   - `metadata is None` (default): subprocess `rio cogeo create`. Fast,
-    #     unchanged from prior behavior.
-    #   - `metadata is not None`: in-process `rio_cogeo.cogeo.cog_translate`
-    #     with `additional_cog_metadata=...`. Required because:
-    #       (a) `rio cogeo create` CLI has no flag for arbitrary tags, and
-    #       (b) reopening a finished COG with `gdal.Open(GA_Update)` +
-    #           `SetMetadata(...)` breaks the COG layout in GDAL 3.10+
-    #           (`cog_validate` returns valid=False with IFD-offset errors).
-    if not quiet:
-        if metadata is not None:
-            print(f"  Creating COG with embedded metadata: {os.path.basename(temp_output)}")
-        else:
-            print(f"  Creating COG: {os.path.basename(temp_output)}")
-
+    # Every intermediate from here on (nodata VRT, warped file, the /tmp COG) is
+    # removed in `finally`, not in the except branches: those only caught
+    # `Exception`, so Ctrl-C / a kernel interrupt leaked them, and the VRT and
+    # warp steps sat outside the try entirely, so a failed gdalwarp leaked too.
+    # With `run_token` in every name, a leak is never overwritten by the next
+    # run -- each one would accumulate in /tmp for good.
     try:
-        if metadata is not None:
-            from rio_cogeo.cogeo import cog_translate
-
-            # Auto-augment with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
-            # if the filename matches the activation-event pattern.
+        # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
+        # already declares one. A VRT is a lazy XML header — no pixel copy — so this
+        # costs nothing but makes the opt-out actually stick: without it both
+        # `rio cogeo create` and cog_translate re-read the source's nodata tag.
+        if strip_source_nodata:
+            nodata_stripped_vrt = os.path.join(
+                tempfile.gettempdir(),
+                f'{os.path.basename(input_tif)}.{run_token}.nonodata.tmp.vrt',
+            )
+            translate_cmd = [
+                'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
+                input_tif, nodata_stripped_vrt,
+            ]
             try:
-                from shared_utils.cog_metadata import resolve_metadata
-                full_metadata = resolve_metadata(
-                    os.path.basename(input_tif),
-                    mode='manual',
-                    manual_metadata=metadata,
+                subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
                 )
-            except ImportError:
-                full_metadata = dict(metadata)
+            # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
+            # at the real file because its BASENAME is load-bearing downstream —
+            # resolve_metadata() parses the activation event out of it, and
+            # determine_resampling_method() reads it.
+            input_for_cog = nodata_stripped_vrt
+
+        # Pixel source for the warp step (the nodata-stripped VRT when opting out).
+        warp_source = input_for_cog
+
+        # Step 1: Reproject if needed (warp to dst_crs)
+        if needs_reprojection:
+            warped_file = os.path.join(
+                '/tmp', f'{os.path.basename(input_tif)}.{run_token}.warped.tmp.tif'
+            )
+
+            # When the warp was forced purely to rewrite the fill, dst_crs may be
+            # None or identical to the source; keep the pixels where they are.
+            warp_target_crs = dst_crs if dst_crs is not None else str(src_crs)
 
             if not quiet:
-                print(f"  Embedded tags: {sorted(full_metadata.keys())}")
+                print(f"  Warping to {warp_target_crs}...")
 
-            profile = _build_cog_translate_profile(
-                compression, compression_level, raw_size_gb, out_count, out_colorinterp
+            # Build gdalwarp command (chosen over `rio warp` so we can use
+            # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
+            warp_cmd = [
+                'gdalwarp',
+                '-t_srs', warp_target_crs,
+                '-r', resampling_method,
+                '-multi',
+                '-wo', 'NUM_THREADS=ALL_CPUS',
+                '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
+                '-overwrite',
+            ]
+
+            # Clamp output extent to Web Mercator's valid domain when source
+            # exceeds it (global Mollweide, polar stereographic, etc.).
+            if clip_webmerc:
+                warp_cmd.extend([
+                    '-te',
+                    f'-{WEBMERC_EXTENT_M}', f'-{WEBMERC_EXTENT_M}',
+                    f'{WEBMERC_EXTENT_M}', f'{WEBMERC_EXTENT_M}',
+                    '-te_srs', 'EPSG:3857',
+                ])
+
+            # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata).
+            # These are normally the same value — the warp is not meant to change
+            # what counts as fill. The exception is a pending FLT_MAX remap, where
+            # -srcnodata must name the value actually sitting in the pixels so
+            # gdalwarp rewrites it to the safe -dstnodata on the way out. Using
+            # `nodata` on both sides there would match nothing and silently keep
+            # the corrupt fill.
+            if nodata is not None:
+                src_nodata_arg = (
+                    remap_extreme_fill if remap_extreme_fill is not None else nodata
+                )
+                warp_cmd.extend(['-srcnodata', repr(float(src_nodata_arg))])
+                warp_cmd.extend(['-dstnodata', str(nodata)])
+
+            warp_cmd.extend([warp_source, warped_file])
+
+            try:
+                result = subprocess.run(
+                    warp_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+
+                if not quiet and result.stdout:
+                    print(f"  {result.stdout.strip()}")
+
+                # Use warped file as input for COG conversion
+                input_for_cog = warped_file
+
+            except subprocess.CalledProcessError as e:
+                error_msg = f"Error warping to {dst_crs}: {e.stderr}"
+                print(error_msg)
+                raise RuntimeError(error_msg)
+
+        # Overview depth and BIGTIFF are decided from what will actually be
+        # written -- the post-warp raster -- not from the source. Raw size is the
+        # uncompressed footprint, which is exactly what rio-cogeo's scratch
+        # dataset occupies (see build_creation_options).
+        with rasterio.open(input_for_cog) as cog_src:
+            out_w, out_h = cog_src.width, cog_src.height
+            out_count = cog_src.count
+            out_colorinterp = cog_src.colorinterp
+            raw_size_gb = (
+                out_w * out_h * cog_src.count
+                * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
             )
-            cog_translate(
-                input_for_cog,
-                temp_output,
-                profile,
-                nodata=nodata,
-                overview_level=overview_count,
-                overview_resampling=overview_resampling,
-                web_optimized=False,
-                additional_cog_metadata=full_metadata,
-                # The subprocess branch gets this from the `rio cogeo create`
-                # CLI (its --threads defaults to ALL_CPUS). Without it here,
-                # cog_translate runs under a bare rasterio.Env() and GDAL
-                # compresses on a single thread.
-                config=COG_GDAL_CONFIG,
-                quiet=quiet,
-            )
-        else:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            if not quiet and result.stdout:
-                print(f"  {result.stdout.strip()}")
-
-        # If we created a temp file, replace the original.
-        # Use shutil.move (not os.rename): temp_output lives in /tmp while
-        # output_cog is usually on a different mount (e.g. the Hub's /home or a
-        # shared volume). os.rename across filesystems raises
-        # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
-        # copy + delete.
-        if temp_output != output_cog:
-            if os.path.exists(output_cog):
-                os.remove(output_cog)
-            shutil.move(temp_output, output_cog)
-
-        # Clean up warped temp file if it was created
-        if warped_file and os.path.exists(warped_file):
-            os.remove(warped_file)
-        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
-            os.remove(nodata_stripped_vrt)
-
-        # Audit what we just WROTE, not what we asked for. Every defect this
-        # catches was found months later in a rendered map; each is cheap to
-        # see here. Warns by default rather than raising, because this is a
-        # library that runs inside DPS jobs during live activations and an
-        # audit that aborts a finished conversion would be worse than the
-        # defect. `strict_output=True` turns the same findings into an error
-        # for callers that would rather fail the batch.
-        audit_problems = audit_cog_output(output_cog)
-        if audit_problems:
-            header = (
-                f"OUTPUT AUDIT FAILED for {os.path.basename(output_cog)} "
-                f"({len(audit_problems)} problem(s)):"
-            )
-            if strict_output:
-                raise RuntimeError(header + " " + "; ".join(audit_problems))
-            print(f"  !!! {header}")
-            for problem in audit_problems:
-                print(f"  !!!   - {problem}")
-            print("  !!! The file was written anyway. Fix the source or the "
-                  "conversion settings before publishing it.")
-        elif not quiet:
-            print("  Output audit: tiling, compression, overview count, "
-                  "overview resampling and nodata all check out.")
-
+        overview_count = resolve_overview_count(out_w, out_h, overview_levels)
+        _opts = build_creation_options(
+            compression, compression_level, raw_size_gb, out_count, out_colorinterp
+        )
         if not quiet:
-            print(f"  ✓ COG created: {os.path.basename(output_cog)}")
+            print(
+                f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
+                f"{overview_count} overview levels, "
+                f"BIGTIFF={_opts['BIGTIFF']}, "
+                f"INTERLEAVE={_opts.get('INTERLEAVE', 'PIXEL')}"
+            )
 
-        return output_cog
+        # Step 2: Build rio cogeo create command (using warped file if reprojected)
+        cmd = [
+            'rio', 'cogeo', 'create',
+            input_for_cog,  # Use warped file if reprojection occurred
+            temp_output,
+            '--cog-profile', compression.lower(),
+            '--overview-level', str(overview_count),
+            '--overview-resampling', overview_resampling,
+        ]
 
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Error creating COG: {e.stderr}"
-        print(error_msg)
-        # Clean up temp files if they exist
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
+        # Add no-data value
+        if nodata is not None:
+            cmd.extend(['--nodata', str(nodata)])
+
+        # Creation options come from the ONE builder both branches share, so the
+        # subprocess path and the in-process cog_translate path cannot diverge
+        # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
+        for key, value in _opts.items():
+            cmd.extend(['--co', f'{key}={value}'])
+
+        # Execute COG creation.
+        #
+        # Two paths:
+        #   - `metadata is None` (default): subprocess `rio cogeo create`. Fast,
+        #     unchanged from prior behavior.
+        #   - `metadata is not None`: in-process `rio_cogeo.cogeo.cog_translate`
+        #     with `additional_cog_metadata=...`. Required because:
+        #       (a) `rio cogeo create` CLI has no flag for arbitrary tags, and
+        #       (b) reopening a finished COG with `gdal.Open(GA_Update)` +
+        #           `SetMetadata(...)` breaks the COG layout in GDAL 3.10+
+        #           (`cog_validate` returns valid=False with IFD-offset errors).
+        if not quiet:
+            if metadata is not None:
+                print(f"  Creating COG with embedded metadata: {os.path.basename(temp_output)}")
+            else:
+                print(f"  Creating COG: {os.path.basename(temp_output)}")
+
+        try:
+            if metadata is not None:
+                from rio_cogeo.cogeo import cog_translate
+
+                # Auto-augment with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
+                # if the filename matches the activation-event pattern.
+                try:
+                    from shared_utils.cog_metadata import resolve_metadata
+                    full_metadata = resolve_metadata(
+                        os.path.basename(input_tif),
+                        mode='manual',
+                        manual_metadata=metadata,
+                    )
+                except ImportError:
+                    full_metadata = dict(metadata)
+
+                if not quiet:
+                    print(f"  Embedded tags: {sorted(full_metadata.keys())}")
+
+                profile = _build_cog_translate_profile(
+                    compression, compression_level, raw_size_gb, out_count, out_colorinterp
+                )
+                cog_translate(
+                    input_for_cog,
+                    temp_output,
+                    profile,
+                    nodata=nodata,
+                    overview_level=overview_count,
+                    overview_resampling=overview_resampling,
+                    web_optimized=False,
+                    additional_cog_metadata=full_metadata,
+                    # The subprocess branch gets this from the `rio cogeo create`
+                    # CLI (its --threads defaults to ALL_CPUS). Without it here,
+                    # cog_translate runs under a bare rasterio.Env() and GDAL
+                    # compresses on a single thread.
+                    config=COG_GDAL_CONFIG,
+                    quiet=quiet,
+                )
+            else:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                if not quiet and result.stdout:
+                    print(f"  {result.stdout.strip()}")
+
+            # If we created a temp file, replace the original.
+            # Use shutil.move (not os.rename): temp_output lives in /tmp while
+            # output_cog is usually on a different mount (e.g. the Hub's /home or a
+            # shared volume). os.rename across filesystems raises
+            # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
+            # copy + delete.
+            if temp_output != output_cog:
+                if os.path.exists(output_cog):
+                    os.remove(output_cog)
+                shutil.move(temp_output, output_cog)
+
+            # Audit what we just WROTE, not what we asked for. Every defect this
+            # catches was found months later in a rendered map; each is cheap to
+            # see here. Warns by default rather than raising, because this is a
+            # library that runs inside DPS jobs during live activations and an
+            # audit that aborts a finished conversion would be worse than the
+            # defect. `strict_output=True` turns the same findings into an error
+            # for callers that would rather fail the batch.
+            audit_problems = audit_cog_output(output_cog)
+            if audit_problems:
+                header = (
+                    f"OUTPUT AUDIT FAILED for {os.path.basename(output_cog)} "
+                    f"({len(audit_problems)} problem(s)):"
+                )
+                if strict_output:
+                    raise RuntimeError(header + " " + "; ".join(audit_problems))
+                print(f"  !!! {header}")
+                for problem in audit_problems:
+                    print(f"  !!!   - {problem}")
+                print("  !!! The file was written anyway. Fix the source or the "
+                      "conversion settings before publishing it.")
+            elif not quiet:
+                print("  Output audit: tiling, compression, overview count, "
+                      "overview resampling and nodata all check out.")
+
+            if not quiet:
+                print(f"  ✓ COG created: {os.path.basename(output_cog)}")
+
+            return output_cog
+
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Error creating COG: {e.stderr}"
+            print(error_msg)
+            # A failed run must not leave a partial output behind -- including a
+            # caller-supplied output_cog (the only case `finally` leaves alone).
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            raise RuntimeError(error_msg)
+        except Exception:
+            # A failed run must not leave a partial output behind -- including a
+            # caller-supplied output_cog (the only case `finally` leaves alone).
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            raise
+    finally:
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
         if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
             os.remove(nodata_stripped_vrt)
-        raise RuntimeError(error_msg)
-    except Exception:
-        if os.path.exists(temp_output):
+        # On success temp_output has already been moved over output_cog; when
+        # the caller passed output_cog, temp_output IS the product -- keep it.
+        if temp_output != output_cog and os.path.exists(temp_output):
             os.remove(temp_output)
-        if warped_file and os.path.exists(warped_file):
-            os.remove(warped_file)
-        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
-            os.remove(nodata_stripped_vrt)
-        raise
 
 
 def validate_cog(cog_path: str) -> Tuple[bool, dict]:

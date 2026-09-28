@@ -16,6 +16,7 @@ from capella.capella_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.scratch import download_scratch
 
 
 # Fixed processing parameters. Capella has exactly one calibration product and
@@ -101,48 +102,47 @@ def main():
 
     cog_paths = []
 
-    for i, scene_tifs in enumerate(scenes, start=1):
+    # Raw scenes download into a per-run scratch dir that is deleted when the
+    # run ends -- success, failure or Ctrl-C. They used to land in a shared
+    # /tmp/s3_temp that nothing cleaned, filling /tmp one scene per run.
+    with download_scratch("capella") as download_dir:
 
-        print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
+        for i, scene_tifs in enumerate(scenes, start=1):
 
-        # Keep single-scene output flat (byte-identical to before). Isolate each
-        # scene in its own subdir only when there are several, so identically
-        # named (same-timestamp) COGs don't clobber each other locally or in S3.
-        scene_out = (
-            args.output if len(scenes) == 1
-            else os.path.join(args.output, f"scene_{i}")
-        )
+            print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
 
-        # Speckle filtering is always on; --filter_size only tunes the kernel.
-        outfile, source_tif = sigmaCalib(
-            scene_tifs,
-            save_location=scene_out,
-            filter_size=args.filter_size
-        )
+            # Keep single-scene output flat (byte-identical to before). Isolate each
+            # scene in its own subdir only when there are several, so identically
+            # named (same-timestamp) COGs don't clobber each other locally or in S3.
+            scene_out = (
+                args.output if len(scenes) == 1
+                else os.path.join(args.output, f"scene_{i}")
+            )
 
-        if not outfile:
-            continue
+            # Speckle filtering is always on; --filter_size only tunes the kernel.
+            outfile, _source_tif = sigmaCalib(
+                scene_tifs,
+                save_location=scene_out,
+                filter_size=args.filter_size,
+                download_dir=download_dir,
+            )
 
-        print("Converting to COG...")
+            if not outfile:
+                continue
 
-        cog_path = convert_to_cog(
-            outfile,
-            nodata=CAPELLA_NODATA,
-            dst_crs=DST_CRS,
-            compression=COMPRESSION,
-            compression_level=COMPRESSION_LEVEL,
-            metadata=metadata,
-        )
+            print("Converting to COG...")
 
-        print(f"COG created: {cog_path}")
-        cog_paths.append(cog_path)
+            cog_path = convert_to_cog(
+                outfile,
+                nodata=CAPELLA_NODATA,
+                dst_crs=DST_CRS,
+                compression=COMPRESSION,
+                compression_level=COMPRESSION_LEVEL,
+                metadata=metadata,
+            )
 
-        # Delete the raw downloaded source raster now that a valid COG exists.
-        # Gated on COG success (a failure/exception above skips cleanup so the
-        # download is preserved for a retry).
-        if cog_path and source_tif and os.path.exists(source_tif):
-            os.remove(source_tif)
-            print(f"Removed source raster: {source_tif}")
+            print(f"COG created: {cog_path}")
+            cog_paths.append(cog_path)
 
     print(f"\nCreated {len(cog_paths)} COG(s).")
 

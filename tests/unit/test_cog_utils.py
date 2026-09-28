@@ -1210,3 +1210,75 @@ class TestGdalBackendBandInterleave:
     @pytest.mark.parametrize('count', [None, 1, 3])
     def test_3_or_fewer_bands_left_on_driver_default(self, count):
         assert not any(t.startswith('INTERLEAVE=') for t in self._cmd(band_count=count))
+
+
+# ---------------------------------------------------------------------------
+# Temp-file cleanup survives failures and interrupts.
+#
+# convert_to_cog's intermediates (the /tmp COG, the warped file, the nodata
+# VRT) were removed only on success or in `except Exception`, and the VRT and
+# warp steps sat outside the try. Ctrl-C and a failed gdalwarp both leaked, and
+# with a uuid run_token in every name, each leak was a NEW file in /tmp.
+# ---------------------------------------------------------------------------
+
+class TestTempCleanupOnFailure:
+
+    @staticmethod
+    def _temp_leftovers():
+        import glob
+        import tempfile as _tempfile
+        found = set()
+        for root in {'/tmp', _tempfile.gettempdir()}:
+            for suffix in ('*.cog.tmp.tif', '*.warped.tmp.tif', '*.nonodata.tmp.vrt'):
+                found.update(glob.glob(os.path.join(root, suffix)))
+        return found
+
+    def test_keyboard_interrupt_during_cog_leaves_no_temp(self, tmp_path, monkeypatch):
+        import rio_cogeo.cogeo
+        from shared_utils.cog_utils import convert_to_cog
+
+        def interrupted(src, dst, *a, **kw):
+            with open(dst, 'wb') as fh:  # a partial /tmp COG, as a real run leaves
+                fh.write(b'partial')
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(rio_cogeo.cogeo, 'cog_translate', interrupted)
+        src = _write(tmp_path / 'interrupt_me.tif', 1, 'float32', 1.5, nodata=-9999.0)
+        before = self._temp_leftovers()
+        with pytest.raises(KeyboardInterrupt):
+            convert_to_cog(src, nodata=-9999.0, dst_crs=None, quiet=True,
+                           metadata={'ACTIVATION_EVENT': '202406_Flood_TX'})
+        assert self._temp_leftovers() == before, 'temp COG leaked into /tmp on Ctrl-C'
+        assert os.path.exists(src), 'the input must survive an interrupted conversion'
+
+    def test_failed_warp_leaves_no_warped_file_or_vrt(self, tmp_path, monkeypatch):
+        import subprocess
+        from shared_utils import cog_utils
+
+        real_run = subprocess.run
+
+        def run(cmd, *a, **kw):
+            if cmd and cmd[0] == 'gdalwarp':
+                with open(cmd[-1], 'wb') as fh:  # partial warped output
+                    fh.write(b'partial')
+                raise subprocess.CalledProcessError(1, cmd, stderr='simulated')
+            return real_run(cmd, *a, **kw)
+
+        monkeypatch.setattr(cog_utils.subprocess, 'run', run)
+        # nodata=False on a tagged source -> the VRT step; dst_crs -> the warp.
+        src = _write(tmp_path / 'warp_fails.tif', 1, 'float32', 1.5, nodata=-9999.0)
+        before = self._temp_leftovers()
+        with pytest.raises(RuntimeError, match='Error warping'):
+            cog_utils.convert_to_cog(src, str(tmp_path / 'never.tif'), nodata=False,
+                                     dst_crs='EPSG:3857', quiet=True)
+        assert self._temp_leftovers() == before, 'warp/VRT temp leaked into /tmp'
+
+    def test_success_leaves_no_temp(self, tmp_path):
+        from shared_utils.cog_utils import convert_to_cog
+        src = _write(tmp_path / 'ok.tif', 1, 'float32', 1.5, nodata=-9999.0)
+        before = self._temp_leftovers()
+        convert_to_cog(src, nodata=False, dst_crs='EPSG:3857', quiet=True,
+                       metadata={'ACTIVATION_EVENT': '202406_Flood_TX'})
+        assert self._temp_leftovers() == before
+        with rasterio.open(src) as s:
+            assert s.tags().get('ACTIVATION_EVENT') == '202406_Flood_TX'

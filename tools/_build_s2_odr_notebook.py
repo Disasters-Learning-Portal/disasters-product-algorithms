@@ -214,10 +214,12 @@ ACTIVATION_METADATA = {
     "PROCESSOR": PROCESSOR_STRING,
 }
 
-_meta_fd, ACTIVATION_METADATA_PATH = tempfile.mkstemp(
-    prefix="activation_meta_", suffix=".json"
+# One fixed file per sensor, overwritten on every run. A random temp name left a new
+# activation_meta_*.json in /tmp each time this cell ran.
+ACTIVATION_METADATA_PATH = os.path.join(
+    tempfile.gettempdir(), "activation_meta_sentinel2_odr.json"
 )
-with os.fdopen(_meta_fd, "w") as _f:
+with open(ACTIVATION_METADATA_PATH, "w") as _f:
     json.dump(ACTIVATION_METADATA, _f, indent=2)
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)

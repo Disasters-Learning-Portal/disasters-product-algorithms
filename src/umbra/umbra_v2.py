@@ -168,18 +168,21 @@ def _umbra_output_name(in_file: str, product: str, filter_size: int) -> str:
     return create_sar_output_filename(platform, product, acquired, filter_size)
 
 
-def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
+def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5, download_dir : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
-    if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
+    # Raw GEC goes to `download_dir` (the CLI's per-run scratch, deleted after
+    # the run) -- it was hardcoded to /tmp/s3_temp and never removed.
+    local_file = os.path.join(download_dir, local_tif_basename(in_filepath))
+    if not os.path.exists(local_file):
         print("GEC file not found, downloading from s3")
-        in_file = download_s3_file(in_filepath)
+        in_file = download_s3_file(in_filepath, download_dir)
     else:
         print("GEC file found, proceeding")
-        in_file = f'/tmp/s3_temp/{local_tif_basename(in_filepath)}'
+        in_file = local_file
     print('Generating Sigma Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)
@@ -215,18 +218,21 @@ def sigmaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp",
     print(f"Generation completed, file saved to {outfile}")
     return outfile
     
-def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
+def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5, download_dir : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
-    if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
+    # Raw GEC goes to `download_dir` (the CLI's per-run scratch, deleted after
+    # the run) -- it was hardcoded to /tmp/s3_temp and never removed.
+    local_file = os.path.join(download_dir, local_tif_basename(in_filepath))
+    if not os.path.exists(local_file):
         print("GEC file not found, downloading from s3")
-        in_file = download_s3_file(in_filepath)
+        in_file = download_s3_file(in_filepath, download_dir)
     else:
         print("GEC file found, proceeding")
-        in_file = f'/tmp/s3_temp/{local_tif_basename(in_filepath)}'
+        in_file = local_file
     print('Generating Beta Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)
@@ -260,18 +266,21 @@ def betaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", 
     print(f"Generation completed, file saved to {outfile}")
     return outfile
 
-def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5):
+def gammaCalib(s3_image_paths : list[str], save_location : str = "/tmp/s3_temp", filter_size : int = 5, download_dir : str = "/tmp/s3_temp"):
     if save_location.endswith("/"):
         save_location = save_location[:-1]
     os.makedirs(save_location, exist_ok=True)
     print("Collecting needed files...")
     in_filepath = [x for x in s3_image_paths if x.lower().endswith("_gec.tif")][0]
-    if f'/tmp/s3_temp/{local_tif_basename(in_filepath)}' not in glob("/tmp/s3_temp/*"):
+    # Raw GEC goes to `download_dir` (the CLI's per-run scratch, deleted after
+    # the run) -- it was hardcoded to /tmp/s3_temp and never removed.
+    local_file = os.path.join(download_dir, local_tif_basename(in_filepath))
+    if not os.path.exists(local_file):
         print("GEC file not found, downloading from s3")
-        in_file = download_s3_file(in_filepath)
+        in_file = download_s3_file(in_filepath, download_dir)
     else:
         print("GEC file found, proceeding")
-        in_file = f'/tmp/s3_temp/{local_tif_basename(in_filepath)}'
+        in_file = local_file
     print('Generating Gamma Naught')
     print("\n\t* Opening GEC File")
     ds = gdal.Open(in_file)

@@ -176,6 +176,7 @@ def sigmaCalib(
     s3_image_paths: list[str],
     save_location: str = "/tmp/s3_temp",
     filter_size: int = 5,
+    download_dir: str = "/tmp/s3_temp",
 ) -> tuple[str, str]:
 
     if save_location.endswith("/"):
@@ -187,13 +188,16 @@ def sigmaCalib(
 
     in_filepath = [x for x in s3_image_paths if "_GEO_" in x][0]
 
-    local_file = f"{save_location}/{local_tif_basename(in_filepath)}"
+    # The raw scene goes to `download_dir`, never `save_location`: the CLI hands
+    # in a per-run scratch dir it deletes afterwards (shared_utils.scratch), so a
+    # multi-GB raw download cannot outlive the run.
+    local_file = os.path.join(download_dir, local_tif_basename(in_filepath))
 
-    if local_file not in glob(f"{save_location}/*"):
+    if not os.path.exists(local_file):
 
         print("GEO file not found, downloading from S3")
 
-        in_file = download_s3_file(in_filepath)
+        in_file = download_s3_file(in_filepath, download_dir)
 
     else:
 

@@ -19,6 +19,7 @@ from skysat.skysat_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.scratch import download_scratch
 
 
 # COG settings
@@ -119,59 +120,69 @@ def main():
 
     output_files = []
 
-    if args.product == "truecolor":
-        output_files = produce_truecolor(
-            tifs,
-            args.product_type,
-            args.output,
-            gamma=args.gamma,
-        )
+    # Raw scenes download into a per-run scratch dir that is deleted when the
+    # run ends -- success, failure or Ctrl-C. They used to land in a shared
+    # /tmp/s3_temp that nothing cleaned, filling /tmp with every scene of
+    # every date ever processed.
+    with download_scratch("skysat") as download_dir:
 
-    elif args.product == "colorir":
-        output_files = produce_colorir(
-            tifs,
-            args.product_type,
-            args.output,
-            gamma=args.gamma,
-        )
-
-    elif args.product == "ndvi":
-        output_files = calc_ndvi(
-            tifs,
-            args.output,
-        )
-
-    elif args.product == "ndwi":
-        output_files = calc_ndwi(
-            tifs,
-            args.output,
-        )
-
-    elif args.product == "evi":
-        output_files = calc_evi(
-            tifs,
-            args.output,
-        )
-
-    # Make sure a single output is also handled correctly.
-    if output_files:
-        if isinstance(output_files, str):
-            output_files = [output_files]
-
-        print("\nConverting outputs to COG...")
-
-        for outfile in output_files:
-            cog_path = convert_to_cog(
-                outfile,
-                nodata=nodata,
-                dst_crs=DST_CRS,
-                compression=COMPRESSION,
-                compression_level=COMPRESSION_LEVEL,
-                metadata=activation_metadata,
+        if args.product == "truecolor":
+            output_files = produce_truecolor(
+                tifs,
+                args.product_type,
+                args.output,
+                gamma=args.gamma,
+                download_dir=download_dir,
             )
 
-            print(f"COG created: {cog_path}")
+        elif args.product == "colorir":
+            output_files = produce_colorir(
+                tifs,
+                args.product_type,
+                args.output,
+                gamma=args.gamma,
+                download_dir=download_dir,
+            )
 
+        elif args.product == "ndvi":
+            output_files = calc_ndvi(
+                tifs,
+                args.output,
+                download_dir=download_dir,
+            )
+
+        elif args.product == "ndwi":
+            output_files = calc_ndwi(
+                tifs,
+                args.output,
+                download_dir=download_dir,
+            )
+
+        elif args.product == "evi":
+            output_files = calc_evi(
+                tifs,
+                args.output,
+                download_dir=download_dir,
+            )
+
+        # Make sure a single output is also handled correctly.
+        if output_files:
+            if isinstance(output_files, str):
+                output_files = [output_files]
+
+            print("\nConverting outputs to COG...")
+
+            for outfile in output_files:
+                cog_path = convert_to_cog(
+                    outfile,
+                    nodata=nodata,
+                    dst_crs=DST_CRS,
+                    compression=COMPRESSION,
+                    compression_level=COMPRESSION_LEVEL,
+                    metadata=activation_metadata,
+                )
+
+                print(f"COG created: {cog_path}")
 
 if __name__ == "__main__":
     main()

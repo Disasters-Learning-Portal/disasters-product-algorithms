@@ -6,6 +6,7 @@ Process Planet SkySat imagery for disaster activations.
 
 import argparse
 import os
+import sys
 
 from skysat.skysat_v2 import (
     LEVEL_TOKEN,
@@ -111,9 +112,14 @@ def main():
 
     print("Retrieving SkySat resources...")
 
-    tifs = retrieve_skysat_resources(
-        args.date
-    )
+    # A bad --date or an undelivered scene is an operator-facing condition, not
+    # a bug: print the message (it names the fix) instead of a traceback.
+    try:
+        tifs = retrieve_skysat_resources(
+            args.date
+        )
+    except (ValueError, FileNotFoundError) as e:
+        sys.exit(f"ERROR: {e}")
 
     print(f"Generating {args.product}...")
 

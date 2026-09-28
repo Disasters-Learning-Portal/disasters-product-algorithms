@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from satellogic.satellogic_v2 import (
     retrieve_satellogic_resources,
@@ -140,11 +141,18 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
+    # Resolve every --date before processing any, so one bad or undelivered
+    # date fails the run up front instead of after earlier dates published.
+    # These are operator-facing conditions: print the message, not a traceback.
+    resolved = []
     for datestring in args.date.split(","):
-    
         print(f"Retrieving Satellogic resources for {datestring}...")
-    
-        metadata, tifs = retrieve_satellogic_resources(datestring, args.level)
+        try:
+            resolved.append(retrieve_satellogic_resources(datestring, args.level))
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(f"ERROR: {e}")
+
+    for metadata, tifs in resolved:
     
         scene_groups = group_satellogic_tifs(tifs)
     

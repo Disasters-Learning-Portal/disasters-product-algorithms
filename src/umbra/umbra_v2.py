@@ -27,9 +27,14 @@ from shared_utils.geotools import *
 from shared_utils.s3utils import *
 from shared_utils.file_naming import create_sar_output_filename
 from shared_utils.product_paths import product_output_dir
+from shared_utils.scene_dates import parse_date_arg, select_scene_date
 
 def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-data-vendor-umbra", prefix : str = "disasters") -> list[str]:
     """Return every Umbra tif for the acquisition closest to ``date``.
+
+    ``date`` is ``YYYY-MM-DD HH:MM:SS``; selection and its errors are
+    :func:`shared_utils.scene_dates.select_scene_date` (closest scene within
+    ``DATE_TOLERANCE``, else ``FileNotFoundError``).
 
     All scene folders whose timestamp matches are pooled into one flat list --
     the old code took only ``selected_subdir[...][0]``, silently dropping any
@@ -40,12 +45,21 @@ def retrieve_umbra_resources(date : Union[str, datetime], bucket : str = "csda-d
     files = retrieve_s3_file_list(bucket, prefix)
     filtered_files = [x for x in files if len(x.split("/")) > 2]
     subdirs = list(set([x.split("/")[2] for x in filtered_files]))
-    dates = [datetime.strptime(x.split('_')[0], "%Y-%m-%d-%H-%M-%S") for x in subdirs]
 
     if type(date) is str:
-        date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+        date = parse_date_arg(date, "%Y-%m-%d %H:%M:%S", "2026-04-18 19:33:05", "Umbra")
 
-    closest_date = min(dates, key=lambda d: abs(d - date))
+    dates = []
+    for subdir in subdirs:
+        try:
+            dates.append(datetime.strptime(subdir.split('_')[0], "%Y-%m-%d-%H-%M-%S"))
+        except ValueError:
+            continue  # folder doesn't carry a parseable acquisition date
+
+    closest_date = select_scene_date(
+        date, dates, "Umbra scene", f"s3://{bucket}/{prefix}/", "%Y-%m-%d %H:%M:%S",
+        hint="Run the list-dates algorithm (sensor=umbra) to see what is available.",
+    )
     date_prefix = closest_date.strftime("%Y-%m-%d-%H-%M-%S")
 
     selected_subdirs = [x for x in subdirs if x.startswith(date_prefix)]

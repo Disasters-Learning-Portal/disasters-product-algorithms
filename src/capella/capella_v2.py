@@ -20,6 +20,7 @@ from shared_utils.geotools import *
 from shared_utils.s3utils import *
 from shared_utils.file_naming import create_sar_output_filename
 from shared_utils.product_paths import product_output_dir
+from shared_utils.scene_dates import parse_date_arg, select_scene_date
 
 
 # Single source of truth for Capella's nodata sentinel: sigmaCalib writes it
@@ -29,23 +30,7 @@ from shared_utils.product_paths import product_output_dir
 # "Capella & Umbra SAR CLIs default -nodata to -9999.0".
 CAPELLA_NODATA = -9999.0
 
-
-def parse_capella_date(date: str) -> datetime:
-    """Parse a ``--date`` string (``YYYYMMDDHHMMSS``), failing with a clear message.
-
-    ``strptime`` alone accepts single-digit fields, so a malformed value such as
-    ``2026092727161906`` surfaced as ``unconverted data remains: 1906``.
-    """
-    try:
-        if len(date) != 14 or not date.isdigit():
-            raise ValueError
-        return datetime.strptime(date, "%Y%m%d%H%M%S")
-    except ValueError:
-        raise ValueError(
-            f"--date {date!r} is not a valid Capella timestamp: expected 14 "
-            "digits, YYYYMMDDHHMMSS (e.g. 20260418193305). Copy the value from "
-            "the list-dates report (sensor=capella)."
-        ) from None
+CAPELLA_DATE_FMT = "%Y%m%d%H%M%S"  # --date and the scene-folder timestamp
 
 
 def retrieve_capella_resources(
@@ -53,15 +38,12 @@ def retrieve_capella_resources(
     bucket: str = "csdap-capellaspace-delivery",
     prefix: str = "disasters"
 ) -> list[str]:
-    """Return every Capella tif for the acquisition at exactly ``date``.
+    """Return every Capella tif for the acquisition closest to ``date``.
 
-    ``date`` must match a scene folder's acquisition timestamp to the second
-    (``YYYYMMDDHHMMSS``, as printed by the ``list-dates`` report). A malformed
-    ``date`` raises ``ValueError``; a well-formed one with no scene in the bucket
-    (typically: the vendor has not delivered it yet) raises
-    ``FileNotFoundError`` naming the nearest scenes that *are* there. It used to
-    fall back to the closest scene, which silently processed a different
-    acquisition when the requested one was missing.
+    ``date`` is ``YYYYMMDDHHMMSS`` (as printed by the ``list-dates`` report).
+    Selection and its errors are :func:`shared_utils.scene_dates.select_scene_date`:
+    the closest scene within ``DATE_TOLERANCE``, else ``FileNotFoundError``
+    (typically: not delivered yet). A malformed ``date`` raises ``ValueError``.
 
     One acquisition can appear under more than one folder (different processing
     levels -- e.g. ``_GEO_`` and ``_SLC_``), so all folders whose timestamp
@@ -77,32 +59,21 @@ def retrieve_capella_resources(
     subdirs = list(set([x.split("/")[1] for x in filtered_files]))
 
     if isinstance(date, str):
-        date = parse_capella_date(date)
+        date = parse_date_arg(date, CAPELLA_DATE_FMT, "20260418193305", "Capella")
 
     dates = []
     for subdir in subdirs:
         try:
-            dates.append(datetime.strptime(subdir.split("_")[5], "%Y%m%d%H%M%S"))
+            dates.append(datetime.strptime(subdir.split("_")[5], CAPELLA_DATE_FMT))
         except (IndexError, ValueError):
             continue  # folder doesn't carry a parseable acquisition date
 
-    date_prefix = date.strftime("%Y%m%d%H%M%S")
-
-    if date not in dates:
-        where = f"s3://{bucket}/{prefix}/"
-        if not dates:
-            raise FileNotFoundError(
-                f"No Capella scenes found under {where} -- the bucket is empty "
-                "or not readable with the current credentials."
-            )
-        nearest = sorted(set(dates), key=lambda d: abs(d - date))[:5]
-        listing = "\n".join(f"  {d:%Y%m%d%H%M%S}" for d in sorted(nearest))
-        raise FileNotFoundError(
-            f"No Capella scene for --date {date_prefix} under {where}. "
-            "The vendor may not have delivered it yet -- check again later, or "
-            "run the list-dates algorithm (sensor=capella) to see what is "
-            f"available. Nearest available dates:\n{listing}"
-        )
+    closest_date = select_scene_date(
+        date, dates, "Capella scene", f"s3://{bucket}/{prefix}/",
+        CAPELLA_DATE_FMT,
+        hint="Run the list-dates algorithm (sensor=capella) to see what is available.",
+    )
+    date_prefix = closest_date.strftime(CAPELLA_DATE_FMT)
 
     selected_subdirs = [x for x in subdirs if x.split("_")[5:6] == [date_prefix]]
 

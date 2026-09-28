@@ -9,6 +9,7 @@ import json
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
 from shared_utils.product_paths import product_output_dir
+from shared_utils.scene_dates import parse_date_arg, select_scene_date
 
 # Constants
 DEFAULT_SCALE_FACTOR = 0.0001
@@ -126,15 +127,23 @@ def retrieve_satellogic_resources(date, level, bucket="csda-data-vendor-satellog
 
     subdirs = sorted(set(x.split("/")[1] for x in filtered_files))
 
-    dates = [
-        datetime.strptime(f"{x.split('_')[0]}_{x.split('_')[1]}", "%Y%m%d_%H%M%S")
-        for x in subdirs
-    ]
-
     if isinstance(date, str):
-        date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+        date = parse_date_arg(date, "%Y-%m-%d %H:%M:%S", "2026-04-18 19:33:05", "Satellogic")
 
-    closest_date = min(dates, key=lambda d: abs(d - date))
+    dates = []
+    for x in subdirs:
+        try:
+            dates.append(datetime.strptime("_".join(x.split("_")[:2]), "%Y%m%d_%H%M%S"))
+        except ValueError:
+            continue  # folder doesn't carry a parseable acquisition date
+
+    # Closest scene within DATE_TOLERANCE, else FileNotFoundError naming the
+    # nearest dates (typically: the vendor hasn't delivered it yet).
+    closest_date = select_scene_date(
+        date, dates, f"Satellogic {level} scene", f"s3://{bucket}/{prefix}/",
+        "%Y-%m-%d %H:%M:%S",
+        hint=f"Run the list-dates algorithm (sensor=satellogic, level={level}) to see what is available.",
+    )
     date_prefix = closest_date.strftime("%Y%m%d_%H%M%S")
 
     selected = [x for x in subdirs if x.startswith(date_prefix)][0]

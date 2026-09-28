@@ -6,6 +6,7 @@ CLI processing for Umbra SAR products
 
 import argparse
 import os
+import sys
 
 from umbra.umbra_v2 import (
     retrieve_umbra_resources,
@@ -98,11 +99,16 @@ def main():
     metadata = load_metadata_json(args.metadata_json)
 
     print("Retrieving Umbra resources...")
-    tifs = retrieve_umbra_resources(
-        date=args.date,
-        bucket=args.bucket,
-        prefix=args.prefix
-    )
+    # A bad --date or an undelivered scene is an operator-facing condition, not
+    # a bug: print the message (it names the fix) instead of a traceback.
+    try:
+        tifs = retrieve_umbra_resources(
+            date=args.date,
+            bucket=args.bucket,
+            prefix=args.prefix
+        )
+    except (ValueError, FileNotFoundError) as e:
+        sys.exit(f"ERROR: {e}")
 
     # One group per GEC band = one genuine scene. Pooled folders may hold other
     # bands/levels; only GEC is calibrated, so grouping by GEC drops the unused

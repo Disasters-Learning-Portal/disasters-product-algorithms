@@ -10,6 +10,7 @@ import rasterio
 from shared_utils.s3utils import *
 from shared_utils.geotools import *
 from shared_utils.product_paths import product_output_dir
+from shared_utils.scene_dates import parse_date_arg, select_scene_date
 
 NODATA_FLOAT = -9999.0
 
@@ -173,17 +174,21 @@ def retrieve_skysat_resources(date: Union[str, datetime], bucket="csdap-planet-s
                 continue
 
             filename = folder_files[0].split("/")[-1]
-            date_string = f"{filename.split('_')[0]}_{filename.split('_')[1]}"
-            acquisition_date = datetime.strptime(date_string, "%Y%m%d_%H%M%S")
+            date_string = "_".join(filename.split("_")[:2])
+            try:
+                acquisition_date = datetime.strptime(date_string, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue  # folder doesn't carry a parseable acquisition date
 
             subdirs[acquisition_date] = f"{prefix}/{event_dir}/{event_subdir}"
 
     if isinstance(date, str):
-        date = datetime.strptime(date, "%Y-%m-%d %H:%M:%S")
+        date = parse_date_arg(date, "%Y-%m-%d %H:%M:%S", "2026-08-12 15:38:02", "SkySat")
 
-    closest_date = min(
-        subdirs,
-        key=lambda d: abs(d - date)
+    # Closest scene within DATE_TOLERANCE, else FileNotFoundError naming the
+    # nearest dates (typically: the vendor hasn't delivered it yet).
+    closest_date = select_scene_date(
+        date, subdirs, "SkySat scene", f"s3://{bucket}/{prefix}/", "%Y-%m-%d %H:%M:%S",
     )
 
     selected = subdirs[closest_date]

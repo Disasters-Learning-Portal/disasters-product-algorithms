@@ -6,6 +6,7 @@ CLI processing for Capella SAR products
 
 import argparse
 import os
+import sys
 
 from capella.capella_v2 import (
     CAPELLA_NODATA,
@@ -79,11 +80,16 @@ def main():
 
     print("Retrieving Capella resources...")
 
-    tifs = retrieve_capella_resources(
-        date=args.date,
-        bucket=CAPELLA_BUCKET,
-        prefix=CAPELLA_PREFIX
-    )
+    # A bad --date or an undelivered scene is an operator-facing condition, not
+    # a bug: print the message (it names the fix) instead of a traceback.
+    try:
+        tifs = retrieve_capella_resources(
+            date=args.date,
+            bucket=CAPELLA_BUCKET,
+            prefix=CAPELLA_PREFIX
+        )
+    except (ValueError, FileNotFoundError) as e:
+        sys.exit(f"ERROR: {e}")
 
     # One group per GEO band = one genuine scene. Folders may hold several
     # processing levels of the same acquisition (GEO, SLC); only GEO is used,

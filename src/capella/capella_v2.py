@@ -30,12 +30,38 @@ from shared_utils.product_paths import product_output_dir
 CAPELLA_NODATA = -9999.0
 
 
+def parse_capella_date(date: str) -> datetime:
+    """Parse a ``--date`` string (``YYYYMMDDHHMMSS``), failing with a clear message.
+
+    ``strptime`` alone accepts single-digit fields, so a malformed value such as
+    ``2026092727161906`` surfaced as ``unconverted data remains: 1906``.
+    """
+    try:
+        if len(date) != 14 or not date.isdigit():
+            raise ValueError
+        return datetime.strptime(date, "%Y%m%d%H%M%S")
+    except ValueError:
+        raise ValueError(
+            f"--date {date!r} is not a valid Capella timestamp: expected 14 "
+            "digits, YYYYMMDDHHMMSS (e.g. 20260418193305). Copy the value from "
+            "the list-dates report (sensor=capella)."
+        ) from None
+
+
 def retrieve_capella_resources(
     date: Union[str, datetime],
     bucket: str = "csdap-capellaspace-delivery",
     prefix: str = "disasters"
 ) -> list[str]:
-    """Return every Capella tif for the acquisition closest to ``date``.
+    """Return every Capella tif for the acquisition at exactly ``date``.
+
+    ``date`` must match a scene folder's acquisition timestamp to the second
+    (``YYYYMMDDHHMMSS``, as printed by the ``list-dates`` report). A malformed
+    ``date`` raises ``ValueError``; a well-formed one with no scene in the bucket
+    (typically: the vendor has not delivered it yet) raises
+    ``FileNotFoundError`` naming the nearest scenes that *are* there. It used to
+    fall back to the closest scene, which silently processed a different
+    acquisition when the requested one was missing.
 
     One acquisition can appear under more than one folder (different processing
     levels -- e.g. ``_GEO_`` and ``_SLC_``), so all folders whose timestamp
@@ -50,16 +76,35 @@ def retrieve_capella_resources(
 
     subdirs = list(set([x.split("/")[1] for x in filtered_files]))
 
-    dates = [datetime.strptime(x.split("_")[5], "%Y%m%d%H%M%S") for x in subdirs]
-
     if isinstance(date, str):
-        date = datetime.strptime(date, "%Y%m%d%H%M%S")
+        date = parse_capella_date(date)
 
-    closest_date = min(dates, key=lambda d: abs(d - date))
+    dates = []
+    for subdir in subdirs:
+        try:
+            dates.append(datetime.strptime(subdir.split("_")[5], "%Y%m%d%H%M%S"))
+        except (IndexError, ValueError):
+            continue  # folder doesn't carry a parseable acquisition date
 
-    date_prefix = closest_date.strftime("%Y%m%d%H%M%S")
+    date_prefix = date.strftime("%Y%m%d%H%M%S")
 
-    selected_subdirs = [x for x in subdirs if x.split("_")[5] == date_prefix]
+    if date not in dates:
+        where = f"s3://{bucket}/{prefix}/"
+        if not dates:
+            raise FileNotFoundError(
+                f"No Capella scenes found under {where} -- the bucket is empty "
+                "or not readable with the current credentials."
+            )
+        nearest = sorted(set(dates), key=lambda d: abs(d - date))[:5]
+        listing = "\n".join(f"  {d:%Y%m%d%H%M%S}" for d in sorted(nearest))
+        raise FileNotFoundError(
+            f"No Capella scene for --date {date_prefix} under {where}. "
+            "The vendor may not have delivered it yet -- check again later, or "
+            "run the list-dates algorithm (sensor=capella) to see what is "
+            f"available. Nearest available dates:\n{listing}"
+        )
+
+    selected_subdirs = [x for x in subdirs if x.split("_")[5:6] == [date_prefix]]
 
     tifs = []
 

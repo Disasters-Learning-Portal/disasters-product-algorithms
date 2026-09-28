@@ -1,0 +1,59 @@
+# =============================================================================
+# OGC Application Package config for the TEMPORARY IAM/Secrets Manager probe —
+# registered via the GitHub Action (.github/workflows/register-dps.yml).
+#
+# DELETE AFTER USE: unregister via dps/delete_algorithm.ipynb (by numeric
+# processID), then revert dps/probe/, this file, and the `probe` entry in the
+# workflow's algorithm dropdown. This is a diagnostic, not a product pipeline.
+#
+# No container field: the Action builds the image from dps/Dockerfile and injects
+# it, so run_command is an ABSOLUTE in-image path (unlike the GUI/maap-py path in
+# dps/probe/algorithm_config.yaml, which is repo-dir-relative because MAAP clones
+# to /app/<repo>/). Both files are kept because they register by different
+# mechanisms; only this one is read by the Action.
+#
+# The input is OGC-optional (`?`) — registrable only via this CLI path, never the
+# GUI — and carries a real default so a bare Submit runs (a falsy default like ""
+# would trip the Submit Job form's "Valid value required" check).
+# =============================================================================
+algorithm_name: disasters-iam-probe
+algorithm_version: dev
+algorithm_description: >-
+  TEMPORARY IAM diagnostic. Prints the DPS worker's AWS identity (role ARN +
+  account), then attempts ONE Secrets Manager read and reports only OK or the
+  error code/message — never the secret value. Reads, writes and publishes no
+  data; exits 0 even on denial. Used to determine whether the DPS worker role can
+  read a cross-account Secrets Manager secret BEFORE building the KMS setup: the
+  secret need not exist, because AWS distinguishes an identity-policy denial
+  ("no identity-based policy allows the secretsmanager:GetSecretValue action")
+  from a missing resource (ResourceNotFoundException).
+keywords: diagnostic, iam, secrets-manager, temporary
+code_repository: https://github.com/Disasters-Learning-Portal/disasters-product-algorithms.git
+citation: NASA Disasters Program
+author: NASA Disasters
+contributor: NASA Disasters
+license: Apache-2.0
+release_notes: Temporary IAM/Secrets Manager reachability probe for the DPS worker role; image built in-workflow from dps/Dockerfile.
+run_command: /app/disasters-product-algorithms/dps/probe/run.sh
+ram_min: 2
+cores_min: 1
+outdir_max: 1
+
+inputs:
+  - name: secret_arn
+    label: Secret ARN to probe
+    doc: >-
+      Full ARN of a us-west-2 Secrets Manager secret to attempt reading. The
+      secret need NOT exist — a made-up ARN in your own account still separates
+      "no identity-based policy allows secretsmanager:GetSecretValue" (the worker
+      role cannot read secrets at all; only MAAP can change that) from
+      ResourceNotFoundException (the action is permitted; proceed to create the
+      customer-managed KMS key, the secret, and its resource policy). Defaulted to
+      a placeholder ARN so a bare Submit answers the question. Blank = print the
+      worker identity only.
+    type: string?
+    default: "arn:aws:secretsmanager:us-west-2:515966502221:secret:disasters/dps/probe-AAAAAA"
+
+outputs:
+  - name: output
+    type: Directory

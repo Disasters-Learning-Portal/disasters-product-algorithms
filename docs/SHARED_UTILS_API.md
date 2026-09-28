@@ -44,6 +44,7 @@ Complete reference for all functions in the `shared_utils` package.
   - [error_handling](#error_handling) - Error recovery and temp file cleanup
   - [log_utils](#log_utils) - Logging and status reporting
   - [parallel](#parallel) - Thread-pool helper for batch loops
+  - [scratch](#scratch) - Per-run download dirs + notebook OUTPUT_DIR reset
 - [Legacy / Geospatial Tools](#legacy--geospatial-tools)
   - [geotools](#geotools) - GDAL-based raster utilities
 
@@ -927,6 +928,42 @@ internally uses `NUM_THREADS=ALL_CPUS` — N workers × all-cores → thrash.
 order preservation, per-item exception capture, true concurrency,
 `max_workers=1` sequential degenerate case, empty-input safety,
 iterable (not just list) acceptance.
+
+---
+
+### scratch
+
+Throwaway local directories. Exists because /tmp on hub pods filled up run
+after run: the vendor CLIs downloaded raw scenes into a shared `/tmp/s3_temp`
+that nothing deleted, and the workflow notebooks kept (and re-uploaded) every
+earlier run's COGs in `OUTPUT_DIR`. See [`.clinerules.md`](../.clinerules.md) rule 61.
+
+#### `download_scratch(prefix)` (context manager)
+
+```python
+from shared_utils.scratch import download_scratch
+
+with download_scratch("capella") as download_dir:
+    outfile, _ = sigmaCalib(scene_tifs, save_location=out, download_dir=download_dir)
+    convert_to_cog(outfile, ...)
+# download_dir is gone here -- after success, an exception, or Ctrl-C.
+```
+
+A fresh `tempfile.mkdtemp(prefix="<prefix>_dl_")`, removed in `finally`. Every
+vendor CLI (`process_capella`/`umbra`/`skysat`/`satellogic`) wraps its run in
+one and passes `download_dir=` to the library, whose functions otherwise keep
+their `"/tmp/s3_temp"` default (testing notebooks, iceye).
+
+#### `reset_output_dir(path) -> path`
+
+Empties (or creates) `path` and prints what it removed. **Refuses** anything not
+strictly inside a temp directory (`tempfile.gettempdir()` or `/tmp`, after
+resolving symlinks) -- including the temp root itself -- so an OUTPUT_DIR pointed
+at a real folder is never wiped. The four vendor workflow notebooks call it at
+the top of their processing cell.
+
+Pinned by [`tests/unit/test_scratch.py`](../tests/unit/test_scratch.py) and
+[`tests/unit/test_vendor_download_cleanup.py`](../tests/unit/test_vendor_download_cleanup.py).
 
 ---
 

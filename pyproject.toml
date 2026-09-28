@@ -60,6 +60,7 @@ process_skysat = "skysat.cli:process_skysat_cli"
 process_umbra = "umbra.cli:process_umbra_cli"
 process_capella = "capella.cli:process_capella_cli"
 summarize_raster = "raster_tools.cli:summarize_raster_cli"
+fix_cog_overviews = "raster_tools.cli:fix_cog_overviews_cli"
 
 [project.urls]
 Homepage = "https://github.com/klesinger/disasters-product-algorithms"

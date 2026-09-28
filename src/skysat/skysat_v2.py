@@ -232,7 +232,8 @@ def print_skysat_stats(name, array):
         print(f"  {name:6s} → No valid data.")
 
 
-def udm_mask(s3_image_paths: list[str], image_filepath: str, bands: list[np.ndarray]):
+def udm_mask(s3_image_paths: list[str], image_filepath: str, bands: list[np.ndarray],
+             download_dir: str = "/tmp/s3_temp"):
     """
     Apply the UDM2 mask corresponding to the specific SkySat image.
     u0001/u0002 identify different scenes, not TOA/SFC.
@@ -255,7 +256,7 @@ def udm_mask(s3_image_paths: list[str], image_filepath: str, bands: list[np.ndar
         print(f"  [!] UDM2 file not found for {image_name}. Skipping mask step.")
         return bands
 
-    in_file = fetch_local(udm_filepaths[0])
+    in_file = fetch_local(udm_filepaths[0], download_dir)
 
     with rasterio.open(in_file) as udm_src:
         clear = udm_src.read(UDM_CLEAR_BAND).astype(np.float32)
@@ -369,109 +370,113 @@ def georeference_rgb_with_rpc(
     # Temporary RGB file before RPC orthorectification
     temp_rgb = f"{outfile}.tmp.tif"
 
-    print("  Creating temporary RGB image...")
-
-    driver = gdal.GetDriverByName("GTiff")
-
-    out_ds = driver.Create(
-        temp_rgb,
-        cols,
-        rows,
-        3,
-        gdal.GDT_Byte,
-        options=[
-            "COMPRESS=LZW",
-            "TILED=YES"
-        ]
-    )
-
-    if out_ds is None:
-        raise RuntimeError(f"Could not create temporary RGB file: {temp_rgb}")
-
-    # Write RGB bands
-    out_ds.GetRasterBand(1).WriteArray(band1)
-    out_ds.GetRasterBand(2).WriteArray(band2)
-    out_ds.GetRasterBand(3).WriteArray(band3)
-
-    # Set color interpretation
-    out_ds.GetRasterBand(1).SetColorInterpretation(gdal.GCI_RedBand)
-    out_ds.GetRasterBand(2).SetColorInterpretation(gdal.GCI_GreenBand)
-    out_ds.GetRasterBand(3).SetColorInterpretation(gdal.GCI_BlueBand)
-
-    out_ds.FlushCache()
-    out_ds = None
-
-    # ---------------------------------------------------------
-    # Copy RPC metadata from original SkySat image
-    # ---------------------------------------------------------
-
-    print("  Copying RPC metadata...")
-
-    src_ds = gdal.Open(in_file)
-
-    if src_ds is None:
-        raise RuntimeError(f"Could not open source file: {in_file}")
-
-    rpc_metadata = src_ds.GetMetadata("RPC")
-
-    if not rpc_metadata:
-        src_ds = None
-        raise ValueError(
-            "No RPC metadata found in the SkySat source image."
-        )
-
-    rgb_ds = gdal.Open(temp_rgb, gdal.GA_Update)
-
-    if rgb_ds is None:
-        src_ds = None
-        raise RuntimeError(
-            f"Could not reopen temporary RGB file: {temp_rgb}"
-        )
-
-    rgb_ds.SetMetadata(rpc_metadata, "RPC")
-
-    rgb_ds.FlushCache()
-    rgb_ds = None
-    src_ds = None
-
-    # ---------------------------------------------------------
-    # RPC orthorectification
-    # ---------------------------------------------------------
-
-    print("  Orthorectifying using SkySat RPC metadata...")
-
-    warp_options = gdal.WarpOptions(
-        format="GTiff",
-        rpc=True,
-        dstSRS="EPSG:4326",
-        resampleAlg="bilinear",
-        creationOptions=[
-            "COMPRESS=LZW",
-            "TILED=YES"
-        ]
-    )
-
-    result = gdal.Warp(
-        outfile,
-        temp_rgb,
-        options=warp_options
-    )
-
-    if result is None:
-        raise RuntimeError(
-            "GDAL RPC orthorectification failed."
-        )
-
-    result.FlushCache()
-    result = None
-
-    # Remove temporary file
+    # Everything below writes or reads the full-size temp RGB, and several steps
+    # raise; the removal is in `finally` so a failed or interrupted run can't
+    # leave it behind in the output directory.
     try:
-        os.remove(temp_rgb)
-    except OSError:
-        pass
+        print("  Creating temporary RGB image...")
+
+        driver = gdal.GetDriverByName("GTiff")
+
+        out_ds = driver.Create(
+            temp_rgb,
+            cols,
+            rows,
+            3,
+            gdal.GDT_Byte,
+            options=[
+                "COMPRESS=LZW",
+                "TILED=YES"
+            ]
+        )
+
+        if out_ds is None:
+            raise RuntimeError(f"Could not create temporary RGB file: {temp_rgb}")
+
+        # Write RGB bands
+        out_ds.GetRasterBand(1).WriteArray(band1)
+        out_ds.GetRasterBand(2).WriteArray(band2)
+        out_ds.GetRasterBand(3).WriteArray(band3)
+
+        # Set color interpretation
+        out_ds.GetRasterBand(1).SetColorInterpretation(gdal.GCI_RedBand)
+        out_ds.GetRasterBand(2).SetColorInterpretation(gdal.GCI_GreenBand)
+        out_ds.GetRasterBand(3).SetColorInterpretation(gdal.GCI_BlueBand)
+
+        out_ds.FlushCache()
+        out_ds = None
+
+        # ---------------------------------------------------------
+        # Copy RPC metadata from original SkySat image
+        # ---------------------------------------------------------
+
+        print("  Copying RPC metadata...")
+
+        src_ds = gdal.Open(in_file)
+
+        if src_ds is None:
+            raise RuntimeError(f"Could not open source file: {in_file}")
+
+        rpc_metadata = src_ds.GetMetadata("RPC")
+
+        if not rpc_metadata:
+            src_ds = None
+            raise ValueError(
+                "No RPC metadata found in the SkySat source image."
+            )
+
+        rgb_ds = gdal.Open(temp_rgb, gdal.GA_Update)
+
+        if rgb_ds is None:
+            src_ds = None
+            raise RuntimeError(
+                f"Could not reopen temporary RGB file: {temp_rgb}"
+            )
+
+        rgb_ds.SetMetadata(rpc_metadata, "RPC")
+
+        rgb_ds.FlushCache()
+        rgb_ds = None
+        src_ds = None
+
+        # ---------------------------------------------------------
+        # RPC orthorectification
+        # ---------------------------------------------------------
+
+        print("  Orthorectifying using SkySat RPC metadata...")
+
+        warp_options = gdal.WarpOptions(
+            format="GTiff",
+            rpc=True,
+            dstSRS="EPSG:4326",
+            resampleAlg="bilinear",
+            creationOptions=[
+                "COMPRESS=LZW",
+                "TILED=YES"
+            ]
+        )
+
+        result = gdal.Warp(
+            outfile,
+            temp_rgb,
+            options=warp_options
+        )
+
+        if result is None:
+            raise RuntimeError(
+                "GDAL RPC orthorectification failed."
+            )
+
+        result.FlushCache()
+        result = None
+    finally:
+        try:
+            os.remove(temp_rgb)
+        except OSError:
+            pass
 
     print(f"  RPC georeferencing completed: {outfile}")
+
 
 def _ndvi(nir, red):
     denom = nir + red
@@ -501,21 +506,21 @@ _INDEX_FORMULAS = {
 }
 
 
-def _calc_index(product, s3_image_paths, save_location):
+def _calc_index(product, s3_image_paths, save_location, download_dir):
     roles, formula = _INDEX_FORMULAS[product]
     output_files = []
 
     for in_filepath in get_skysat_product_files(s3_image_paths, "analytic"):
         print(f"\nGenerating {product} for {in_filepath}")
 
-        ds = gdal.Open(fetch_local(in_filepath))
+        ds = gdal.Open(fetch_local(in_filepath, download_dir))
         if ds is None:
             raise RuntimeError(f"Could not open SkySat file: {in_filepath}")
         in_geo = ds.GetGeoTransform()
         projref = ds.GetProjectionRef()
 
         bands = load_reflectance(ds, roles)
-        bands = udm_mask(s3_image_paths, in_filepath, bands)
+        bands = udm_mask(s3_image_paths, in_filepath, bands, download_dir)
 
         with np.errstate(invalid="ignore", divide="ignore"):
             index = formula(*bands).astype(np.float32)
@@ -531,26 +536,30 @@ def _calc_index(product, s3_image_paths, save_location):
     return output_files
 
 
-def calc_ndvi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp"):
-    return _calc_index("NDVI", s3_image_paths, save_location)
+def calc_ndvi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp",
+              download_dir: str = "/tmp/s3_temp"):
+    return _calc_index("NDVI", s3_image_paths, save_location, download_dir)
 
 
-def calc_evi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp"):
-    return _calc_index("EVI", s3_image_paths, save_location)
+def calc_evi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp",
+              download_dir: str = "/tmp/s3_temp"):
+    return _calc_index("EVI", s3_image_paths, save_location, download_dir)
 
 
-def calc_ndwi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp"):
-    return _calc_index("NDWI", s3_image_paths, save_location)
+def calc_ndwi(s3_image_paths: list[str], save_location: str = "/tmp/s3_temp",
+              download_dir: str = "/tmp/s3_temp"):
+    return _calc_index("NDWI", s3_image_paths, save_location, download_dir)
 
 
-def _produce_composite(product, roles, s3_image_paths, product_type, save_location, gamma):
+def _produce_composite(product, roles, s3_image_paths, product_type, save_location, gamma,
+                       download_dir):
     """Write an 8-bit 3-band composite whose output channels are ``roles`` in order."""
     output_files = []
 
     for in_filepath in get_skysat_product_files(s3_image_paths, product_type):
         print(f"\nProcessing {product}: {in_filepath}")
 
-        in_file = fetch_local(in_filepath)
+        in_file = fetch_local(in_filepath, download_dir)
         ds = gdal.Open(in_file)
         if ds is None:
             raise RuntimeError(f"Could not open SkySat file: {in_file}")
@@ -593,10 +602,11 @@ def produce_truecolor(
     product_type: Literal["visual", "analytic", "basic_analytic"],
     save_location: str = "/tmp/s3_temp",
     gamma: float = 2.2,
+    download_dir: str = "/tmp/s3_temp",
 ):
     return _produce_composite(
         "TrueColor", ("red", "green", "blue"),
-        s3_image_paths, product_type, save_location, gamma,
+        s3_image_paths, product_type, save_location, gamma, download_dir,
     )
 
 
@@ -605,6 +615,7 @@ def produce_colorir(
     product_type: Literal["analytic", "basic_analytic"],
     save_location: str = "/tmp/s3_temp",
     gamma: float = 2.2,
+    download_dir: str = "/tmp/s3_temp",
 ):
     if product_type == "visual":
         raise ValueError(
@@ -614,5 +625,5 @@ def produce_colorir(
     # Color IR = NIR, Red, Green.
     return _produce_composite(
         "ColorIR", ("nir", "red", "green"),
-        s3_image_paths, product_type, save_location, gamma,
+        s3_image_paths, product_type, save_location, gamma, download_dir,
     )

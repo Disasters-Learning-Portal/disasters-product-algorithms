@@ -8,11 +8,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 import rasterio
 import numpy as np
 import re
 from datetime import datetime
-from typing import Dict, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple
 
 
 _INTEGER_DTYPE_DEFAULTS = {
@@ -196,6 +197,582 @@ def validate_nodata_for_dtype(nodata: Union[int, float], dtype: str) -> dict:
     return {'valid': True, 'error': None}
 
 
+# Most distinct values a band may hold and still be called categorical.
+#
+# Chosen from a native (exact, whole-raster) histogram of 20 real products,
+# band 1, nodata excluded:
+#
+#   categorical: 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 5, 5, 5, 6, 7   -> max   7
+#   continuous:  66, 178, >5000, >5000, >5000                  -> min  66
+#
+# The two populations separate cleanly, and 32 sits inside the gap. It is not
+# set lower because real class schemes run past 16 -- MODIS IGBP land cover has
+# 17 classes, NLCD 20 -- and calling those continuous would average class codes,
+# which is the exact bug this detector exists to prevent. It is not set higher
+# because OPERA DIST-ALERT VEG-ANOM-MAX, the nearest continuous product, holds
+# 66. Margin: 4.6x below, 2.1x above.
+MAX_CATEGORICAL_VALUES = 32
+
+# Sampling budget. Under-sampling can only find FEWER distinct values, i.e. it
+# can only push a verdict toward 'categorical' -- the dangerous direction -- so
+# the budget is sized against the tightest real case rather than for speed.
+# Measured on VEG-ANOM-MAX (66 native values, 9984x9984): a 64-block sample
+# recovers all 66, a 32-block sample 62, and a 16-block sample only 32, which
+# would tie the threshold and misfire. 128 doubles the margin on that file and
+# still costs ~100 ms on a 1.5 Gpx raster.
+_SAMPLE_MAX_BLOCKS = 128
+
+# ...and enough blocks to cover this many pixels, for rasters whose blocks are
+# small (a striped GeoTIFF's "block" is one row, so a block count alone would
+# sample a sliver).
+_SAMPLE_TARGET_PIXELS = 2_000_000
+
+# Below this many valid pixels the sample is not evidence of anything, so the
+# detector says so instead of guessing.
+#
+# Deliberately small. It guards one narrow case -- a raster whose sample is
+# essentially all nodata -- and NOT "sparse data". Categorical products are
+# routinely sparse: a 256x256 crop of OPERA DIST-ALERT VEG-DIST-STATUS holds
+# 2,135 valid pixels because only disturbed pixels carry a code at all, and an
+# earlier 4,096-pixel floor called that 'unknown' and handed it back AVERAGE --
+# the exact bug this detector exists to stop. The case the floor is imagined to
+# catch (continuous data mistaken for categorical) needs few valid pixels AND
+# few distinct values among them, i.e. a raster that really does hold a handful
+# of values, where `mode` cannot invent a code anyway.
+_SAMPLE_MIN_VALID_PIXELS = 256
+
+# Share of a coarsest overview that must be made of codes absent from the band
+# before `audit_cog_output` calls the overviews averaged. Guards against a rare
+# native class that the block sample missed; see the call site.
+_AVERAGED_OVERVIEW_SHARE_PCT = 1.0
+
+CATEGORICAL = 'categorical'
+CONTINUOUS = 'continuous'
+UNKNOWN = 'unknown'
+
+
+# =============================================================================
+# FILENAME TOKEN TABLES -- a CROSS-CHECK on the pixels, never the primary signal
+# =============================================================================
+#
+# READ THIS BEFORE EDITING, AND DO NOT "SIMPLIFY" THIS INTO FILENAME-ONLY
+# MATCHING. Four measured counter-examples, all from real staged products, say
+# why the name cannot be authoritative:
+#
+#   1. `UAVSAR_Grayscale_flight25023_mosaic_2025-07-09_day.tif`
+#      "Grayscale" reads as continuous imagery. The pixels are five class
+#      codes -- 0, 29, 76, 150, 173 -- the SAME palette as the UNetClassified
+#      grayscale product. It is CATEGORICAL. This is why there is no `gray`
+#      token in either table: adding one gets this file exactly backwards.
+#      With the tables as they stand the filename has NO opinion here, which
+#      is the correct answer, and the pixels decide.
+#
+#   2. `ClassifiedUAVSARI_CopyRas_2025-07_monthly.tif`
+#      The name says "Classified" and it genuinely is a classified product,
+#      but the pixels are 98.87% 0 / 1.13% 255 with no other code and no color
+#      table -- the classification was flattened, most likely by an ArcGIS
+#      Copy Raster export that dropped the color table. Here the NAME is right
+#      and the DATA is broken. Both layers say categorical, so the resampling
+#      is fine and no disagreement alarm fires; `_warn_if_classification_looks_flattened`
+#      is what surfaces this one, because the resampling verdict cannot.
+#
+#   3. `OPERA_DSWx-S1_BWTR_ChngMap_date1_2024-10-03_to_2024-10-11_day.tif`
+#      Float32 holding exactly {-1, 0, +1}. CATEGORICAL. Neither the dtype nor
+#      the token `ChngMap` tells you that on its own -- the pixel rule (all
+#      sampled values integral, <= MAX_CATEGORICAL_VALUES) is what gets it.
+#
+#   4. `ProgramData/OPERA/DistAlert/` holds `*VEG-DIST-STATUS*` (6 class codes,
+#      categorical) and `*VEG-ANOM-MAX*` (66 values over 10..255, continuous)
+#      SIDE BY SIDE. Any rule keyed on directory or collection gets one wrong.
+#      The names differ only in the middle, which is why these are substring
+#      tokens and not a per-product lookup.
+#
+# Two more encoded deliberately:
+#   * `predicted_score` comes out of a U-Net but is Float32 continuous, so
+#     `unet` alone is NOT a categorical token -- only `unet_class` is.
+#   * `dnbr/` is continuous float while its sibling `dnbr/dnbrColor/` is a
+#     3-band colourised version with 5 discrete levels per band. See
+#     `_COLOURISED_SUFFIXES` below.
+#
+# Matching is a case-insensitive SUBSTRING test against the basename, so
+# `wtr` deliberately also matches `BWTR`, and `class` matches `classified`,
+# `reclassified` and `Combined_classification`.
+#
+# Verified against all 32 real samples: no filename matches tokens from both
+# tables, and the only name-vs-pixel disagreement is the dNBR colour sibling
+# handled by _COLOURISED_SUFFIXES.
+
+CATEGORICAL_FILENAME_TOKENS = (
+    'class', 'classified', 'unet_class', 'quicklook_class',
+    'combined_classification', 'cloudmask', 'dist-status', 'veg-dist-status',
+    'gen-dist-status', 'hls-dist-status', 'wtr', 'bwtr', 'chngmap',
+    'reclassified_wm', 'dmgassessment', 'damage', 'disturbance_track', 'qc',
+    'floodmap',
+)
+
+CONTINUOUS_FILENAME_TOKENS = (
+    'anom-max', 'ndvi', 'ndwi', 'mndwi', 'nbr', 'dnbr', 'lst', 'backscatter',
+    'displacement', 'disp', 'truecolor', 'colorir', 'naturalcolor', 'rgb',
+    'panchromatic', 'brdf', 'imerg', 'gec', 'pca', 'predicted_score',
+    'charash',
+)
+
+# A continuous INDEX token plus a colour word anywhere in the name is the
+# COLOURISED SIBLING of a continuous product (`dnbr/` -> `dnbr/dnbrColor/`).
+# Its kind depends on whether the colour ramp is discrete or smooth, which only
+# the pixels know, so the filename layer withholds its opinion rather than
+# asserting `continuous` and raising a false alarm on every such product.
+# Measured: the AV3 dNBR colour sibling has 5 discrete levels per band and the
+# pixel layer correctly calls it categorical.
+#
+# Matched TOKEN-WISE, not as a suffix: the real name is
+# `..._dNBR_866nm_2198nm_color_2024-09-05_..._day.tif`, so the colour word sits
+# in the middle with the dates after it. A `str.endswith` test finds nothing
+# here -- that was the first version of this rule and it silently did nothing.
+_COLOUR_WORDS = ('color', 'colored', 'colour', 'coloured', 'colorised',
+                 'colorized')
+
+# ...but these continuous tokens ARE colour imagery in their own right, and
+# must keep their `continuous` opinion. Without this carve-out `truecolor`
+# would trip the colourised-sibling rule against itself, since it ends in
+# "color".
+_COLOUR_IMAGERY_TOKENS = frozenset({'truecolor', 'colorir', 'naturalcolor', 'rgb'})
+
+# The flattened-classification notice fires only on the `class` family, not on
+# every categorical token. Gating it on the whole table produced three false
+# positives out of four hits on the real samples -- `FloodMap` and
+# `dmgassessment`/`damage` layers are LEGITIMATELY single-code and sparse, and
+# an alarm that is wrong three times in four is one nobody reads. On the class
+# family it is exact: of the six `class*`-named samples only the flattened one
+# has a single valid value.
+_FLATTENED_CHECK_TOKENS = ('class', 'classified', 'classification')
+
+
+def _has_colour_word(stem: str) -> bool:
+    """True when a colour word appears as its own token or ends one.
+
+    Token-wise so `..._color_2024-09-05_...` matches, and suffix-wise on each
+    token so the camelCase `dNBRColor` (which lowercases to one token,
+    `dnbrcolor`) matches too.
+    """
+    for token in re.split(r'[^a-z0-9]+', stem):
+        if token in _COLOUR_WORDS or token.endswith(_COLOUR_WORDS):
+            return True
+    return False
+
+
+def filename_data_kind(name: str) -> Optional[str]:
+    """What the FILENAME claims this raster is. A cross-check, not a verdict.
+
+    Args:
+        name: A filename or path; only the basename is examined.
+
+    Returns:
+        ``CATEGORICAL``, ``CONTINUOUS``, or ``None`` for "no opinion".
+
+    ``None`` is a first-class answer and is returned whenever the evidence is
+    not one-sided: no token matched, tokens from BOTH tables matched, or the
+    name is a colourised sibling (see ``_COLOURISED_SUFFIXES``). Five of the
+    32 real samples land here, including `UAVSAR_Grayscale...`, and that is
+    the design working -- a wrong guess is worse than no guess, because the
+    pixel layer is already correct on all of them.
+
+    See the token tables above for the counter-examples that forbid treating
+    this as authoritative.
+    """
+    stem = os.path.splitext(os.path.basename(name))[0].lower()
+
+    categorical_hits = [t for t in CATEGORICAL_FILENAME_TOKENS if t in stem]
+    continuous_hits = [t for t in CONTINUOUS_FILENAME_TOKENS if t in stem]
+
+    index_hits = [t for t in continuous_hits if t not in _COLOUR_IMAGERY_TOKENS]
+    if index_hits and _has_colour_word(stem):
+        return None  # colourised sibling; only the pixels can say
+
+    if categorical_hits and not continuous_hits:
+        return CATEGORICAL
+    if continuous_hits and not categorical_hits:
+        return CONTINUOUS
+    return None
+
+
+def _warn_if_classification_looks_flattened(src_path: str, distinct_values: int) -> None:
+    """Loud notice for a product whose NAME says classification and whose
+    PIXELS hold one value.
+
+    This is the `ClassifiedUAVSARI_CopyRas` case (counter-example 2): the name
+    is right, the data is broken, and both the filename and the pixel layer
+    agree on `categorical`, so the disagreement alarm cannot see it. Resampling
+    is not the problem here -- the lost classification is -- and nothing else
+    in the pipeline would ever mention it.
+
+    Gated on <= 1 distinct valid value so a legitimate binary mask (two codes)
+    does not trip it.
+    """
+    stem = os.path.splitext(os.path.basename(src_path))[0].lower()
+    if distinct_values <= 1 and any(t in stem for t in _FLATTENED_CHECK_TOKENS):
+        print(
+            f"  WARNING: {os.path.basename(src_path)} is named as a "
+            f"classification but holds {distinct_values} distinct valid "
+            f"value(s) and no color table. Its classes look FLATTENED -- an "
+            f"ArcGIS Copy Raster export dropping the color table does exactly "
+            f"this. Resampling is unaffected; the source is the problem."
+        )
+
+
+def resolve_data_kind(src_path: str, quiet: bool = True) -> str:
+    """Pixel verdict, cross-checked against the filename.
+
+    The pixels are primary and always win. The filename does two jobs and only
+    these two:
+
+    1. **Tie-breaker** when ``detect_data_kind`` returns ``UNKNOWN``.
+    2. **Disagreement alarm.** When the name strongly implies one kind and the
+       pixels say the other, say so LOUDLY and keep the pixel answer. That
+       disagreement is usually a data problem worth surfacing -- a product
+       filed under the wrong name, or a render that is not what it claims --
+       not a detection problem to paper over.
+
+    Args:
+        src_path: Raster to classify.
+        quiet: Suppress the informational lines. The disagreement alarm and
+            the flattened-classification notice print regardless; they exist
+            to be seen.
+
+    Returns:
+        ``CATEGORICAL``, ``CONTINUOUS`` or ``UNKNOWN``.
+    """
+    pixel_kind, values = _inspect_data_kind(src_path)
+    name_kind = filename_data_kind(src_path)
+
+    if values is not None:
+        _warn_if_classification_looks_flattened(src_path, len(values))
+
+    if pixel_kind == UNKNOWN:
+        if name_kind is not None:
+            if not quiet:
+                print(
+                    f"  Data kind: {name_kind} (pixels inconclusive; taken "
+                    f"from the filename)"
+                )
+            return name_kind
+        return UNKNOWN
+
+    if name_kind is not None and name_kind != pixel_kind:
+        print(
+            f"  WARNING: {os.path.basename(src_path)} reads as '{name_kind}' "
+            f"by filename but its PIXELS are '{pixel_kind}'. Using "
+            f"'{pixel_kind}' -- the pixels are authoritative. Check whether "
+            f"this product is named correctly; a disagreement here is usually "
+            f"a data problem, not a detection one."
+        )
+
+    return pixel_kind
+
+
+def _sample_band_values(src):
+    """Distinct values of band 1 from a stride-selected block sample.
+
+    Shared by the detector and by ``audit_cog_output`` so both look at the
+    raster the same way. Stops early once more than ``MAX_CATEGORICAL_VALUES``
+    distinct values have been seen -- nothing past that changes any caller's
+    decision, and it is what makes a continuous raster cost one or two blocks.
+
+    Returns:
+        ``(values, valid_pixels, exceeded_threshold)``. ``values`` is ``None``
+        only when the raster has no blocks at all. When ``exceeded_threshold``
+        is True the set is PARTIAL -- it was abandoned at the threshold -- so
+        callers must not treat it as the raster's full value set.
+    """
+    dtype = str(src.dtypes[0]).lower()
+    is_float = dtype.startswith(('float', 'complex'))
+    nodata = src.nodata
+
+    windows = [window for _, window in src.block_windows(1)]
+    if not windows:
+        return None, 0, False
+
+    block_pixels = max(1, windows[0].width * windows[0].height)
+    budget = max(
+        _SAMPLE_MAX_BLOCKS,
+        -(-_SAMPLE_TARGET_PIXELS // block_pixels),  # ceil division
+    )
+    if len(windows) > budget:
+        stride = len(windows) / budget
+        windows = [windows[int(i * stride)] for i in range(budget)]
+
+    values = set()
+    valid_pixels = 0
+    for window in windows:
+        band = src.read(1, window=window).ravel()
+        if is_float:
+            band = band[np.isfinite(band)]
+        if nodata is not None:
+            band = band[band != nodata]
+        valid_pixels += band.size
+        if band.size:
+            values.update(np.unique(band).tolist())
+        if len(values) > MAX_CATEGORICAL_VALUES:
+            return values, valid_pixels, True
+
+    return values, valid_pixels, False
+
+
+def _inspect_data_kind(src_path: str) -> Tuple[str, Optional[set]]:
+    """
+    Decide whether a raster holds class codes or a continuous measurement.
+
+    This is what picks `mode` over `average` for overviews. Averaging class
+    codes invents codes that are not in the data -- an OPERA DSWx WTR mosaic
+    holding {0, 1, 3, 251, 255} came back with all 256 codes in its coarsest
+    AVERAGE overview, 1.18% of it class 2 == (1 + 3) / 2 -- and titiler renders
+    the overview, so that is what the portal shows.
+
+    Args:
+        src_path: Anything rasterio can open, including a /vsis3/ path.
+
+    Returns:
+        ``'categorical'``, ``'continuous'``, or ``'unknown'``. Callers must
+        treat ``'unknown'`` as "no verdict" and fall back, never as a synonym
+        for either answer.
+
+    Decision rule, in order:
+
+    1. A GDAL color table (or a palette color interpretation) means the pixel
+       values ARE indices into a legend. Categorical, with no pixel read.
+    2. Otherwise count distinct valid values in band 1 (see sampling below).
+       More than ``MAX_CATEGORICAL_VALUES`` -> continuous.
+    3. At or below the threshold on an INTEGER dtype -> categorical.
+    4. At or below the threshold on a FLOAT dtype -> categorical only if every
+       sampled value is a whole number. This is the case that forbids the
+       "float means continuous" shortcut: OPERA DSWx change maps are Float32
+       holding exactly {-1, 0, +1}, and treating those as continuous averages
+       "no change" and "decrease" into codes that mean nothing. A float band
+       with a handful of NON-integral values is not a class map, so that
+       returns ``'unknown'`` rather than a guess.
+    5. A sample that is essentially all nodata, or any read failure ->
+       ``'unknown'``.
+
+    Rule 2 settles the matter on its own when it fires: a count ABOVE the
+    threshold is positive evidence and is not second-guessed by the valid-pixel
+    floor in rule 5, which only qualifies the low-count branch. That ordering is
+    load-bearing for sparse continuous products -- a VEG-ANOM-MAX crop with 64
+    distinct values in only 2,072 valid pixels is continuous on the strength of
+    the 64.
+
+    Band 1 only. For a multi-band product the bands are the same kind of thing
+    -- an RGB render, an RGBA class quicklook -- so band 1 is representative,
+    and reading three or four bands to re-derive the same verdict is waste.
+
+    WHAT IS SAMPLED, AND WHY IT IS ENOUGH
+    -------------------------------------
+    Whole blocks, strided evenly across the block grid, never a contiguous
+    corner: at least ``_SAMPLE_MAX_BLOCKS`` of them and at least
+    ``_SAMPLE_TARGET_PIXELS`` pixels, capped at the whole raster. Counting
+    stops as soon as more than ``MAX_CATEGORICAL_VALUES`` distinct values have
+    been seen, since nothing past that changes the verdict -- which is why a
+    continuous raster is usually decided from one or two blocks.
+
+    Reading whole blocks (rather than a decimated window) means each read is
+    one already-compressed tile, and striding means a mosaic whose data sits in
+    one corner is still sampled there. Measured cost on the largest raster to
+    hand, a 39680x38912 OPERA DSWx WTR mosaic: 104 ms, reading 33.5 Mpx =
+    2.2% of the raster. The cheapest was 0.9 ms (a palette file, header only).
+
+    On a /vsis3/ input this is ~128 ranged GETs. That is bounded, happens once,
+    and the conversion that follows reads every byte of the raster anyway.
+
+    NOT used: the filename. `determine_resampling_method` still falls back to
+    filename keywords when this returns ``'unknown'``, but pixel evidence
+    outranks the name -- two products in ONE directory can need opposite
+    resampling (``OPERA/DistAlert/`` holds VEG-DIST-STATUS with 6 class codes
+    and VEG-ANOM-MAX with 66 continuous values), so the verdict has to be
+    per-file.
+    """
+    try:
+        with rasterio.open(src_path) as src:
+            from rasterio.enums import ColorInterp
+
+            if src.colorinterp[0] == ColorInterp.palette:
+                return CATEGORICAL, None
+            try:
+                if src.colormap(1):
+                    return CATEGORICAL, None
+            except ValueError:
+                pass  # no color table on this band
+
+            dtype = str(src.dtypes[0]).lower()
+            is_float = dtype.startswith(('float', 'complex'))
+            nodata = src.nodata
+
+            values, valid_pixels, exceeded = _sample_band_values(src)
+            if values is None:
+                return UNKNOWN, None
+            if exceeded:
+                return CONTINUOUS, values
+
+            if valid_pixels < _SAMPLE_MIN_VALID_PIXELS:
+                return UNKNOWN, values
+            if is_float and not all(float(v).is_integer() for v in values):
+                return UNKNOWN, values
+            return CATEGORICAL, values
+
+    except Exception as e:
+        print(f"  Warning: Could not detect data kind for {src_path}: {e}")
+        return UNKNOWN, None
+
+
+def detect_data_kind(src_path: str) -> str:
+    """The PIXEL verdict alone: ``categorical``, ``continuous`` or ``unknown``.
+
+    This is the primary signal and is deliberately kept free of any filename
+    influence, so it stays independently testable and so the cross-check in
+    ``resolve_data_kind`` is comparing two genuinely independent opinions.
+    Callers that want the cross-check want ``resolve_data_kind``.
+
+    See ``_inspect_data_kind`` for the rule and the sampling budget.
+    """
+    return _inspect_data_kind(src_path)[0]
+
+
+def audit_cog_output(
+    path: str,
+    data_kind: Optional[str] = None,
+    blocksize: int = 512,
+) -> List[str]:
+    """Check a finished COG for the defect classes we have actually shipped.
+
+    Every defect this exists to catch was found MONTHS later, in a rendered
+    map, by a human noticing something wrong in a portal. Each one is cheap to
+    see in the output file the moment it is written, so it is checked here
+    instead.
+
+    Args:
+        path: The COG that was just written.
+        data_kind: ``CATEGORICAL`` / ``CONTINUOUS`` if already known, else it
+            is derived from the output.
+        blocksize: The block size the overview-count rule is measured against.
+
+    Returns:
+        A list of human-readable problems. Empty means clean.
+
+    The four checks, and why each is framed so it cannot false-positive:
+
+    1. **Averaged overviews on categorical data.** Asserted as "the coarsest
+       overview holds more than ``MAX_CATEGORICAL_VALUES`` distinct values
+       while the data is categorical". `mode` can only ever return values that
+       were already in the window, so it cannot push the count past the native
+       set; `average` invents intermediates and blows straight past it. Framed
+       this way rather than as a set difference against the native band
+       because reading the native band of a 1.5 Gpx mosaic to audit it would
+       cost more than the conversion.
+    2. **Overview count** against ``ceil(log2(max(w, h) / blocksize))`` -- the
+       longer side, `resolve_overview_count`. Catches both directions.
+    3. **Untiled or uncompressed output.** One surveyed product was striped
+       6219x1 with no compression and no overviews; converting it properly
+       took it from 14,039,168 to 372,389 bytes.
+    4. **A declared nodata contradicted by the pixels** -- the FLT_MAX class.
+       Only flagged when an extreme fill is actually PRESENT and the declared
+       nodata is something else. Absence of the declared value is NOT flagged:
+       a fully-valid scene legitimately declares a nodata that never occurs,
+       and warning on those would make this noise.
+    """
+    problems = []
+    try:
+        with rasterio.open(path) as src:
+            block_h, block_w = src.block_shapes[0]
+            overviews = src.overviews(1)
+            image_structure = src.tags(ns='IMAGE_STRUCTURE')
+
+            if not src.profile.get('tiled', False):
+                problems.append(
+                    f"output is NOT tiled (block {block_w}x{block_h}); every "
+                    f"tile read would pull whole scanlines"
+                )
+            elif block_w != block_h:
+                problems.append(f"output blocks are not square: {block_w}x{block_h}")
+
+            if not image_structure.get('COMPRESSION'):
+                problems.append("output is UNCOMPRESSED")
+
+            # Rasters no larger than one block are exempt: overviews are
+            # pointless there, and `calculate_overview_factors` returns its
+            # [2,4,8] fallback rather than the rule's answer (the rule gives 0
+            # for anything under the blocksize), so demanding a count here
+            # would flag every small crop.
+            expected_levels = resolve_overview_count(src.width, src.height)
+            if max(src.width, src.height) <= blocksize:
+                expected_levels = len(overviews)
+            if len(overviews) != expected_levels:
+                problems.append(
+                    f"overview count is {len(overviews)}, but "
+                    f"{src.width}x{src.height} calls for {expected_levels} "
+                    f"(ceil(log2(max(w,h)/{blocksize})))"
+                )
+
+            native, _, exceeded = _sample_band_values(src)
+            kind = data_kind or _inspect_data_kind(path)[0]
+            if kind == CATEGORICAL and overviews and native and not exceeded:
+                factor = overviews[-1]
+                coarsest = src.read(
+                    1,
+                    out_shape=(max(1, src.height // factor),
+                               max(1, src.width // factor)),
+                )
+                # Exclude nodata (and non-finite) from the overview's set the
+                # same way _sample_band_values excludes it from the band's.
+                # Without this, every masked mosaic self-reports: its nodata
+                # value is absent from `native` by construction and present in
+                # the overview, so it reads as an invented code. Measured on
+                # 11 of 12 already-correct OPERA DSWx COGs before the fix.
+                coarse_values = coarsest.ravel()
+                if str(src.dtypes[0]).startswith('float'):
+                    coarse_values = coarse_values[np.isfinite(coarse_values)]
+                if src.nodata is not None:
+                    coarse_values = coarse_values[coarse_values != src.nodata]
+                invented = sorted(set(np.unique(coarse_values).tolist()) - native)
+                share = (
+                    100.0 * float(np.isin(coarse_values, invented).sum())
+                    / max(1, coarse_values.size)
+                    if invented else 0.0
+                )
+                # The share gate, not a bare set difference: the native set
+                # comes from a block SAMPLE, so a genuinely rare class the
+                # sample missed would otherwise read as "invented". A missed
+                # rare code shows up at a rare rate; real averaging does not.
+                # Measured on a {1,3,255} raster -- `mode` invents 0 codes at
+                # 0.000%, `average` invents 8 covering 88.8% of the coarsest
+                # overview. On the live OPERA DSWx WTR mosaic the averaged
+                # overview held 249 invented codes with class 2 alone at 1.18%.
+                if invented and share > _AVERAGED_OVERVIEW_SHARE_PCT:
+                    problems.append(
+                        f"categorical data but the coarsest overview holds "
+                        f"{len(invented)} code(s) absent from the band "
+                        f"({invented[:8]}{'...' if len(invented) > 8 else ''}), "
+                        f"covering {share:.2f}% of it -- the overviews were "
+                        f"AVERAGED, which invents class codes that do not "
+                        f"exist. Rebuild them with `mode`."
+                    )
+
+            declared = src.nodata
+            if str(src.dtypes[0]).startswith('float'):
+                from shared_utils.compression import list_extreme_float_fills
+
+                fills = list_extreme_float_fills(src)
+                unmasked = [f for f in fills if declared is None or f != declared]
+                if unmasked:
+                    problems.append(
+                        f"declared nodata is {declared!r} but the pixels still "
+                        f"contain FLT_MAX-class fill {unmasked!r}; rio-tiler "
+                        f"masks on the declared value, matches nothing, and "
+                        f"renders the fill as data"
+                    )
+    except Exception as e:  # an audit must never be the thing that fails a run
+        problems.append(f"could not audit the output: {e}")
+
+    return problems
+
+
 def determine_resampling_method(src_path: str) -> Tuple[str, str]:
     """
     Auto-detect appropriate resampling method based on data characteristics.
@@ -209,43 +786,45 @@ def determine_resampling_method(src_path: str) -> Tuple[str, str]:
         - overview_resampling: 'average' or 'mode'
 
     Logic:
-        - 3-band data (RGB imagery) -> cubic / average
-        - Single-band continuous data -> bilinear / average
-        - Single-band categorical data -> nearest / mode
+        - Categorical data (any band count, any dtype) -> nearest / mode
+        - 3-band continuous data (RGB imagery) -> cubic / average
+        - Other continuous data -> bilinear / average
+        - No verdict from the pixels -> the legacy filename/nodata heuristics
+
+    The pixel evidence (`detect_data_kind`) is consulted FIRST and outranks the
+    filename. The keyword and nodata rules below are kept only for the case
+    where the data itself is inconclusive -- they are guesses about what a file
+    is called, and a product named `..._mask.tif` that turns out to hold 5000
+    distinct floats should not get `mode`.
     """
-    def _overview_for(method: str) -> str:
-        if method == 'nearest':
-            return 'mode'
-        return 'average'
+    kind = resolve_data_kind(src_path)
+    if kind == CATEGORICAL:
+        return 'nearest', 'mode'
 
     try:
         with rasterio.open(src_path) as src:
-            # 3-band imagery (RGB products)
-            if src.count == 3:
-                method = 'cubic'
-                return method, _overview_for(method)
+            band_count = src.count
+            dtype = str(src.dtypes[0]).lower()
+            nodata = src.nodata
 
-            # Single-band data - determine if categorical or continuous
-            elif src.count == 1:
-                dtype = str(src.dtypes[0]).lower()
-                nodata = src.nodata
-                filename = os.path.basename(src_path).lower()
+        if kind == CONTINUOUS:
+            # 3-band continuous is imagery; cubic is the nicer warp there.
+            return ('cubic' if band_count == 3 else 'bilinear'), 'average'
 
-                # Heuristics for categorical data
-                # Check filename for categorical indicators
-                categorical_keywords = ['mask', 'extent', 'classification', 'scl', 'qa']
-                if any(keyword in filename for keyword in categorical_keywords):
-                    return 'nearest', 'mode'
+        # kind == UNKNOWN: neither the pixels nor the filename could say, so
+        # fall back to the pre-detector heuristics. The old inline keyword list
+        # ('mask', 'extent', 'classification', 'scl', 'qa') is GONE -- it is
+        # subsumed by CATEGORICAL_FILENAME_TOKENS, which resolve_data_kind has
+        # already consulted, and keeping a second, looser copy here is how the
+        # two drift apart.
+        if band_count == 3:
+            return 'cubic', 'average'
 
-                # Check nodata value (999 and 255 common for categorical)
-                if nodata in [999, 255] and dtype in ['uint8', 'uint16', 'int8']:
-                    return 'nearest', 'mode'
+        if band_count == 1:
+            if nodata in [999, 255] and dtype in ['uint8', 'uint16', 'int8']:
+                return 'nearest', 'mode'
 
-                # Default to bilinear for continuous single-band data
-                return 'bilinear', 'average'
-
-            # Multi-band but not 3 (rare case)
-            return 'bilinear', 'average'
+        return 'bilinear', 'average'
 
     except Exception as e:
         print(f"  Warning: Could not determine resampling method: {e}")
@@ -323,6 +902,7 @@ def build_creation_options(
     compression_level: int,
     raw_size_gb: Optional[float] = None,
     band_count: Optional[int] = None,
+    colorinterp=None,
 ) -> dict:
     """
     Single source of truth for the GDAL creation options used by BOTH
@@ -379,6 +959,37 @@ def build_creation_options(
         read touches only the bands asked for. Verified: valid COG, identical
         size, byte-identical pixels. Rasters of 3 bands or fewer are left on
         the default -- an RGB read wants all of them together.
+
+        ``colorinterp`` -> an ALPHA-carrying raster stays on ``PIXEL`` even
+        above 3 bands. A 4-band RGBA *rendering* is never read as a band
+        subset; it is displayed whole, so splitting it into four band-planes
+        turns one block read into four and wins nothing. Band count alone
+        cannot tell the two apart -- a 4-band B/G/R/NIR multispectral stack
+        genuinely wants BAND -- so this keys on the same
+        ``carries_alpha_band`` last-band test the nodata carve-out uses.
+        Pass the output raster's ``colorinterp`` tuple; ``None`` keeps the
+        band-count-only behaviour.
+
+    WHERE ``INTERLEAVE`` ACTUALLY LANDS (measured -- it is not everywhere)
+    ---------------------------------------------------------------------
+    These options are consumed by rio-cogeo, which creates through the
+    **GTiff** driver and relayouts afterwards, so ``INTERLEAVE`` applies on
+    every GDAL this repo runs. Verified on an 8-band uint8 stack: output
+    reports ``INTERLEAVE=BAND`` with ``LAYOUT=COG`` under both GDAL 3.10.3 and
+    3.12.3.
+
+    It does NOT apply on the ``backend='gdal'`` path below GDAL 3.11, which
+    creates through the **COG** driver::
+
+        GDAL 3.10.3: gdal_translate -of COG -co INTERLEAVE=BAND
+            Warning 6: driver COG does not support creation option INTERLEAVE
+            -> output INTERLEAVE=PIXEL      (accepted, warned about, IGNORED)
+        GDAL 3.12.3: same command, no warning
+            -> output INTERLEAVE=BAND
+
+    ``gdal_cog_processor.cog_driver_supports_interleave`` probes the installed
+    driver and warns rather than emitting something that looks
+    band-interleaved and is not.
     """
     bigtiff = (
         'YES' if raw_size_gb is not None and raw_size_gb > BIGTIFF_FORCE_GB
@@ -388,7 +999,11 @@ def build_creation_options(
         'NUM_THREADS': 'ALL_CPUS',
         'BIGTIFF': bigtiff,
     }
-    if band_count is not None and band_count > 3:
+    if (
+        band_count is not None
+        and band_count > 3
+        and not carries_alpha_band(colorinterp)
+    ):
         opts['INTERLEAVE'] = 'BAND'
     if compression.upper() == 'DEFLATE':
         opts['PREDICTOR'] = 2
@@ -406,6 +1021,7 @@ def _build_cog_translate_profile(
     compression_level: int,
     raw_size_gb: Optional[float] = None,
     band_count: Optional[int] = None,
+    colorinterp=None,
 ) -> dict:
     """
     Build a rio_cogeo profile dict that matches what the subprocess
@@ -420,7 +1036,9 @@ def _build_cog_translate_profile(
     from rio_cogeo.profiles import cog_profiles
 
     profile = dict(cog_profiles.get(compression.lower()))
-    opts = build_creation_options(compression, compression_level, raw_size_gb, band_count)
+    opts = build_creation_options(
+        compression, compression_level, raw_size_gb, band_count, colorinterp
+    )
     if 'INTERLEAVE' in opts:
         # rio-cogeo's base profile carries a lowercase `interleave: pixel`.
         # GDAL creation options are case-insensitive, so leaving both keys in
@@ -495,6 +1113,7 @@ def convert_to_cog(
     backend: str = 'rio',
     metadata: Optional[Dict[str, str]] = None,
     strict_nodata: bool = True,
+    strict_output: bool = False,
 ) -> str:
     """
     Convert a GeoTIFF to Cloud Optimized GeoTIFF (COG) format with optional reprojection.
@@ -560,6 +1179,10 @@ def convert_to_cog(
             creation time. Auto-augments YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
             via shared_utils.cog_metadata.resolve_metadata. Not supported on the
             'gdal' backend yet.
+        strict_output: When True, a failed output audit raises instead of
+            warning. Default False -- this runs inside DPS jobs during live
+            activations, where aborting a finished conversion is worse than
+            the defect it found. See `audit_cog_output`.
         strict_nodata: When True (default), an out-of-range caller-supplied
             `nodata` raises ValueError up front instead of printing a warning
             and pretending to continue. Set False for the legacy warn-only
@@ -606,16 +1229,55 @@ def convert_to_cog(
             overview_levels=overview_levels,
             reproject_to_4326=(dst_crs == 'EPSG:4326') if dst_crs else False,
             verbose=not quiet,
+            # Forward the caller's choice; this branch used to drop it, so
+            # `resampling_method='nearest'` was silently ignored under
+            # backend='gdal'. None means "detect", same as the rio path.
+            resampling=resampling_method,
+            overview_resampling=(
+                _OVERVIEW_RESAMPLING_ALIASES.get(resampling_method, resampling_method)
+                if resampling_method is not None else None
+            ),
         )
         if not success:
             raise RuntimeError(f"GDAL backend failed to create COG for {input_tif}")
+
+        # Same audit as the rio path -- this branch returns early, so without
+        # an explicit call here backend='gdal' would be the one path that
+        # writes unchecked.
+        audit_problems = audit_cog_output(final_output)
+        if audit_problems:
+            header = (
+                f"OUTPUT AUDIT FAILED for {os.path.basename(final_output)} "
+                f"({len(audit_problems)} problem(s)):"
+            )
+            if strict_output:
+                raise RuntimeError(header + " " + "; ".join(audit_problems))
+            print(f"  !!! {header}")
+            for problem in audit_problems:
+                print(f"  !!!   - {problem}")
         return final_output
+
+    # Every intermediate this function writes into the shared temp directory is
+    # namespaced with `run_token`. Keying them on the input BASENAME alone --
+    # which is what this did -- silently corrupts concurrent conversions of
+    # two files that happen to share a name in different directories, and that
+    # is the normal shape of a batch here: `parallel.map_threaded` fans out
+    # with max_workers=4 and the per-sensor trees repeat filenames across date
+    # folders. Reproduced before the fix with two threads converting a
+    # `same_name.tif` each: one output came back holding the OTHER file's
+    # pixels, with no error anywhere. (`simple_disaster_staging.ipynb` already
+    # had to namespace its own /tmp paths by plan index for the same reason.)
+    # The token stays inside the existing `*.cog.tmp.tif` / `*.warped.tmp.tif`
+    # / `*.nonodata.tmp.vrt` suffixes so the leak-detection globs still match.
+    run_token = uuid.uuid4().hex[:8]
 
     # Determine output path
     if output_cog is None:
         # Replace input file with COG version
         output_cog = input_tif
-        temp_output = os.path.join('/tmp', os.path.basename(input_tif) + '.cog.tmp.tif')
+        temp_output = os.path.join(
+            '/tmp', f'{os.path.basename(input_tif)}.{run_token}.cog.tmp.tif'
+        )
     else:
         temp_output = output_cog
 
@@ -889,245 +1551,283 @@ def convert_to_cog(
         if not quiet:
             print(f"  Resampling method: {resampling_method} (caller-supplied)")
 
-    # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
-    # already declares one. A VRT is a lazy XML header — no pixel copy — so this
-    # costs nothing but makes the opt-out actually stick: without it both
-    # `rio cogeo create` and cog_translate re-read the source's nodata tag.
-    if strip_source_nodata:
-        nodata_stripped_vrt = os.path.join(
-            tempfile.gettempdir(), os.path.basename(input_tif) + '.nonodata.tmp.vrt'
-        )
-        translate_cmd = [
-            'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
-            input_tif, nodata_stripped_vrt,
-        ]
-        try:
-            subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
-            )
-        # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
-        # at the real file because its BASENAME is load-bearing downstream —
-        # resolve_metadata() parses the activation event out of it, and
-        # determine_resampling_method() reads it.
-        input_for_cog = nodata_stripped_vrt
-
-    # Pixel source for the warp step (the nodata-stripped VRT when opting out).
-    warp_source = input_for_cog
-
-    # Step 1: Reproject if needed (warp to dst_crs)
-    if needs_reprojection:
-        warped_file = os.path.join('/tmp', os.path.basename(input_tif) + '.warped.tmp.tif')
-
-        # When the warp was forced purely to rewrite the fill, dst_crs may be
-        # None or identical to the source; keep the pixels where they are.
-        warp_target_crs = dst_crs if dst_crs is not None else str(src_crs)
-
-        if not quiet:
-            print(f"  Warping to {warp_target_crs}...")
-
-        # Build gdalwarp command (chosen over `rio warp` so we can use
-        # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
-        warp_cmd = [
-            'gdalwarp',
-            '-t_srs', warp_target_crs,
-            '-r', resampling_method,
-            '-multi',
-            '-wo', 'NUM_THREADS=ALL_CPUS',
-            '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
-            '-overwrite',
-        ]
-
-        # Clamp output extent to Web Mercator's valid domain when source
-        # exceeds it (global Mollweide, polar stereographic, etc.).
-        if clip_webmerc:
-            warp_cmd.extend([
-                '-te',
-                f'-{WEBMERC_EXTENT_M}', f'-{WEBMERC_EXTENT_M}',
-                f'{WEBMERC_EXTENT_M}', f'{WEBMERC_EXTENT_M}',
-                '-te_srs', 'EPSG:3857',
-            ])
-
-        # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata).
-        # These are normally the same value — the warp is not meant to change
-        # what counts as fill. The exception is a pending FLT_MAX remap, where
-        # -srcnodata must name the value actually sitting in the pixels so
-        # gdalwarp rewrites it to the safe -dstnodata on the way out. Using
-        # `nodata` on both sides there would match nothing and silently keep
-        # the corrupt fill.
-        if nodata is not None:
-            src_nodata_arg = (
-                remap_extreme_fill if remap_extreme_fill is not None else nodata
-            )
-            warp_cmd.extend(['-srcnodata', repr(float(src_nodata_arg))])
-            warp_cmd.extend(['-dstnodata', str(nodata)])
-
-        warp_cmd.extend([warp_source, warped_file])
-
-        try:
-            result = subprocess.run(
-                warp_cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            if not quiet and result.stdout:
-                print(f"  {result.stdout.strip()}")
-
-            # Use warped file as input for COG conversion
-            input_for_cog = warped_file
-
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Error warping to {dst_crs}: {e.stderr}"
-            print(error_msg)
-            raise RuntimeError(error_msg)
-
-    # Overview depth and BIGTIFF are decided from what will actually be
-    # written -- the post-warp raster -- not from the source. Raw size is the
-    # uncompressed footprint, which is exactly what rio-cogeo's scratch
-    # dataset occupies (see build_creation_options).
-    with rasterio.open(input_for_cog) as cog_src:
-        out_w, out_h = cog_src.width, cog_src.height
-        out_count = cog_src.count
-        raw_size_gb = (
-            out_w * out_h * cog_src.count
-            * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
-        )
-    overview_count = resolve_overview_count(out_w, out_h, overview_levels)
-    if not quiet:
-        print(
-            f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
-            f"{overview_count} overview levels, "
-            f"BIGTIFF={build_creation_options(compression, compression_level, raw_size_gb, out_count)['BIGTIFF']}, "
-            f"INTERLEAVE={'BAND' if out_count > 3 else 'PIXEL'}"
-        )
-
-    # Step 2: Build rio cogeo create command (using warped file if reprojected)
-    cmd = [
-        'rio', 'cogeo', 'create',
-        input_for_cog,  # Use warped file if reprojection occurred
-        temp_output,
-        '--cog-profile', compression.lower(),
-        '--overview-level', str(overview_count),
-        '--overview-resampling', overview_resampling,
-    ]
-
-    # Add no-data value
-    if nodata is not None:
-        cmd.extend(['--nodata', str(nodata)])
-
-    # Creation options come from the ONE builder both branches share, so the
-    # subprocess path and the in-process cog_translate path cannot diverge
-    # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
-    for key, value in build_creation_options(compression, compression_level, raw_size_gb, out_count).items():
-        cmd.extend(['--co', f'{key}={value}'])
-
-    # Execute COG creation.
-    #
-    # Two paths:
-    #   - `metadata is None` (default): subprocess `rio cogeo create`. Fast,
-    #     unchanged from prior behavior.
-    #   - `metadata is not None`: in-process `rio_cogeo.cogeo.cog_translate`
-    #     with `additional_cog_metadata=...`. Required because:
-    #       (a) `rio cogeo create` CLI has no flag for arbitrary tags, and
-    #       (b) reopening a finished COG with `gdal.Open(GA_Update)` +
-    #           `SetMetadata(...)` breaks the COG layout in GDAL 3.10+
-    #           (`cog_validate` returns valid=False with IFD-offset errors).
-    if not quiet:
-        if metadata is not None:
-            print(f"  Creating COG with embedded metadata: {os.path.basename(temp_output)}")
-        else:
-            print(f"  Creating COG: {os.path.basename(temp_output)}")
-
+    # Every intermediate from here on (nodata VRT, warped file, the /tmp COG) is
+    # removed in `finally`, not in the except branches: those only caught
+    # `Exception`, so Ctrl-C / a kernel interrupt leaked them, and the VRT and
+    # warp steps sat outside the try entirely, so a failed gdalwarp leaked too.
+    # With `run_token` in every name, a leak is never overwritten by the next
+    # run -- each one would accumulate in /tmp for good.
     try:
-        if metadata is not None:
-            from rio_cogeo.cogeo import cog_translate
-
-            # Auto-augment with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
-            # if the filename matches the activation-event pattern.
+        # Step 0: honor an explicit nodata opt-out (`nodata=False`) on a source that
+        # already declares one. A VRT is a lazy XML header — no pixel copy — so this
+        # costs nothing but makes the opt-out actually stick: without it both
+        # `rio cogeo create` and cog_translate re-read the source's nodata tag.
+        if strip_source_nodata:
+            nodata_stripped_vrt = os.path.join(
+                tempfile.gettempdir(),
+                f'{os.path.basename(input_tif)}.{run_token}.nonodata.tmp.vrt',
+            )
+            translate_cmd = [
+                'gdal_translate', '-of', 'VRT', '-a_nodata', 'none',
+                input_tif, nodata_stripped_vrt,
+            ]
             try:
-                from shared_utils.cog_metadata import resolve_metadata
-                full_metadata = resolve_metadata(
-                    os.path.basename(input_tif),
-                    mode='manual',
-                    manual_metadata=metadata,
+                subprocess.run(translate_cmd, capture_output=True, text=True, check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Failed to strip the source nodata tag for nodata=False: {e.stderr}"
                 )
-            except ImportError:
-                full_metadata = dict(metadata)
+            # NOTE: only the *pixel source* is redirected. `input_tif` keeps pointing
+            # at the real file because its BASENAME is load-bearing downstream —
+            # resolve_metadata() parses the activation event out of it, and
+            # determine_resampling_method() reads it.
+            input_for_cog = nodata_stripped_vrt
+
+        # Pixel source for the warp step (the nodata-stripped VRT when opting out).
+        warp_source = input_for_cog
+
+        # Step 1: Reproject if needed (warp to dst_crs)
+        if needs_reprojection:
+            warped_file = os.path.join(
+                '/tmp', f'{os.path.basename(input_tif)}.{run_token}.warped.tmp.tif'
+            )
+
+            # When the warp was forced purely to rewrite the fill, dst_crs may be
+            # None or identical to the source; keep the pixels where they are.
+            warp_target_crs = dst_crs if dst_crs is not None else str(src_crs)
 
             if not quiet:
-                print(f"  Embedded tags: {sorted(full_metadata.keys())}")
+                print(f"  Warping to {warp_target_crs}...")
 
-            profile = _build_cog_translate_profile(compression, compression_level, raw_size_gb, out_count)
-            cog_translate(
-                input_for_cog,
-                temp_output,
-                profile,
-                nodata=nodata,
-                overview_level=overview_count,
-                overview_resampling=overview_resampling,
-                web_optimized=False,
-                additional_cog_metadata=full_metadata,
-                # The subprocess branch gets this from the `rio cogeo create`
-                # CLI (its --threads defaults to ALL_CPUS). Without it here,
-                # cog_translate runs under a bare rasterio.Env() and GDAL
-                # compresses on a single thread.
-                config=COG_GDAL_CONFIG,
-                quiet=quiet,
+            # Build gdalwarp command (chosen over `rio warp` so we can use
+            # NUM_THREADS=ALL_CPUS; rio warp's --threads only accepts integers).
+            warp_cmd = [
+                'gdalwarp',
+                '-t_srs', warp_target_crs,
+                '-r', resampling_method,
+                '-multi',
+                '-wo', 'NUM_THREADS=ALL_CPUS',
+                '--config', 'GDAL_NUM_THREADS', 'ALL_CPUS',
+                '-overwrite',
+            ]
+
+            # Clamp output extent to Web Mercator's valid domain when source
+            # exceeds it (global Mollweide, polar stereographic, etc.).
+            if clip_webmerc:
+                warp_cmd.extend([
+                    '-te',
+                    f'-{WEBMERC_EXTENT_M}', f'-{WEBMERC_EXTENT_M}',
+                    f'{WEBMERC_EXTENT_M}', f'{WEBMERC_EXTENT_M}',
+                    '-te_srs', 'EPSG:3857',
+                ])
+
+            # Add nodata to warp command (gdalwarp uses -srcnodata/-dstnodata).
+            # These are normally the same value — the warp is not meant to change
+            # what counts as fill. The exception is a pending FLT_MAX remap, where
+            # -srcnodata must name the value actually sitting in the pixels so
+            # gdalwarp rewrites it to the safe -dstnodata on the way out. Using
+            # `nodata` on both sides there would match nothing and silently keep
+            # the corrupt fill.
+            if nodata is not None:
+                src_nodata_arg = (
+                    remap_extreme_fill if remap_extreme_fill is not None else nodata
+                )
+                warp_cmd.extend(['-srcnodata', repr(float(src_nodata_arg))])
+                warp_cmd.extend(['-dstnodata', str(nodata)])
+
+            warp_cmd.extend([warp_source, warped_file])
+
+            try:
+                result = subprocess.run(
+                    warp_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+
+                if not quiet and result.stdout:
+                    print(f"  {result.stdout.strip()}")
+
+                # Use warped file as input for COG conversion
+                input_for_cog = warped_file
+
+            except subprocess.CalledProcessError as e:
+                error_msg = f"Error warping to {dst_crs}: {e.stderr}"
+                print(error_msg)
+                raise RuntimeError(error_msg)
+
+        # Overview depth and BIGTIFF are decided from what will actually be
+        # written -- the post-warp raster -- not from the source. Raw size is the
+        # uncompressed footprint, which is exactly what rio-cogeo's scratch
+        # dataset occupies (see build_creation_options).
+        with rasterio.open(input_for_cog) as cog_src:
+            out_w, out_h = cog_src.width, cog_src.height
+            out_count = cog_src.count
+            out_colorinterp = cog_src.colorinterp
+            raw_size_gb = (
+                out_w * out_h * cog_src.count
+                * np.dtype(cog_src.dtypes[0]).itemsize / 1e9
             )
-        else:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            if not quiet and result.stdout:
-                print(f"  {result.stdout.strip()}")
-
-        # If we created a temp file, replace the original.
-        # Use shutil.move (not os.rename): temp_output lives in /tmp while
-        # output_cog is usually on a different mount (e.g. the Hub's /home or a
-        # shared volume). os.rename across filesystems raises
-        # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
-        # copy + delete.
-        if temp_output != output_cog:
-            if os.path.exists(output_cog):
-                os.remove(output_cog)
-            shutil.move(temp_output, output_cog)
-
-        # Clean up warped temp file if it was created
-        if warped_file and os.path.exists(warped_file):
-            os.remove(warped_file)
-        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
-            os.remove(nodata_stripped_vrt)
-
+        overview_count = resolve_overview_count(out_w, out_h, overview_levels)
+        _opts = build_creation_options(
+            compression, compression_level, raw_size_gb, out_count, out_colorinterp
+        )
         if not quiet:
-            print(f"  ✓ COG created: {os.path.basename(output_cog)}")
+            print(
+                f"  Output {out_w}x{out_h} ({raw_size_gb:.2f} GB raw): "
+                f"{overview_count} overview levels, "
+                f"BIGTIFF={_opts['BIGTIFF']}, "
+                f"INTERLEAVE={_opts.get('INTERLEAVE', 'PIXEL')}"
+            )
 
-        return output_cog
+        # Step 2: Build rio cogeo create command (using warped file if reprojected)
+        cmd = [
+            'rio', 'cogeo', 'create',
+            input_for_cog,  # Use warped file if reprojection occurred
+            temp_output,
+            '--cog-profile', compression.lower(),
+            '--overview-level', str(overview_count),
+            '--overview-resampling', overview_resampling,
+        ]
 
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Error creating COG: {e.stderr}"
-        print(error_msg)
-        # Clean up temp files if they exist
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
+        # Add no-data value
+        if nodata is not None:
+            cmd.extend(['--nodata', str(nodata)])
+
+        # Creation options come from the ONE builder both branches share, so the
+        # subprocess path and the in-process cog_translate path cannot diverge
+        # (see build_creation_options for why NUM_THREADS and BIGTIFF matter).
+        for key, value in _opts.items():
+            cmd.extend(['--co', f'{key}={value}'])
+
+        # Execute COG creation.
+        #
+        # Two paths:
+        #   - `metadata is None` (default): subprocess `rio cogeo create`. Fast,
+        #     unchanged from prior behavior.
+        #   - `metadata is not None`: in-process `rio_cogeo.cogeo.cog_translate`
+        #     with `additional_cog_metadata=...`. Required because:
+        #       (a) `rio cogeo create` CLI has no flag for arbitrary tags, and
+        #       (b) reopening a finished COG with `gdal.Open(GA_Update)` +
+        #           `SetMetadata(...)` breaks the COG layout in GDAL 3.10+
+        #           (`cog_validate` returns valid=False with IFD-offset errors).
+        if not quiet:
+            if metadata is not None:
+                print(f"  Creating COG with embedded metadata: {os.path.basename(temp_output)}")
+            else:
+                print(f"  Creating COG: {os.path.basename(temp_output)}")
+
+        try:
+            if metadata is not None:
+                from rio_cogeo.cogeo import cog_translate
+
+                # Auto-augment with YEAR_MONTH/HAZARD/LOCATION/PROCESSING_DATE
+                # if the filename matches the activation-event pattern.
+                try:
+                    from shared_utils.cog_metadata import resolve_metadata
+                    full_metadata = resolve_metadata(
+                        os.path.basename(input_tif),
+                        mode='manual',
+                        manual_metadata=metadata,
+                    )
+                except ImportError:
+                    full_metadata = dict(metadata)
+
+                if not quiet:
+                    print(f"  Embedded tags: {sorted(full_metadata.keys())}")
+
+                profile = _build_cog_translate_profile(
+                    compression, compression_level, raw_size_gb, out_count, out_colorinterp
+                )
+                cog_translate(
+                    input_for_cog,
+                    temp_output,
+                    profile,
+                    nodata=nodata,
+                    overview_level=overview_count,
+                    overview_resampling=overview_resampling,
+                    web_optimized=False,
+                    additional_cog_metadata=full_metadata,
+                    # The subprocess branch gets this from the `rio cogeo create`
+                    # CLI (its --threads defaults to ALL_CPUS). Without it here,
+                    # cog_translate runs under a bare rasterio.Env() and GDAL
+                    # compresses on a single thread.
+                    config=COG_GDAL_CONFIG,
+                    quiet=quiet,
+                )
+            else:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                if not quiet and result.stdout:
+                    print(f"  {result.stdout.strip()}")
+
+            # If we created a temp file, replace the original.
+            # Use shutil.move (not os.rename): temp_output lives in /tmp while
+            # output_cog is usually on a different mount (e.g. the Hub's /home or a
+            # shared volume). os.rename across filesystems raises
+            # OSError(EXDEV, 'Invalid cross-device link'); shutil.move falls back to
+            # copy + delete.
+            if temp_output != output_cog:
+                if os.path.exists(output_cog):
+                    os.remove(output_cog)
+                shutil.move(temp_output, output_cog)
+
+            # Audit what we just WROTE, not what we asked for. Every defect this
+            # catches was found months later in a rendered map; each is cheap to
+            # see here. Warns by default rather than raising, because this is a
+            # library that runs inside DPS jobs during live activations and an
+            # audit that aborts a finished conversion would be worse than the
+            # defect. `strict_output=True` turns the same findings into an error
+            # for callers that would rather fail the batch.
+            audit_problems = audit_cog_output(output_cog)
+            if audit_problems:
+                header = (
+                    f"OUTPUT AUDIT FAILED for {os.path.basename(output_cog)} "
+                    f"({len(audit_problems)} problem(s)):"
+                )
+                if strict_output:
+                    raise RuntimeError(header + " " + "; ".join(audit_problems))
+                print(f"  !!! {header}")
+                for problem in audit_problems:
+                    print(f"  !!!   - {problem}")
+                print("  !!! The file was written anyway. Fix the source or the "
+                      "conversion settings before publishing it.")
+            elif not quiet:
+                print("  Output audit: tiling, compression, overview count, "
+                      "overview resampling and nodata all check out.")
+
+            if not quiet:
+                print(f"  ✓ COG created: {os.path.basename(output_cog)}")
+
+            return output_cog
+
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Error creating COG: {e.stderr}"
+            print(error_msg)
+            # A failed run must not leave a partial output behind -- including a
+            # caller-supplied output_cog (the only case `finally` leaves alone).
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            raise RuntimeError(error_msg)
+        except Exception:
+            # A failed run must not leave a partial output behind -- including a
+            # caller-supplied output_cog (the only case `finally` leaves alone).
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            raise
+    finally:
         if warped_file and os.path.exists(warped_file):
             os.remove(warped_file)
         if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
             os.remove(nodata_stripped_vrt)
-        raise RuntimeError(error_msg)
-    except Exception:
-        if os.path.exists(temp_output):
+        # On success temp_output has already been moved over output_cog; when
+        # the caller passed output_cog, temp_output IS the product -- keep it.
+        if temp_output != output_cog and os.path.exists(temp_output):
             os.remove(temp_output)
-        if warped_file and os.path.exists(warped_file):
-            os.remove(warped_file)
-        if nodata_stripped_vrt and os.path.exists(nodata_stripped_vrt):
-            os.remove(nodata_stripped_vrt)
-        raise
 
 
 def validate_cog(cog_path: str) -> Tuple[bool, dict]:

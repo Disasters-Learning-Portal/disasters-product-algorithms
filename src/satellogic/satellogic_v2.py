@@ -420,7 +420,7 @@ def apply_gamma(img, gamma=1.0):
     return np.power(np.clip(img, 0, 1), 1.0 / gamma)
 
 
-def prepare_scene(paths, meta, use_mask=True):
+def prepare_scene(paths, meta, use_mask=True, download_dir="/tmp/s3_temp"):
     level = infer_processing_level(paths)
     print(f"Detected processing level: {level}")
 
@@ -446,7 +446,7 @@ def prepare_scene(paths, meta, use_mask=True):
             + "\n".join(paths)
         )
 
-    in_file = download_s3_file(image_files[0])
+    in_file = download_s3_file(image_files[0], download_dir)
     ds = gdal.Open(in_file)
 
     cloud_files = [
@@ -472,7 +472,7 @@ def prepare_scene(paths, meta, use_mask=True):
     # summary itself works off a decimated overview.
     cloud = None
     if cloud_files:
-        cloud_file = download_s3_file(cloud_files[0])
+        cloud_file = download_s3_file(cloud_files[0], download_dir)
         summarize_cloud_cover(cloud_file)
 
         if use_mask:
@@ -571,9 +571,9 @@ def apply_lee_filter(arr, size):
 
 # Functions for specific products
 
-def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
+def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, download_dir="/tmp/s3_temp"):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False, download_dir=download_dir)
 
     band = resolve_band_indices(ds, level)
     red = load_reflectance_band(ds, band["red"], scale_factor)
@@ -612,9 +612,9 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     return outfile
 
 
-def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
+def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, download_dir="/tmp/s3_temp"):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False, download_dir=download_dir)
 
     band = resolve_band_indices(ds, level)
     nir = load_reflectance_band(ds, band["nir"], scale_factor)
@@ -649,9 +649,9 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7):
     return outfile
 
 
-def genNDVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+def genNDVI(paths, meta, out="/tmp/s3_temp", filter_size=5, download_dir="/tmp/s3_temp"):
     # Indices always mask clouds (ticket #320).
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True, download_dir=download_dir)
 
     band = resolve_band_indices(ds, level)
     nir = load_reflectance_band(ds, band["nir"], scale_factor)
@@ -674,9 +674,9 @@ def genNDVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
     return outfile
 
 
-def genNDWI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+def genNDWI(paths, meta, out="/tmp/s3_temp", filter_size=5, download_dir="/tmp/s3_temp"):
     # Indices always mask clouds (ticket #320).
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True, download_dir=download_dir)
 
     # Bands 2 and 4 are the same under both vendor layouts, so ndwi was never
     # affected by the L1B transposition. It resolves anyway so all five products
@@ -702,9 +702,9 @@ def genNDWI(paths, meta, out="/tmp/s3_temp", filter_size=5):
     return outfile
 
 
-def genEVI(paths, meta, out="/tmp/s3_temp", filter_size=5):
+def genEVI(paths, meta, out="/tmp/s3_temp", filter_size=5, download_dir="/tmp/s3_temp"):
     # Indices always mask clouds (ticket #320).
-    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True)
+    ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=True, download_dir=download_dir)
 
     band = resolve_band_indices(ds, level)
     blue = load_reflectance_band(ds, band["blue"], scale_factor)

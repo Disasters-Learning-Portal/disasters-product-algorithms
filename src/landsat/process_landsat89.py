@@ -318,11 +318,11 @@ if __name__ == "__main__":
 
                             if args.event:
 
-                                rename_with_event(cog_path, args.event)
+                                cloudMask = rename_with_event(cog_path, args.event)
 
                         elif args.event and not args.merge:
                             # Rename TIF without COG conversion
-                            rename_with_event(prod_name, args.event)
+                            cloudMask = rename_with_event(prod_name, args.event)
 
                         processing_success.append((os.path.basename(ddir), 'Cloud Mask', 'Success'))
                     except Exception as e:

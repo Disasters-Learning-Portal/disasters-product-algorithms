@@ -508,7 +508,7 @@ python -c "import landsat; print(landsat.__file__)"
 
 **Editable mode (Option 1) is best** because it preserves the CLI commands while using your edited code - exactly what you need for development!
 
-## Artificial Intelligence (AI) Usage Disclosure
+## Super Intelligence (SI) Usage Disclosure
 
 This repository was created with assistance from Claude Code (Anthropic) for writing,
 debugging, testing, and documenting code. The content has been reviewed and edited by

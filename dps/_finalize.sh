@@ -3,6 +3,10 @@
 # Contract: the caller has already produced the product COG(s) in ${OUT_HOME}
 # and set these variables:
 #   OUT_HOME ACTIVATION_EVENT ENABLE_S3_UPLOAD S3_BUCKET S3_DEST_BASE DELETE_COG
+#   PRODUCT_SENSOR -- optional; the shared_utils/product_paths.py sensor key. Set,
+#   the staging publish keys every product by its canonical destination
+#   ProgramData/<Sensor>/<Product>/<filename>. Unset, the old OUT_HOME-relative
+#   key under STAGING_DEST_BASE/<event> is used.
 # Staging publish (ALL sensors set these today): when STAGING_UPLOAD=true the
 #   publish step targets the MAAP org bucket STAGING_BUCKET under
 #   STAGING_DEST_BASE/<event> using short-lived MAAP workspace credentials (the DPS
@@ -40,11 +44,15 @@ if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
     #     by their OUT_HOME-relative path (same collision-safety as 3b).
     STAGING_PREFIX="${STAGING_DEST_BASE}/${ACTIVATION_EVENT}"
     echo "Publishing products to s3://${STAGING_BUCKET}/${STAGING_PREFIX}/ (MAAP workspace creds) ..."
-    conda run --live-stream --name disasters_dps python - "${STAGING_BUCKET}" "${STAGING_PREFIX}" "${OUT_HOME}" <<'PY'
+    conda run --live-stream --name disasters_dps python - "${STAGING_BUCKET}" "${STAGING_PREFIX}" "${OUT_HOME}" "${PRODUCT_SENSOR:-}" <<'PY'
 import sys
 from shared_utils.staging_upload import upload_dir_to_staging
 bucket, dest_prefix, out_home = sys.argv[1], sys.argv[2], sys.argv[3]
-upload_dir_to_staging(out_home, bucket, dest_prefix)
+# With PRODUCT_SENSOR set, each product is keyed by its canonical destination
+# ProgramData/<Sensor>/<Product>/<filename>; dest_prefix is then unused. Unset
+# (empty) keeps the previous dest_prefix + OUT_HOME-relative key.
+sensor = sys.argv[4] or None
+upload_dir_to_staging(out_home, bucket, dest_prefix, sensor=sensor)
 PY
   else
     # 3b) operational path: publish to S3_BUCKET via the DPS worker's ambient role

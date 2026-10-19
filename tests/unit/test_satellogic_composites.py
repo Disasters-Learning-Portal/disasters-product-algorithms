@@ -50,7 +50,7 @@ def patched_scene(tmp_path, monkeypatch):
         monkeypatch.setattr(
             satellogic_v2,
             "prepare_scene",
-            lambda paths, meta, use_mask=True: (ds, None, IN_FILE, "L1D", SCALE, None),
+            lambda paths, meta, use_mask=True, download_dir=None: (ds, None, IN_FILE, "L1D", SCALE, None),
         )
         return str(tmp_path)
 

@@ -12,6 +12,7 @@ from satellogic.satellogic_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.scratch import download_scratch
 
 # COG parameters are hardcoded, not CLI flags (ticket #320; same pattern as
 # process_capella.py). Level 9 rather than the library default 22: the outputs
@@ -140,92 +141,101 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    for datestring in args.date.split(","):
+    # Raw scenes download into a per-run scratch dir that is deleted when the
+    # run ends -- success, failure or Ctrl-C. They used to land in a shared
+    # /tmp/s3_temp that nothing cleaned, filling /tmp one scene per run.
+    with download_scratch("satellogic") as download_dir:
+        for datestring in args.date.split(","):
     
-        print(f"Retrieving Satellogic resources for {datestring}...")
+            print(f"Retrieving Satellogic resources for {datestring}...")
     
-        metadata, tifs = retrieve_satellogic_resources(datestring, args.level)
+            metadata, tifs = retrieve_satellogic_resources(datestring, args.level)
     
-        scene_groups = group_satellogic_tifs(tifs)
+            scene_groups = group_satellogic_tifs(tifs)
     
-        print(f"Generating {args.product}...")
-        print(f"Found {len(scene_groups)} Satellogic scene/tile groups to process")
+            print(f"Generating {args.product}...")
+            print(f"Found {len(scene_groups)} Satellogic scene/tile groups to process")
     
-        outfiles = []
+            outfiles = []
     
-        for i, scene_tifs in enumerate(scene_groups, start=1):
-            print(f"\nProcessing scene/tile {i}/{len(scene_groups)}")
+            for i, scene_tifs in enumerate(scene_groups, start=1):
+                print(f"\nProcessing scene/tile {i}/{len(scene_groups)}")
     
-            outfile = None
+                outfile = None
     
-            if args.product == "truecolor":
-                # False (not 0) — the composite carries its own alpha band, and
-                # 0 is a legitimate 8-bit sample. Declaring a scalar nodata
-                # alongside an alpha band makes the nodata SHADOW the alpha
-                # (rasterio NodataShadowWarning), masking real black pixels.
-                nodata_setting = False
-                outfile = genTrueColor(
-                    scene_tifs,
-                    metadata,
-                    args.output,
-                    visualize=args.visualize,
-                    gamma=args.gamma,
-                )
+                if args.product == "truecolor":
+                    # False (not 0) — the composite carries its own alpha band, and
+                    # 0 is a legitimate 8-bit sample. Declaring a scalar nodata
+                    # alongside an alpha band makes the nodata SHADOW the alpha
+                    # (rasterio NodataShadowWarning), masking real black pixels.
+                    nodata_setting = False
+                    outfile = genTrueColor(
+                        scene_tifs,
+                        metadata,
+                        args.output,
+                        visualize=args.visualize,
+                        gamma=args.gamma,
+                        download_dir=download_dir,
+                    )
     
-            elif args.product == "colorir":
-                # See the truecolor branch — alpha band, so no scalar nodata.
-                nodata_setting = False
-                outfile = gencolorIR(
-                    scene_tifs,
-                    metadata,
-                    args.output,
-                    visualize=args.visualize,
-                    gamma=args.gamma,
-                )
+                elif args.product == "colorir":
+                    # See the truecolor branch — alpha band, so no scalar nodata.
+                    nodata_setting = False
+                    outfile = gencolorIR(
+                        scene_tifs,
+                        metadata,
+                        args.output,
+                        visualize=args.visualize,
+                        gamma=args.gamma,
+                        download_dir=download_dir,
+                    )
     
-            elif args.product == "ndvi":
-                nodata_setting = -9999
-                outfile = genNDVI(
-                    scene_tifs,
-                    metadata,
-                    args.output,
-                    filter_size=args.filter_size,
-                )
+                elif args.product == "ndvi":
+                    nodata_setting = -9999
+                    outfile = genNDVI(
+                        scene_tifs,
+                        metadata,
+                        args.output,
+                        filter_size=args.filter_size,
+                        download_dir=download_dir,
+                    )
 
-            elif args.product == "ndwi":
-                nodata_setting = -9999
-                outfile = genNDWI(
-                    scene_tifs,
-                    metadata,
-                    args.output,
-                    filter_size=args.filter_size,
-                )
+                elif args.product == "ndwi":
+                    nodata_setting = -9999
+                    outfile = genNDWI(
+                        scene_tifs,
+                        metadata,
+                        args.output,
+                        filter_size=args.filter_size,
+                        download_dir=download_dir,
+                    )
 
-            elif args.product == "evi":
-                nodata_setting = -9999
-                outfile = genEVI(
-                    scene_tifs,
-                    metadata,
-                    args.output,
-                    filter_size=args.filter_size,
-                )
+                elif args.product == "evi":
+                    nodata_setting = -9999
+                    outfile = genEVI(
+                        scene_tifs,
+                        metadata,
+                        args.output,
+                        filter_size=args.filter_size,
+                        download_dir=download_dir,
+                    )
     
-            if outfile:
-                print("\nConverting to COG...")
+                if outfile:
+                    print("\nConverting to COG...")
     
-                cog_path = convert_to_cog(
-                    outfile,
-                    nodata=nodata_setting,
-                    dst_crs=DST_CRS,
-                    compression=COMPRESSION,
-                    compression_level=COMPRESSION_LEVEL,
-                    metadata=activation_metadata,
-                )
+                    cog_path = convert_to_cog(
+                        outfile,
+                        nodata=nodata_setting,
+                        dst_crs=DST_CRS,
+                        compression=COMPRESSION,
+                        compression_level=COMPRESSION_LEVEL,
+                        metadata=activation_metadata,
+                    )
     
-                print(f"COG created: {cog_path}")
-                outfiles.append(cog_path)
+                    print(f"COG created: {cog_path}")
+                    outfiles.append(cog_path)
     
-        print(f"\nFinished {args.product}. Created {len(outfiles)} COG(s).")
+            print(f"\nFinished {args.product}. Created {len(outfiles)} COG(s).")
 
 
 if __name__ == "__main__":

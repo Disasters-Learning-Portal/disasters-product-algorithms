@@ -180,7 +180,7 @@ class TestProductsUseTheResolvedOrder:
             monkeypatch.setattr(
                 satellogic_v2,
                 "prepare_scene",
-                lambda paths, meta, use_mask=True: (
+                lambda paths, meta, use_mask=True, download_dir=None: (
                     ds, None, IN_FILE, level, SCALE, None
                 ),
             )

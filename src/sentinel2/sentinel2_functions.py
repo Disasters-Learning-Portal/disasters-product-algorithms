@@ -29,6 +29,7 @@ from scipy.signal import medfilt2d
 from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
+from shared_utils.product_paths import product_dir
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -1096,7 +1097,7 @@ def s2_merge(dir_to_merge, mask=False, method='first'):
     # cloud mask is renamed to e.g. S2B_cloudMask_merged_2026-06-06_day.tif
     # (date moved to end + _day), so it no longer *ends* in "merged.tif".
     # *merged*.tif matches both the pre-rename and renamed forms.
-    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
+    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, product_dir('sentinel2', 'cloudMask'), '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
     # apply_cloud_mask writes <dir_to_merge>/masked/<prefix>_masked_<timestamp>.tif.

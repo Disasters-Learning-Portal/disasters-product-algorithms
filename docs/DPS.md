@@ -355,6 +355,16 @@ OUT_HOME-relative path → `s3://nasa-disasters-staging/dps_output/<event>/<rel>
 `shared_utils` never requires maap-py; only a live DPS job invokes it (auth is ambient
 via the injected `MAAP_PGT`, same as `dps/_get_secret.py`). This is the fan-out of the
 disasters-portal#342 POC to all five sensors.
+
+> **`upload_dir_to_staging` is for DPS and nothing else.** "Auth is ambient" above means
+> ambient *inside a DPS job*, where the wrapper injects `MAAP_PGT`. Nothing injects it on
+> the Disasters hub — it is per-user and secret, so it cannot be baked into the image, and
+> the `maapToken` in Settings → MAAP Settings lives in the JupyterLab frontend
+> SettingRegistry, which a notebook kernel never reads. A notebook calling this helper
+> therefore gets `HTTPError: 401 ... /awsAccess/workspaceBucket` every time, for every
+> operator. Notebooks publish with **`staging_upload.upload_dir_ambient`**, which shares
+> `iter_upload_keys` (so the keys are identical) but uses the default boto3 chain plus a
+> per-prefix write preflight. See `.clinerules.md` rule 57.
 This is the POC for disasters-portal#342 (acceptance criterion A); fan out to the
 other sensors once a Sentinel-2 job confirms objects land in the staging bucket.
 

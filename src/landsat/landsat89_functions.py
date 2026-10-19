@@ -31,6 +31,7 @@ from scipy.signal import medfilt2d
 from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
+from shared_utils.product_paths import product_dir
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -1610,7 +1611,7 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
     # so it no longer *ends* in "merged.tif". *merged*.tif matches both the
     # pre-rename (..._merged.tif) and renamed forms; per-scene cloud masks don't
     # contain "merged", so this stays unambiguous.
-    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
+    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, product_dir('landsat', 'cloudMask'), '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
     # apply_cloud_mask writes to <dir_to_merge>/masked/<basename with _masked

@@ -1,5 +1,5 @@
 """
-Regression test for notebooks/bake_event_metadata.ipynb — the S3 bulk
+Regression test for notebooks/tools/bake_event_metadata.ipynb — the S3 bulk
 activation-event metadata baker.
 
 Notebooks aren't importable modules, so this test EXTRACTS the notebook's code
@@ -31,7 +31,7 @@ from moto import mock_aws
 from rasterio.io import MemoryFile
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NB_PATH = REPO_ROOT / "notebooks" / "bake_event_metadata.ipynb"
+NB_PATH = REPO_ROOT / "notebooks" / "tools" / "bake_event_metadata.ipynb"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "gaia_atlanta_sample.tif"
 
 BUCKET = "test-disasters-bucket"

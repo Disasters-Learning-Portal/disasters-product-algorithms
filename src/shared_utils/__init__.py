@@ -16,6 +16,9 @@ try:
         set_nodata_value,
         validate_nodata_for_dtype,
         determine_resampling_method,
+        detect_data_kind,
+        resolve_data_kind,
+        filename_data_kind,
         get_compression_profile,
         convert_to_cog,
         validate_cog,
@@ -117,6 +120,9 @@ except ImportError:
 # Thread-pool helper (pure Python, no GDAL/boto3)
 from shared_utils.parallel import map_threaded
 
+# Throwaway local dirs: per-run download scratch + notebook OUTPUT_DIR reset (pure Python)
+from shared_utils.scratch import download_scratch, reset_output_dir
+
 # Local .env.local loader (pure Python, no deps)
 from shared_utils.env_utils import load_env_local
 
@@ -131,6 +137,9 @@ __all__ = [
     'set_nodata_value',
     'validate_nodata_for_dtype',
     'determine_resampling_method',
+    'detect_data_kind',
+    'resolve_data_kind',
+    'filename_data_kind',
     'get_compression_profile',
     'convert_to_cog',
     'validate_cog',
@@ -164,6 +173,9 @@ __all__ = [
     'upload_file_to_s3',
     'build_flat_s3_uri',
     'upload_dir_to_staging',
+    # Throwaway local dirs (scratch.py)
+    'download_scratch',
+    'reset_output_dir',
     # Unified filename / categorization (file_naming.py)
     'DATETIME_PATTERNS',
     'extract_datetime_from_filename',

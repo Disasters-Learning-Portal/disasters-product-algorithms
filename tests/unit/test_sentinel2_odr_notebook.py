@@ -200,13 +200,23 @@ class TestUploadMapping:
 
     @staticmethod
     def _folders(upload_src):
-        """Pull PRODUCT_FOLDERS out of the upload cell without running it."""
+        """Rebuild the token -> directory mapping without running the cell.
+
+        PRODUCT_FOLDERS is no longer a literal: the notebook declares
+        _PRODUCT_KEYS (token -> product key) and resolves each directory through
+        shared_utils.product_paths.product_dir, so the published layout is
+        defined in exactly one place. Resolve it the same way here, which also
+        makes these tests fail if a token stops resolving.
+        """
+        from shared_utils.product_paths import product_dir
+
         tree = ast.parse(upload_src)
         for node in ast.walk(tree):
             if (isinstance(node, ast.Assign)
-                    and getattr(node.targets[0], "id", None) == "PRODUCT_FOLDERS"):
-                return ast.literal_eval(node.value)
-        raise AssertionError("PRODUCT_FOLDERS not found")
+                    and getattr(node.targets[0], "id", None) == "_PRODUCT_KEYS"):
+                keys = ast.literal_eval(node.value)
+                return {t: product_dir("sentinel2", k) for t, k in keys.items()}
+        raise AssertionError("_PRODUCT_KEYS not found")
 
     def test_every_enabled_product_can_be_mapped(self, config_src, upload_src):
         """The draft had no `swir` entry, so those COGs were silently skipped."""

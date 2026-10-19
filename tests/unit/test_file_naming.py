@@ -400,7 +400,7 @@ class TestStripEventPrefix:
 
     The inverse of prefix_event(), for pipelines that keep the activation in the
     GeoTIFF tags + the S3 prefix instead of the filename
-    (notebooks/simple_disaster_staging.ipynb).
+    (notebooks/tools/simple_disaster_staging.ipynb).
     """
 
     def test_strips_the_generic_event_shape_with_no_event_name(self):

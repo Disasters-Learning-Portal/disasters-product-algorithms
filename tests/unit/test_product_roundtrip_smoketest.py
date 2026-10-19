@@ -367,14 +367,14 @@ class TestSweep:
 
 
 # ---------------------------------------------------------------------------
-# The static check of the seven workflow notebooks
+# The static check of the eight workflow notebooks
 # ---------------------------------------------------------------------------
 
 class TestWorkflowNotebookCheck:
     def test_all_workflow_notebooks_pass(self, tmp_path):
         ns = _exec(_configured(tmp_path), NB_CHECK)
         assert ns["problems"] == []
-        assert len(ns["nb_paths"]) == 7, ns["nb_paths"]
+        assert len(ns["nb_paths"]) == 8, ns["nb_paths"]
 
     def test_a_hardcoded_program_data_path_is_caught(self, tmp_path):
         """The check must actually fire -- a regex this specific is easy to write

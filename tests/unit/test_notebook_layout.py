@@ -36,6 +36,7 @@ SENSOR_NOTEBOOKS = {
     "skysat_workflow.ipynb": "skysat",
     "umbra_workflow.ipynb": "umbra",
     "capella_workflow.ipynb": "capella",
+    "iceye_workflow.ipynb": "iceye",
 }
 
 
@@ -314,7 +315,8 @@ class TestOdrGeneratorStaysInSync:
 # Without a reset, every earlier run's COGs piled up there -- filling /tmp and
 # being re-uploaded by the upload cell on every later run.
 VENDOR_NOTEBOOKS = ("capella_workflow.ipynb", "umbra_workflow.ipynb",
-                    "skysat_workflow.ipynb", "satellogic_workflow.ipynb")
+                    "skysat_workflow.ipynb", "satellogic_workflow.ipynb",
+                    "iceye_workflow.ipynb")
 _CLI_OUTPUT_RE = re.compile(r"""["']--output["']\s*,\s*OUTPUT_DIR""")
 
 

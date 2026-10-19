@@ -88,8 +88,8 @@ positional `$1 $2`. `File`/`Directory` inputs are localized to a path. Booleans
 may arrive as a bare `--flag` (presence) or `--flag true|false` (value), so each
 run.sh's boolean parser accepts both. Each boolean's **run.sh default MIRRORS its
 `algorithm_config.yaml` default** (e.g. landsat `merge`/`mask` default
-`true`; satellogic `visualize` default `false` — its `use_mask` boolean was removed
-in PR #45, masking is now hardcoded).
+`true`; satellogic has no boolean inputs left — `use_mask` was removed in PR #45
+(masking is hardcoded) and `visualize` in #132 (composites are always stretched)).
 This way an input left at its form default round-trips correctly **whether or not**
 MAAP re-emits the flag for a default-valued boolean — omitted → run.sh keeps the
 config default; explicitly toggled → `--flag true|false` overrides. (Do NOT set the

@@ -55,16 +55,11 @@ inputs:
     doc: Apply the cloud mask (index/water products only).
     type: boolean?
     default: false
-  - name: visualize
-    label: Visualize (RGB only)
-    doc: Apply normalization + gamma correction for RGB products.
-    type: boolean?
-    default: false
   - name: gamma
     label: Gamma correction
-    doc: Gamma correction for RGB products (only used when visualize is true).
+    doc: "Gamma for RGB products (truecolor/colorir), applied after the per-band 2-98% stretch. >1 brightens, <1 darkens."
     type: float?
-    default: 0.7
+    default: 2.2
   - name: dst_crs
     label: Target CRS
     doc: "Target CRS: native (default) | EPSG:3857 | EPSG:4326."

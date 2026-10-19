@@ -68,8 +68,7 @@ def _bands(rows=32, cols=32, fill=5000):
 
 class TestCompositeAlphaBand:
 
-    @pytest.mark.parametrize("visualize", [True, False])
-    def test_zero_fill_border_becomes_transparent(self, patched_scene, visualize):
+    def test_zero_fill_border_becomes_transparent(self, patched_scene):
         """Vendor fill (0 in every band) -> alpha 0; imagery -> alpha 255."""
         from satellogic.satellogic_v2 import genTrueColor
 
@@ -78,7 +77,7 @@ class TestCompositeAlphaBand:
             b[:8, :] = 0  # fill border across all bands
         out_dir = patched_scene(bands)
 
-        outfile = genTrueColor([], {}, out_dir, visualize=visualize, gamma=2.2)
+        outfile = genTrueColor([], {}, out_dir, gamma=2.2)
 
         with rasterio.open(outfile) as src:
             assert src.count == 4
@@ -98,7 +97,7 @@ class TestCompositeAlphaBand:
         bands[0][20:24, 10:14] = 0  # blue only
         out_dir = patched_scene(bands)
 
-        outfile = genTrueColor([], {}, out_dir, visualize=True, gamma=2.2)
+        outfile = genTrueColor([], {}, out_dir, gamma=2.2)
 
         with rasterio.open(outfile) as src:
             alpha = src.read(4)
@@ -122,7 +121,7 @@ class TestCompositeAlphaBand:
             b[:8, :] = 0
         out_dir = patched_scene(bands)
 
-        outfile = genTrueColor([], {}, out_dir, visualize=True, gamma=2.2)
+        outfile = genTrueColor([], {}, out_dir, gamma=2.2)
 
         with rasterio.open(outfile) as src:
             alpha = src.read(4)
@@ -139,7 +138,7 @@ class TestCompositeAlphaBand:
             b[:, :6] = 0  # fill along the left edge
         out_dir = patched_scene(bands)
 
-        outfile = gencolorIR([], {}, out_dir, visualize=True, gamma=2.2)
+        outfile = gencolorIR([], {}, out_dir, gamma=2.2)
 
         with rasterio.open(outfile) as src:
             assert src.count == 4
@@ -153,7 +152,41 @@ class TestCompositeAlphaBand:
         from satellogic.satellogic_v2 import genTrueColor
 
         out_dir = patched_scene(_bands())
-        outfile = genTrueColor([], {}, out_dir, visualize=True, gamma=2.2)
+        outfile = genTrueColor([], {}, out_dir, gamma=2.2)
 
         with rasterio.open(outfile) as src:
             assert src.nodata is None
+
+
+class TestCompositesAreAlwaysStretched:
+    """Issue #132: the composites used to have a ``visualize`` toggle, off by
+    default in DPS, and the off path wrote raw reflectance x 255. Land
+    reflectance is ~0-0.3, so the published COG rendered near-black in VEDA
+    (mean DN 36.5 vs the vendor VISUAL's 118.7). The stretch now always runs.
+    """
+
+    @pytest.mark.parametrize("fn_name", ["genTrueColor", "gencolorIR"])
+    def test_dark_scene_fills_the_8bit_range_at_defaults(self, patched_scene, fn_name):
+        from satellogic import satellogic_v2
+
+        # Reflectance 0.05-0.10: raw x 255 would top out at ~25 DN.
+        bands = _bands(fill=500)
+        bands = [b // 4 + 500 for b in bands]  # 500..999 -> 0.05..0.10
+        out_dir = patched_scene(bands)
+
+        outfile = getattr(satellogic_v2, fn_name)([], {}, out_dir)
+
+        with rasterio.open(outfile) as src:
+            rgb = src.read([1, 2, 3])
+        assert rgb.max() >= 250, "per-band 2-98% stretch must reach the top of the range"
+        assert rgb.mean() > 100, "gamma 2.2 after the stretch must brighten, not darken"
+
+    def test_cli_has_no_visualize_flag(self):
+        import inspect
+        from satellogic import process_satellogic, satellogic_v2
+
+        assert "--visualize" not in inspect.getsource(process_satellogic)
+        for fn in (satellogic_v2.genTrueColor, satellogic_v2.gencolorIR):
+            params = inspect.signature(fn).parameters
+            assert "visualize" not in params
+            assert params["gamma"].default == 2.2

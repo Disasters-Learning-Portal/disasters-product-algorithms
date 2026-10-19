@@ -268,11 +268,32 @@ def getSolarZenithAngle(indir):
   solarZenithAngle = 90. - float(sun_elevation)
   return solarZenithAngle
 
+def getProcessingLevel(indir):
+  # Collection 2 processing level ('1' or '2') from the MTL filename,
+  # e.g. LC09_L2SP_..._MTL.xml -> '2', LC09_L1TP_..._MTL.xml -> '1'
+  metadataFile = glob.glob(os.path.join(indir, '*_MTL.xml'))[0]
+  return os.path.basename(metadataFile).split('_')[1][1]
+
+def normalizeSunAngle(refl, indir, sun_zen):
+  # Divide by cos(solar zenith) ONLY for Level-1 TOA reflectance. The USGS
+  # Collection 2 sun-angle correction is part of the L1 TOA conversion; L2
+  # surface reflectance (LaSRC) is already corrected, and dividing it again
+  # inflates it by 1/cos(SZA) (~1.3x at 40 deg, 2x at 60 deg).
+  # References:
+  #   L1 TOA rho = rho'/cos(SZA): https://www.usgs.gov/landsat-missions/using-usgs-landsat-level-1-data-product
+  #   L2 SR = DN*0.0000275 - 0.2, no sun-angle step: https://www.usgs.gov/faqs/how-do-i-use-a-scale-factor-landsat-level-2-science-products
+  #   LaSRC input is sun-angle-corrected TOA: https://above.gsfc.nasa.gov/pdfs/Landsat_Surface_Reflectance_ABoVE_21Apr2017.pdf
+  #   EVI is defined on L2 SR: https://www.usgs.gov/landsat-missions/landsat-enhanced-vegetation-index
+  if getProcessingLevel(indir) != '1':
+    return refl
+  print("\t* Normalizing TOA reflectance by the cosine of the zenith angle")
+  return refl/np.cos(np.radians(sun_zen))
+
 def getReflectanceConstants(indir, band):  
   # Extract multiplicative scale factor and additive offset from metadata
 
   metadataFile = glob.glob(os.path.join(indir, '*_MTL.xml'))[0]
-  level = os.path.basename(metadataFile).split('_')[1][1]
+  level = getProcessingLevel(indir)
   metadata = ET.parse(metadataFile)
   root = metadata.getroot()
   if level == '1':
@@ -302,9 +323,7 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '8')
   b8 = (mult_scale_factor*b8)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b8 = b8/np.cos(np.radians(sunzen))
+  b8 = normalizeSunAngle(b8, indir, sunzen)
 
   # Convert from reflectance to 8-bit values
   print("\n\t* Converting reflectance to 8-bit values")
@@ -356,9 +375,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   r_nodata = np.where(r == 0)
   r = (mult_scale_factor*r)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle...")
-  r = r/np.cos(np.radians(sunzen))
+  r = normalizeSunAngle(r, indir, sunzen)
   r[r_nodata] = 0
   
 
@@ -376,9 +393,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   g_nodata = np.where(g == 0)
   g = (mult_scale_factor*g)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  g = g/np.cos(np.radians(sunzen))
+  g = normalizeSunAngle(g, indir, sunzen)
   g[g_nodata] = 0
   
   ### Blue ###
@@ -395,9 +410,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   b_nodata = np.where(b == 0)
   b = (mult_scale_factor*b)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b = b/np.cos(np.radians(sunzen))
+  b = normalizeSunAngle(b, indir, sunzen)
   b[b_nodata] = 0
   
 
@@ -475,9 +488,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   b4 = (mult_scale_factor*b4)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b4 = b4/np.cos(np.radians(sun_zen))
+  b4 = normalizeSunAngle(b4, indir, sun_zen)
 
   ### B5 ###
   print("\n\t* Opening B5 file")
@@ -492,9 +503,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   b5 = (mult_scale_factor*b5)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b5 = b5/np.cos(np.radians(sun_zen))
+  b5 = normalizeSunAngle(b5, indir, sun_zen)
 
   ### B3 ###
   print("\n\t* Opening B3 file")
@@ -509,9 +518,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   b3 = (mult_scale_factor*b3)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b3 = b3/np.cos(np.radians(sun_zen))
+  b3 = normalizeSunAngle(b3, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -598,9 +605,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   b4 = (mult_scale_factor*b4)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b4 = b4/np.cos(np.radians(sun_zen))
+  b4 = normalizeSunAngle(b4, indir, sun_zen)
 
   ### B5 ###
   print("\n\t* Opening B5 file")
@@ -615,9 +620,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   b5 = (mult_scale_factor*b5)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b5 = b5/np.cos(np.radians(sun_zen))
+  b5 = normalizeSunAngle(b5, indir, sun_zen)
 
   ### B6 ###
   print("\n\t* Opening B6 file")
@@ -632,9 +635,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '6')
   b6 = (mult_scale_factor*b6)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b6 = b6/np.cos(np.radians(sun_zen))
+  b6 = normalizeSunAngle(b6, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -719,9 +720,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Red ###
   print("\n\t* Opening Band 4 file")
@@ -738,9 +737,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   r = (mult_scale_factor*r)+add_offset
   
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  r = r/np.cos(np.radians(sun_zen))
+  r = normalizeSunAngle(r, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -808,9 +805,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   g = (mult_scale_factor*g)+add_offset
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle...")
-  g = g/np.cos(np.radians(sun_zen))
+  g = normalizeSunAngle(g, indir, sun_zen)
 
   ### NIR ###
   print("\n\t* Opening Band 5 file")
@@ -827,10 +822,8 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
 
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -896,9 +889,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   g = (mult_scale_factor*g)+add_offset  
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  g = g/np.cos(np.radians(sun_zen))
+  g = normalizeSunAngle(g, indir, sun_zen)
 
   ### Shortwave Infrared ###
   print("\n\t* Opening Band 6 file")
@@ -915,9 +906,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '6')
   swir = (mult_scale_factor*swir)+add_offset  
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  swir = swir/np.cos(np.radians(sun_zen))
+  swir = normalizeSunAngle(swir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -983,9 +972,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Red ###
   print("\n\t* Opening Band 4 file")
@@ -1002,9 +989,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   r = (mult_scale_factor*r)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  r = r/np.cos(np.radians(sun_zen))
+  r = normalizeSunAngle(r, indir, sun_zen)
 
   ### Blue ###
   print("\n\t* Opening Band 2 file")
@@ -1021,9 +1006,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '2')
   b = (mult_scale_factor*b)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b = b/np.cos(np.radians(sun_zen))
+  b = normalizeSunAngle(b, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -1087,9 +1070,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### SWIR ###
   print("\n\t* Opening Band 7 file")
@@ -1106,9 +1087,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '7')
   swir = (mult_scale_factor*swir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  swir = swir/np.cos(np.radians(sun_zen))
+  swir = normalizeSunAngle(swir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -1360,9 +1339,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
   mult_scale_factor, add_offset = getReflectanceConstants(safe, '5')
   nir_array = (mult_scale_factor*nir_array)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir_array = nir_array/np.cos(np.radians(sun_zen))
+  nir_array = normalizeSunAngle(nir_array, safe, sun_zen)
   
   # get year
   year = os.path.basename(indir)[:4]

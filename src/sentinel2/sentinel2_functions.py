@@ -185,12 +185,14 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   g = np.clip(g, 0, 1)
   r = np.clip(r, 0, 1)
 
-  # bytescale bands
+  # bytescale bands. Clamp to [0, 255] BEFORE the uint8 assignment below:
+  # reflectance in (0, rgb_min) stretches negative, and a negative float cast
+  # to uint8 wraps (0.01 -> 249), rendering dark targets such as water bright.
   rgb_min = 0.04
   rgb_max = 1
-  b_enhanced = ((b - rgb_min) / (rgb_max - rgb_min))*255
-  g_enhanced = ((g - rgb_min) / (rgb_max - rgb_min))*255
-  r_enhanced = ((r - rgb_min) / (rgb_max - rgb_min))*255
+  b_enhanced = np.clip(((b - rgb_min) / (rgb_max - rgb_min))*255, 0, 255)
+  g_enhanced = np.clip(((g - rgb_min) / (rgb_max - rgb_min))*255, 0, 255)
+  r_enhanced = np.clip(((r - rgb_min) / (rgb_max - rgb_min))*255, 0, 255)
 
   # determine no data locations
   b_no_data = np.where(b == 0.0)

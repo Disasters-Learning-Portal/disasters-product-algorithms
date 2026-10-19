@@ -87,7 +87,7 @@ Skysat       SkySat_<LEVEL>_<Product>[_<scene>]_<ISO>.tif
 
 Umbra        Umbra-<NN>_sigma0_filtered<N>_<ISO>.tif
 Capella      Capella[-<NN>]_sigma0_<ISO>.tif
-Iceye        ICEYE_sigma0-dB_<ISO>.tif
+Iceye        ICEYE-X<NN>_sigma0-dB_filtered<N>_<ISO>.tif
 ```
 
 `process_skysat` names carry two tokens the vendor composites do not. `<LEVEL>` is

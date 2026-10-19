@@ -5,9 +5,10 @@ Pins the pure-Python parts that need no vendor S3:
 1. ``parse_corner_coordinate`` accepts both the bracketed/comma form the ICEYE
    metadata reference documents (``[16878,1,35.17738,-118.11233]``) and the
    whitespace form, and returns ``(col, row, lat, lon)``.
-2. ``georeference_from_iceye_xml`` treats the corner coordinates as pixel
-   CENTRES: the derived geotransform maps pixel centre (0.5, 0.5) back onto
-   ``coord_first_near`` and the far/last corners onto theirs.
+2. ``georeference_from_iceye_xml`` treats the corner coordinates as 1-based
+   pixel-CENTRE indices: the derived geotransform maps GDAL pixel centre
+   (0.5, 0.5) -- XML ``1 1`` -- back onto ``coord_first_near`` and the
+   far/last corners onto theirs.
 3. ``sigmaCalib`` writes ``ICEYE_NODATA`` into the zero-fill border (no
    ``-inf`` from ``log10(0)``), names the output through the shared SAR
    builder, and returns a single path.
@@ -82,7 +83,8 @@ def _skewed_grid(lat0=34.0, lon0=-86.0, dlat=-0.0001, dlon=0.0001, rot=0.00002):
     def corner(r, c):
         lat = lat0 + r * dlat + c * rot
         lon = lon0 + c * dlon + r * rot
-        return f"[{c},{r},{lat:.10f},{lon:.10f}]"
+        # XML (col, row) are 1-based pixel-centre indices.
+        return f"[{c + 1},{r + 1},{lat:.10f},{lon:.10f}]"
     return corner
 
 
@@ -121,18 +123,21 @@ def test_georeference_reports_missing_corners(tmp_path):
 
 # ----------------------------------------------------------- sigmaCalib
 
-CACHE = "/tmp/s3_temp"  # hard-coded download cache inside iceye_v2
+NORTH_UP_GT = (-86.0, 1e-4, 0.0, 34.0, 0.0, -1e-4)
 
 
 @pytest.fixture
-def staged_grd(monkeypatch):
-    """A synthetic un-georeferenced GRD + XML staged in the download cache
-    sigmaCalib probes, under a unique stem, so no S3 call is made. Only the
-    files this fixture wrote are removed afterwards."""
+def staged_grd(monkeypatch, tmp_path):
+    """A synthetic GRD + XML staged in the ``download_dir`` sigmaCalib
+    probes, so no S3 call is made. The GRD carries a north-up EPSG:4326
+    geotransform, so the output is written pixel-for-pixel (no warp) and can
+    be compared against the input DN directly. The other georef branches are
+    pinned in test_iceye_gcp_georef.py."""
     monkeypatch.setattr(iceye_v2, "download_s3_file",
                         lambda *a, **k: pytest.fail("download_s3_file must not be called"))
 
-    os.makedirs(CACHE, exist_ok=True)
+    cache = tmp_path / "dl"
+    cache.mkdir()
     stem = f"ICEYE_X48_GRD_SLH_{uuid.uuid4().hex[:7]}_20260513T154816"
     cols, rows = 64, 48
     rng = np.random.default_rng(0)
@@ -140,24 +145,24 @@ def staged_grd(monkeypatch):
     dn[:6, :] = 0   # zero-fill border rows
     dn[:, :9] = 0   # zero-fill border cols
 
-    tif = f"{CACHE}/{stem}.tif"
-    xml = f"{CACHE}/{stem}.xml"
+    tif = f"{cache}/{stem}.tif"
+    xml = f"{cache}/{stem}.xml"
     drv = gdal.GetDriverByName("GTiff")
     ds = drv.Create(tif, cols, rows, 1, gdal.GDT_UInt16)
+    ds.SetGeoTransform(NORTH_UP_GT)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    ds.SetProjection(srs.ExportToWkt())
     ds.GetRasterBand(1).WriteArray(dn)
     ds = None
     _write_xml(xml, cols, rows, _skewed_grid())
 
-    try:
-        yield {
-            "tifs": [f"s3://csdap-iceye-delivery/disasters/x/{stem}.tif"],
-            "xmls": [f"s3://csdap-iceye-delivery/disasters/x/{stem}.xml"],
-            "dn": dn,
-        }
-    finally:
-        for p in (tif, xml):
-            if os.path.exists(p):
-                os.remove(p)
+    return {
+        "tifs": [f"s3://csdap-iceye-delivery/disasters/x/{stem}.tif"],
+        "xmls": [f"s3://csdap-iceye-delivery/disasters/x/{stem}.xml"],
+        "dn": dn,
+        "download_dir": str(cache),
+    }
 
 
 def test_nodata_sentinel_is_not_zero():
@@ -166,7 +171,8 @@ def test_nodata_sentinel_is_not_zero():
 
 def test_sigma_calib_border_is_declared_nodata_and_name_is_canonical(staged_grd, tmp_path):
     out = sigmaCalib(staged_grd["tifs"], staged_grd["xmls"],
-                     save_location=str(tmp_path / "out"), filter_size=3)
+                     save_location=str(tmp_path / "out"), filter_size=3,
+                     download_dir=staged_grd["download_dir"])
 
     assert isinstance(out, str)
     assert os.path.basename(out) == "ICEYE-X48_sigma0-dB_filtered3_2026-05-13T15:48:16Z.tif"
@@ -183,8 +189,8 @@ def test_sigma_calib_border_is_declared_nodata_and_name_is_canonical(staged_grd,
     assert (arr[~border] != ICEYE_NODATA).all(), "valid pixels were overwritten with nodata"
     assert arr[~border].min() > -100 and arr[~border].max() < 100, "dB range is implausible"
 
-    # Un-georeferenced input -> XML fallback engaged.
-    assert gt != (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    # North-up embedded geotransform -> used as-is.
+    assert gt == pytest.approx(NORTH_UP_GT)
     assert "4326" in proj
 
 
@@ -201,7 +207,8 @@ def test_sigma_calib_filters_raw_dn_before_square_and_calibrate(staged_grd, tmp_
 
     monkeypatch.setattr(iceye_v2, "lee_filter", spy)
     sigmaCalib(staged_grd["tifs"], staged_grd["xmls"],
-               save_location=str(tmp_path / "out"), filter_size=3)
+               save_location=str(tmp_path / "out"), filter_size=3,
+               download_dir=staged_grd["download_dir"])
 
     img = seen["img"]
     dn = staged_grd["dn"]

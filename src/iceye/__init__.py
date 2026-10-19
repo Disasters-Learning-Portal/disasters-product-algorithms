@@ -8,5 +8,7 @@ __all__ = [
     'parse_grd_metadata',
     'parse_corner_coordinate',
     'georeference_from_iceye_xml',
+    'resolve_georeference',
+    'write_georeferenced',
     'sigmaCalib'
 ]

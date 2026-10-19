@@ -16,6 +16,7 @@ from iceye.iceye_v2 import (
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
 from shared_utils.plotting import save_cog_png
+from shared_utils.scratch import download_scratch
 
 
 # Fixed processing parameters -- same treatment as Capella (PR #76): one
@@ -73,7 +74,7 @@ def main():
 
     args = parser.parse_args()
 
-    metadata = load_metadata_json(args.metadata_json)
+    metadata = load_metadata_json(args.metadata_json) or {}
     # Fill in the vendor as the default provenance, but never clobber a
     # SOURCE the operator supplied via --metadata-json.
     metadata.setdefault("SOURCE", SOURCE)
@@ -95,24 +96,31 @@ def main():
 
     print("\nGenerating ICEYE Sigma0 products...")
 
-    # Speckle filtering is always on; --filter_size only tunes the kernel.
-    outfile = sigmaCalib(
-        s3_image_paths=image_paths,
-        s3_metadata_paths=metadata_paths,
-        save_location=args.output,
-        filter_size=args.filter_size
-    )
+    # The raw GRD + XML download into a per-run scratch dir that is deleted
+    # when the run ends -- success, failure or Ctrl-C (.clinerules.md rule
+    # 61). Never --output: that is the notebook OUTPUT_DIR, whose every .tif
+    # the upload cell publishes, and the GRD is licensed vendor data.
+    with download_scratch("iceye") as download_dir:
 
-    print("\nConverting to COG...")
+        # Speckle filtering is always on; --filter_size only tunes the kernel.
+        outfile = sigmaCalib(
+            s3_image_paths=image_paths,
+            s3_metadata_paths=metadata_paths,
+            save_location=args.output,
+            filter_size=args.filter_size,
+            download_dir=download_dir,
+        )
 
-    cog_path = convert_to_cog(
-        outfile,
-        nodata=ICEYE_NODATA,
-        dst_crs=DST_CRS,
-        compression=COMPRESSION,
-        compression_level=COMPRESSION_LEVEL,
-        metadata=metadata,
-    )
+        print("\nConverting to COG...")
+
+        cog_path = convert_to_cog(
+            outfile,
+            nodata=ICEYE_NODATA,
+            dst_crs=DST_CRS,
+            compression=COMPRESSION,
+            compression_level=COMPRESSION_LEVEL,
+            metadata=metadata,
+        )
 
     print(f"COG created: {cog_path}")
 

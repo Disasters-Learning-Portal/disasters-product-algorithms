@@ -1,6 +1,6 @@
 """Raw vendor downloads must not outlive the run that fetched them.
 
-Operators running capella/skysat (and umbra/satellogic) workflows watched /tmp
+Operators running capella/skysat (and umbra/satellogic/iceye) workflows watched /tmp
 fill up run after run: every CLI downloaded its raw scenes into a shared,
 hardcoded ``/tmp/s3_temp`` that nothing ever deleted (capella removed its raw
 file only after a SUCCESSFUL COG; umbra, skysat and satellogic never did).
@@ -26,7 +26,7 @@ import pytest
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 SRC = os.path.join(REPO_ROOT, "src")
-SENSORS = ("capella", "umbra", "skysat", "satellogic")
+SENSORS = ("capella", "umbra", "skysat", "satellogic", "iceye")
 
 
 class _Boom(RuntimeError):
@@ -95,6 +95,15 @@ def _run_cli(sensor, monkeypatch, tmp_path, fail):
         monkeypatch.setattr(mod, "genNDVI", fake)
         argv = ["process_satellogic", "--product", "ndvi", "--level", "L1D",
                 "--date", "2026-07-14 12:00:00", "--output", out]
+    elif sensor == "iceye":
+        from iceye import process_iceye as mod
+        monkeypatch.setattr(mod, "retrieve_iceye_resources",
+                            lambda **kw: (["s3://b/p/ICEYE_X1_GRD_SM_1_20261009T040555.xml"],
+                                          ["s3://b/p/ICEYE_X1_GRD_SM_1_20261009T040555.tif"]))
+        monkeypatch.setattr(mod, "sigmaCalib", fake)
+        monkeypatch.setattr(mod, "convert_to_cog", lambda path, **kw: str(tmp_path / "x.tif"))
+        monkeypatch.setattr(mod, "save_cog_png", lambda **kw: None)
+        argv = ["process_iceye", "--date", "2026-10-09 04:05:55", "--output", out]
     else:  # pragma: no cover
         raise AssertionError(sensor)
 
@@ -173,6 +182,12 @@ def _library_call(sensor, monkeypatch, tmp_path, download_dir):
         monkeypatch.setattr(m, "getSolarZenithAngle", lambda meta: 0.0)
         call = lambda: m.genNDVI(["s3://b/p/x_TOA_0.tif"], {}, save,
                                  download_dir=download_dir)
+    elif sensor == "iceye":
+        from iceye import iceye_v2 as m
+        monkeypatch.setattr(m, "download_s3_file", dl)
+        call = lambda: m.sigmaCalib(["s3://b/p/ICEYE_X1_GRD_SM_1_20261009T040555.tif"],
+                                    ["s3://b/p/ICEYE_X1_GRD_SM_1_20261009T040555.xml"],
+                                    save_location=save, download_dir=download_dir)
     else:  # pragma: no cover
         raise AssertionError(sensor)
     return call, record

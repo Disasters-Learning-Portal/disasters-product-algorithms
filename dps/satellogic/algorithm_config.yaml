@@ -46,16 +46,11 @@ inputs:
     doc: "Satellogic processing level to select, e.g. L1D or L1B."
     type: string
     default: "L1D"
-  - name: visualize
-    label: Visualize (RGB only)
-    doc: Apply normalization + gamma correction for RGB products (--visualize).
-    type: boolean
-    default: false
   - name: gamma
     label: Gamma correction
-    doc: Gamma correction for RGB products (only used when visualize is true).
+    doc: "Gamma for RGB products (truecolor/colorir), applied after the per-band 2-98% stretch. >1 brightens, <1 darkens."
     type: float
-    default: 0.7
+    default: 2.2
   - name: filter_size
     label: Index filter kernel
     doc: "Lee-filter window (pixels) applied to spectral indices (NDVI/NDWI/EVI). Odd only: 3, 5, or 7."

@@ -571,7 +571,7 @@ def apply_lee_filter(arr, size):
 
 # Functions for specific products
 
-def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, download_dir="/tmp/s3_temp"):
+def genTrueColor(paths, meta, out="/tmp/s3_temp", gamma=2.2, download_dir="/tmp/s3_temp"):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False, download_dir=download_dir)
 
@@ -590,13 +590,12 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, dow
     valid_mask = np.isfinite(red) & np.isfinite(green) & np.isfinite(blue)
     alpha = (valid_mask * 255).astype(np.uint8)
 
-    if visualize:
-        r = normalize_band(red)
-        g = normalize_band(green)
-        b = normalize_band(blue)
-        rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-    else:
-        rgb = np.clip(np.dstack([red, green, blue]), 0, 1)
+    # Always stretch: raw reflectance x 255 is near-black (land is ~0-0.3) and
+    # the published COG is what VEDA renders, with no rescale (issue #132).
+    r = normalize_band(red)
+    g = normalize_band(green)
+    b = normalize_band(blue)
+    rgb = apply_gamma(np.dstack([r, g, b]), gamma)
 
     # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
     out_img = np.nan_to_num(rgb, nan=0.0)
@@ -612,7 +611,7 @@ def genTrueColor(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, dow
     return outfile
 
 
-def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, download_dir="/tmp/s3_temp"):
+def gencolorIR(paths, meta, out="/tmp/s3_temp", gamma=2.2, download_dir="/tmp/s3_temp"):
     # Color composites never mask clouds (ticket #320); skip the cloud fetch.
     ds, cloud, in_file, level, scale_factor, sunzen = prepare_scene(paths, meta, use_mask=False, download_dir=download_dir)
 
@@ -627,13 +626,11 @@ def gencolorIR(paths, meta, out="/tmp/s3_temp", visualize=True, gamma=0.7, downl
     valid_mask = np.isfinite(nir) & np.isfinite(red) & np.isfinite(green)
     alpha = (valid_mask * 255).astype(np.uint8)
 
-    if visualize:
-        r = normalize_band(nir)
-        g = normalize_band(red)
-        b = normalize_band(green)
-        rgb = apply_gamma(np.dstack([r, g, b]), gamma)
-    else:
-        rgb = np.clip(np.dstack([nir, red, green]), 0, 1)
+    # Always stretch -- see genTrueColor.
+    r = normalize_band(nir)
+    g = normalize_band(red)
+    b = normalize_band(green)
+    rgb = apply_gamma(np.dstack([r, g, b]), gamma)
 
     # nan_to_num before the cast: NaN -> uint8 is undefined behavior.
     out_img = np.nan_to_num(rgb, nan=0.0)

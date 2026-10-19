@@ -215,28 +215,32 @@ class TestProductsUseTheResolvedOrder:
         arr *= SCALE
         return int((np.clip(arr, 0, 1) * 255).astype(np.uint8)[0])
 
-    def test_truecolor_reads_band1_as_red_on_l1b(self, patched):
+    def test_truecolor_reads_band1_as_red_on_l1b(self, patched, monkeypatch):
         """The defect in one assertion: on L1B, band 1 IS red.
 
-        Flat bands make normalize_band degenerate (hi == lo -> zeros), so this
-        reads the pre-stretch path: visualize=False writes clipped reflectance
-        straight through.
+        Flat bands make normalize_band degenerate (hi == lo -> zeros), so the
+        stretch is swapped for a plain clip and gamma set to 1.0: the writer then
+        emits clipped reflectance straight through, which is what _dn replays.
         """
+        from satellogic import satellogic_v2
         from satellogic.satellogic_v2 import genTrueColor
 
+        monkeypatch.setattr(satellogic_v2, "normalize_band", lambda b: np.clip(b, 0, 1))
         ds, out = patched("L1B", bands=self._distinct_bands())
-        path = genTrueColor([IN_FILE], [], out, visualize=False)
+        path = genTrueColor([IN_FILE], [], out, gamma=1.0)
 
         written = gdal.Open(path)
         assert int(written.GetRasterBand(1).ReadAsArray()[0, 0]) == self._dn(2000)  # band 1
         assert int(written.GetRasterBand(3).ReadAsArray()[0, 0]) == self._dn(6000)  # band 3
 
-    def test_truecolor_reads_band3_as_red_on_l1d(self, patched):
+    def test_truecolor_reads_band3_as_red_on_l1d(self, patched, monkeypatch):
         """The other level, unchanged -- this is the regression that matters."""
+        from satellogic import satellogic_v2
         from satellogic.satellogic_v2 import genTrueColor
 
+        monkeypatch.setattr(satellogic_v2, "normalize_band", lambda b: np.clip(b, 0, 1))
         ds, out = patched("L1D", bands=self._distinct_bands())
-        path = genTrueColor([IN_FILE], [], out, visualize=False)
+        path = genTrueColor([IN_FILE], [], out, gamma=1.0)
 
         written = gdal.Open(path)
         assert int(written.GetRasterBand(1).ReadAsArray()[0, 0]) == self._dn(6000)  # band 3

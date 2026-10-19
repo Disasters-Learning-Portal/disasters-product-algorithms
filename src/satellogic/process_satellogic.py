@@ -88,16 +88,10 @@ def main():
     parser.add_argument("--output", default="/tmp/s3_temp")
 
     parser.add_argument(
-        "--visualize",
-        action="store_true",
-        help="Apply normalization + gamma correction for RGB products only",
-    )
-
-    parser.add_argument(
         "--gamma",
         type=float,
-        default=0.7,
-        help="Gamma correction for RGB products (default 0.7)",
+        default=2.2,
+        help="Gamma for RGB products, applied after the per-band 2-98%% stretch (default 2.2; >1 brightens, <1 darkens)",
     )
 
     parser.add_argument(
@@ -173,7 +167,6 @@ def main():
                         scene_tifs,
                         metadata,
                         args.output,
-                        visualize=args.visualize,
                         gamma=args.gamma,
                         download_dir=download_dir,
                     )
@@ -185,7 +178,6 @@ def main():
                         scene_tifs,
                         metadata,
                         args.output,
-                        visualize=args.visualize,
                         gamma=args.gamma,
                         download_dir=download_dir,
                     )

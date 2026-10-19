@@ -279,6 +279,11 @@ def normalizeSunAngle(refl, indir, sun_zen):
   # Collection 2 sun-angle correction is part of the L1 TOA conversion; L2
   # surface reflectance (LaSRC) is already corrected, and dividing it again
   # inflates it by 1/cos(SZA) (~1.3x at 40 deg, 2x at 60 deg).
+  # References:
+  #   L1 TOA rho = rho'/cos(SZA): https://www.usgs.gov/landsat-missions/using-usgs-landsat-level-1-data-product
+  #   L2 SR = DN*0.0000275 - 0.2, no sun-angle step: https://www.usgs.gov/faqs/how-do-i-use-a-scale-factor-landsat-level-2-science-products
+  #   LaSRC input is sun-angle-corrected TOA: https://above.gsfc.nasa.gov/pdfs/Landsat_Surface_Reflectance_ABoVE_21Apr2017.pdf
+  #   EVI is defined on L2 SR: https://www.usgs.gov/landsat-missions/landsat-enhanced-vegetation-index
   if getProcessingLevel(indir) != '1':
     return refl
   print("\t* Normalizing TOA reflectance by the cosine of the zenith angle")

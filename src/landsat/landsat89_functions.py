@@ -698,6 +698,27 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
+def normalized_difference(a, b, nodatapix, nodata=-9999.0):
+  """(a - b) / (a + b) on every pixel, nodata only where the QA says fill.
+
+  Inputs are clamped to [0, 1] first -- the USGS Collection 2 surface
+  reflectance valid range (DN 7273-43636 -> ~0-1.0). Real dark targets fall
+  below it: LaSRC routinely returns slightly negative NIR over water, which
+  would push NDWI past +1. Clamping projects that onto the physical floor, so
+  clear water gets NDWI = 1 (its correct limit). Every pixel is written: the
+  old `np.empty` + `>= 0` gate left negative-reflectance pixels holding
+  uninitialised memory. A zero denominator (both bands at 0) is nodata.
+  Ref: https://www.usgs.gov/faqs/how-do-i-use-a-scale-factor-landsat-level-2-science-products
+  """
+  a = np.clip(a, 0, 1)
+  b = np.clip(b, 0, 1)
+  denom = a + b
+  valid = denom > 0
+  out = np.full(np.shape(a), nodata, dtype=np.float64)
+  out[valid] = (a[valid] - b[valid]) / denom[valid]
+  out[nodatapix] = nodata
+  return out
+
 def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   # Function to create a Landsat 8 NDVI image, based upon
   # input GeoTIFF files (full path) for B5 (NIR), B4 (red), 
@@ -752,14 +773,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NDVI, (NIR-R)/(NIR+R) or (B5-B4)/(B5+B4)
   print("\n\t* Calculating NDVI")
-  ndvi = np.empty(np.shape(r), 'float')
-  ok = np.where( (r >= 0) & (nir >= 0) )
-  ndvi[ok] = (nir[ok]-r[ok])/(nir[ok]+r[ok])
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  ndvi = np.clip(ndvi, -1.0, 1.0)
-  ndvi[nodatapix] = -9999.0
+  ndvi = normalized_difference(nir, r, nodatapix)
 
 
   # Write a Raw GeoTIFF--No Color Table
@@ -838,14 +852,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NDWI
   print("\n\t* Calculating NDWI")
-  ndwi = np.empty(np.shape(g), 'float')
-  ok = np.where( (g >= 0) & (nir >= 0) )
-  ndwi[ok] = (g[ok]-nir[ok])/(g[ok]+nir[ok])
-  
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  ndwi = np.clip(ndwi, -1.0, 1.0)
-  ndwi[nodatapix] = -9999.0
+  ndwi = normalized_difference(g, nir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NDWI geotiff")
@@ -921,14 +928,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate MNDWI
   print("\n\t* Calculating mNDWI")
-  mndwi = np.empty(np.shape(g), 'float')
-  ok = np.where( (g >= 0) & (swir >= 0) )
-  mndwi[ok] = (g[ok]-swir[ok])/(g[ok]+swir[ok])
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  mndwi = np.clip(mndwi, -1.0, 1.0)
-  mndwi[nodatapix] = -9999.0
+  mndwi = normalized_difference(g, swir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating a mNDWI geotiff ")
@@ -1021,15 +1021,23 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate EVI
   print("\n\t* Calculating EVI")
-  evi = np.empty(np.shape(nir), 'float')
-  ok = np.where( (r >= 0) & (nir >= 0) & (b >= 0))
-  num = (nir[ok] - r[ok])
-  denom = (nir[ok]+(6*r[ok])- (7.5*b[ok])+1)
-  evi[ok] = 2.5*(num/denom)
+  # Every pixel is written (np.full, not np.empty: the old `>= 0` gate left
+  # negative-reflectance pixels -- routine for blue over dark targets in L2 SR
+  # -- holding uninitialised memory). Inputs are clamped to the USGS SR valid
+  # range [0, 1], as in normalized_difference. EVI's denominator is not a sum
+  # of non-negative terms (-7.5*blue), so it can pass through 0: guard its
+  # magnitude rather than its sign.
+  nir = np.clip(nir, 0, 1)
+  r = np.clip(r, 0, 1)
+  b = np.clip(b, 0, 1)
+  evi = np.full(np.shape(nir), -9999.0)
+  denom = nir + (6*r) - (7.5*b) + 1
+  ok = np.abs(denom) > 1e-6
+  evi[ok] = 2.5*((nir[ok] - r[ok])/denom[ok])
 
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
-  evi = np.clip(evi, -1.0, 1.0)
+  evi[ok] = np.clip(evi[ok], -1.0, 1.0)
   evi[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
@@ -1102,16 +1110,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NBR
   print("\n\t* Calculating NBR")
-  nbr = np.empty(np.shape(nir), 'float')
-  ok = np.where( (nir >= 0) & (swir >= 0))
-  num = (nir[ok] - swir[ok])
-  denom = (nir[ok] + swir[ok])
-  nbr[ok] = num/denom
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  nbr = np.clip(nbr, -1.0, 1.0)
-  nbr[nodatapix] = -9999.0
+  nbr = normalized_difference(nir, swir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NBR geotiff")

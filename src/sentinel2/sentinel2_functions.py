@@ -30,6 +30,9 @@ from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
 from shared_utils.product_paths import product_dir
+from shared_utils.landcover import (
+    read_reclass, reclass_cdl_array, reclass_path, reclass_worldcover_array,
+    select_water_sample, write_reclass)
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -758,35 +761,14 @@ def download_cdl(image, year, outname):
 
 def reclass_cdl(cdl_path, no_data_locs):
     # WARNING: AOIs that extend outside of the U.S. boundaries (ocean, Canada, Mexico) will have no data
-    # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-    codes_dict = {1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 10: 1, 11: 1, 12: 1, 13: 1, \
-    14: 1, 21: 1, 22: 1, 23: 1, 24: 1, 25: 1, 26: 1, 27: 1, 28: 1, 29: 1, 30: 1, \
-    31: 1, 32: 1, 33: 1, 34: 1, 35: 1, 36: 1, 37: 1, 38: 1, 39: 1, 41: 1, 42: 1, \
-    43: 1, 44: 1, 45: 1, 46: 1, 47: 1, 48: 1, 49: 1, 50: 1, 51: 1, 52: 1, 53: 1, \
-    54: 1, 55: 1, 56: 1, 57: 1, 58: 1, 59: 1, 60: 1, 61: 1, 66: 1, 67: 1, 68: 1, \
-    69: 1, 70: 1, 71: 1, 72: 1, 74: 1, 75: 1, 76: 1, 77: 1, 204: 1, 205: 1, 206: 1, \
-    207: 1, 208: 1, 209: 1, 210: 1, 211: 1, 212: 1, 213: 1, 214: 1, 215: 1, 216: 1, \
-    217: 1, 218: 1, 219: 1, 220: 1, 221: 1, 222: 1, 223: 1, 224: 1, 225: 1, 226: 1, \
-    227: 1, 228: 1, 229: 1, 230: 1, 231: 1, 232: 1, 233: 1, 234: 1, 235: 1, 236: 1, \
-    237: 1, 238: 1, 239: 1, 240: 1, 241: 1, 242: 1, 243: 1, 244: 1, 245: 1, 246: 1, \
-    247: 1, 248: 1, 249: 1, 250: 1, 254: 1, 176: 1, \
-    121: 2, 122: 2, 123: 2, 124: 2, \
-    131: 3, 141: 3, 142: 3, 143: 3, 152: 3, 190: 3, 195: 3, \
-    111: 4, 112: 4, 92: 4, \
-    0: 999, 81: 999, 88: 999}
-
-    # open full CDL file
+    # Buckets and the threshold-sample codes come from the ONE shared table
+    # (shared_utils.landcover, .clinerules.md rule 65).
     cdl_rst = rio.open(cdl_path)
-    cdl_array = cdl_rst.read()[0]
-
-    # reclassify the CDL
-    translated_codes = np.vectorize(codes_dict.get)(cdl_array).astype('uint16')
-    translated_codes[no_data_locs] = 999
-
-    # write the reclassified CDL to file
-    cdl_reclass_out_file = cdl_path.replace('.tif', '_reclass.tif')
-    dump_geotiff(translated_codes, cdl_rst.crs, cdl_rst.transform, 999, cdl_reclass_out_file)
-    return cdl_reclass_out_file
+    cdl_array = cdl_rst.read(1)
+    nd_mask = np.zeros(cdl_array.shape, dtype=bool)
+    nd_mask[no_data_locs] = True
+    buckets, sample = reclass_cdl_array(cdl_array, nd_mask)
+    return write_reclass(reclass_path(cdl_path), buckets, sample, cdl_rst.crs, cdl_rst.transform)
 
 def download_worldcover(image, year, outname):
   outdir = Path(outname).parent
@@ -891,19 +873,14 @@ def download_worldcover(image, year, outname):
   match_geotiff(outname, image, outname)
   
 def reclass_worldcover(wc_path, no_data_locs):
-  # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-    codes_dict = {0: 999, 10: 3, 20:3, 30:1, 40:1, 50:2, 60:3, 70:999, 80:4, 90:3, 95:3, 100:3}
+    # Buckets and the threshold-sample codes come from the ONE shared table
+    # (shared_utils.landcover, .clinerules.md rule 65).
     wc_rst = rio.open(wc_path)
-    wc_array = wc_rst.read()[0]
-
-    # reclassify WorldCover
-    translated_codes = np.vectorize(codes_dict.get)(wc_array).astype('uint16')
-    translated_codes[no_data_locs] = 999
-
-    # write reclassified WorldCover to file
-    wc_reclass_out_file = wc_path.replace('.tif', '_reclass.tif')
-    dump_geotiff(translated_codes, wc_rst.crs, wc_rst.transform, 999, wc_reclass_out_file)
-    return wc_reclass_out_file
+    wc_array = wc_rst.read(1)
+    nd_mask = np.zeros(wc_array.shape, dtype=bool)
+    nd_mask[no_data_locs] = True
+    buckets, sample = reclass_worldcover_array(wc_array, nd_mask)
+    return write_reclass(reclass_path(wc_path), buckets, sample, wc_rst.crs, wc_rst.transform)
 
 def gen_water_extent(indir, nstd, outname, mask):
   # get nir band
@@ -964,7 +941,7 @@ def gen_water_extent(indir, nstd, outname, mask):
     
     # check for existing CDL files
     cdl_name = os.path.join(cdl_dir, f'CDL_{year}.tif')
-    cdl_check = glob.glob(cdl_name.replace('.tif', '_reclass.tif'))
+    cdl_check = glob.glob(reclass_path(cdl_name))
     if len(cdl_check) == 0:
       # download and resample CDL
       print('\t* Downloading CDL')
@@ -986,7 +963,7 @@ def gen_water_extent(indir, nstd, outname, mask):
     
     # check for existing WorldCover files
     wc_name = os.path.join(wc_dir, f'WorldCover_{year}.tif')
-    wc_check = glob.glob(wc_name.replace('.tif', '_reclass.tif'))
+    wc_check = glob.glob(reclass_path(wc_name))
     if len(wc_check) == 0:
       if not os.path.isfile(wc_name):
         # download WorldCover
@@ -999,7 +976,7 @@ def gen_water_extent(indir, nstd, outname, mask):
       ref_simple = wc_check[0]
 
   # open reclassified CDl and cloud mask
-  ref_simple_array = rio.open(ref_simple).read(1)
+  ref_simple_array, ref_sample_mask = read_reclass(ref_simple)
   cloudMask_rst = rio.open(mask)
 
   # resample cloud mask to match NIR band
@@ -1012,7 +989,13 @@ def gen_water_extent(indir, nstd, outname, mask):
       )
 
   # water pixels from reference data that are cloud-free and valid  in the NIR data
-  water = np.where((ref_simple_array == 4) & (cloudMask == 0) & nir_valid)
+  # Two masks, as in the STAC path (.clinerules.md rules 54/65): every
+  # bucket-4 pixel is LABELLED permanent water, but only the strict
+  # endmember (CDL 111 / WorldCover 80) SEEDS the NIR threshold --
+  # aquaculture is real water but turbid and periodically drained.
+  permanent_water = (ref_simple_array == 4) & (cloudMask == 0) & nir_valid
+  sample = ref_sample_mask & (cloudMask == 0) & nir_valid
+  water = np.where(select_water_sample(permanent_water, sample))
   mean = np.nanmean(nir_array[water])   # mean of water pixels
   std = np.nanstd(nir_array[water])     # standard deviation of water pixels
   nir_thresh = mean + (nstd * std)      # NIR water threshold is a given number of standard deviations above the mean
@@ -1027,7 +1010,7 @@ def gen_water_extent(indir, nstd, outname, mask):
 
   classified_flood = np.zeros(water_extent.shape, dtype=np.byte)
 
-  classified_flood[water] = 1  # permanent water
+  classified_flood[permanent_water] = 1  # permanent water
 
   flood_dev = np.where((ref_simple_array == 2) & (water_extent == 1)) # flooded developed
   classified_flood[flood_dev] = 2

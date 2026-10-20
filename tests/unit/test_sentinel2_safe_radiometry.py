@@ -213,10 +213,9 @@ def test_water_extent_nodata_follows_nan_fill(tmp_path):
     ref = np.ones((4, 4), dtype=np.int16)
     ref[:, 1] = 4
     os.makedirs(out_dir / "WorldCover")
-    with rio.open(out_dir / "WorldCover" / "WorldCover_2021_reclass.tif", "w", driver="GTiff",
-                  count=1, dtype="int16", height=4, width=4, crs=CRS,
-                  transform=from_origin(500000, 5000000, 10, 10)) as dst:
-        dst.write(ref, 1)
+    from shared_utils.landcover import reclass_path, write_reclass
+    write_reclass(reclass_path(str(out_dir / "WorldCover" / "WorldCover_2021.tif")),
+                  ref, ref == 4, CRS, from_origin(500000, 5000000, 10, 10))
     cloud = tmp_path / "cloud.tif"  # 20 m, upsampled x2 inside gen_water_extent
     with rio.open(cloud, "w", driver="GTiff", count=1, dtype="uint16", height=2, width=2,
                   crs=CRS, transform=from_origin(500000, 5000000, 20, 20)) as dst:

@@ -51,6 +51,70 @@ def dump_geotiff(data_array, crs, trans, nodata_val, outfile):
 
         dest.write(data_array, 1)
 
+def get_radiometric_scaling(safe, level, band):
+  """Return (offset, quantification) for converting `band`'s DN to reflectance.
+
+  ESA's conversion is ``reflectance = (DN + offset) / quantification``, with
+  the values read from the product-level metadata (MTD_MSIL1C.xml /
+  MTD_MSIL2A.xml at the .SAFE root):
+
+    L1C: QUANTIFICATION_VALUE     + Radiometric_Offset_List/RADIO_ADD_OFFSET
+    L2A: BOA_QUANTIFICATION_VALUE + BOA_ADD_OFFSET_VALUES_LIST/BOA_ADD_OFFSET
+
+  The offset (-1000 for every band) was introduced with processing baseline
+  04.00 on 2022-01-25 and is carried by every reprocessed Collection-1
+  product. Products from earlier baselines have no offset list, so the offset
+  is 0 there -- it must be read per product, never hardcoded. Ignoring it adds
+  +0.1 to every band, which does not cancel in a normalized difference.
+  Offsets are keyed by band_id, which the metadata's Spectral_Information
+  list maps to the physical band name (B1..B12, B8A).
+
+  Refs: https://sentiwiki.copernicus.eu/web/s2-processing
+        https://forum.step.esa.int/t/info-introduction-of-additional-radiometric-offset-in-pb04-00-products/35431
+  """
+  mtd = os.path.join(safe, f'MTD_{level}.xml')
+  if not os.path.isfile(mtd):
+    raise FileNotFoundError(f'product metadata {mtd} not found; cannot convert DN to reflectance')
+  doc = minidom.parse(mtd)
+
+  if level == 'MSIL2A':
+    quant_tag, offset_tag = 'BOA_QUANTIFICATION_VALUE', 'BOA_ADD_OFFSET'
+  else:
+    quant_tag, offset_tag = 'QUANTIFICATION_VALUE', 'RADIO_ADD_OFFSET'
+
+  quant_nodes = doc.getElementsByTagName(quant_tag)
+  if not quant_nodes:
+    raise ValueError(f'{quant_tag} missing from {mtd}')
+  quantification = float(quant_nodes[0].firstChild.data)
+
+  # 'B08' -> 'B8', 'B8A' -> 'B8A', 'B11' -> 'B11' (the metadata's spelling)
+  physical = 'B8A' if band == 'B8A' else f'B{int(band[1:])}'
+  band_id = None
+  for node in doc.getElementsByTagName('Spectral_Information'):
+    if node.getAttribute('physicalBand') == physical:
+      band_id = node.getAttribute('bandId')
+      break
+
+  offset = 0.0
+  for node in doc.getElementsByTagName(offset_tag):
+    if node.getAttribute('band_id') == band_id:
+      offset = float(node.firstChild.data)
+      break
+
+  return offset, quantification
+
+def dn_to_reflectance(dn, offset, quantification):
+  """Convert Sentinel-2 DN to reflectance, with the NODATA DN (0) as NaN.
+
+  NaN, not 0, marks nodata: once the offset is applied, a real dark pixel
+  (e.g. clear water in NIR) can legitimately be <= 0 -- preserving that noise
+  instead of truncating it is why ESA added the offset -- so a reflectance
+  value can no longer double as the fill flag.
+  """
+  refl = (dn.astype(np.float32) + np.float32(offset)) / np.float32(quantification)
+  refl[dn == 0] = np.nan
+  return refl
+
 def extract_band_geotiffs(band, safe, level, res):
   if level == 'MSIL2A':
     # find .jp2 file matching band/resolution
@@ -74,8 +138,8 @@ def extract_band_geotiffs(band, safe, level, res):
       nd_val = 999
     else:
       # convert from DN to reflectance
-      band_array = band_file.read(1) / 10000
-      nd_val = 0
+      band_array = dn_to_reflectance(band_file.read(1), *get_radiometric_scaling(safe, level, band))
+      nd_val = np.nan
     
     # write band to file
     dump_geotiff(band_array, band_geo['crs'], band_geo['transform'], nd_val, outfile)
@@ -107,14 +171,14 @@ def extract_band_geotiffs(band, safe, level, res):
           (dataset.width / band_array.shape[-1]),
           (dataset.height / band_array.shape[-2])
         )
-        band_array = band_array / 10000
-        dump_geotiff(band_array, dataset.crs, transform, 0, outfile)
+        band_array = dn_to_reflectance(band_array, *get_radiometric_scaling(safe, level, band))
+        dump_geotiff(band_array, dataset.crs, transform, np.nan, outfile)
 
     else:
       band_file = rio.open(jp2_file)
       band_geo = band_file.profile
-      band_array = band_file.read(1) / 10000
-      dump_geotiff(band_array, band_geo['crs'], band_geo['transform'], 0, outfile)
+      band_array = dn_to_reflectance(band_file.read(1), *get_radiometric_scaling(safe, level, band))
+      dump_geotiff(band_array, band_geo['crs'], band_geo['transform'], np.nan, outfile)
 
   return outfile
 
@@ -171,7 +235,22 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   # determine shape
   rows, cols = np.shape(b)
 
-  # apply rayleigh correction 
+  # Validity for the alpha band: a pixel is valid only where ALL THREE bands
+  # carry data -- an incomplete triple is not renderable colour. Mirrors
+  # Satellogic's `isfinite(red) & isfinite(green) & isfinite(blue)`.
+  #
+  # Nodata is NaN (extract_band_geotiffs), so validity comes from finiteness,
+  # never from the value: with ESA's radiometric offset applied, and after
+  # Rayleigh subtraction, a real dark pixel can be <= 0. It is also derived
+  # BEFORE the stretch, not from the enhanced uint8 output, which can drive a
+  # legitimately dark pixel to 0.
+  valid = np.isfinite(r) & np.isfinite(g) & np.isfinite(b)
+  alpha = (valid * 255).astype(np.uint8)
+  r = np.nan_to_num(r, nan=0.0)
+  g = np.nan_to_num(g, nan=0.0)
+  b = np.nan_to_num(b, nan=0.0)
+
+  # apply rayleigh correction
   if rayleigh:
     ray_blue = get_rayleigh_correction(b_file, b_band)
     ray_green = get_rayleigh_correction(g_file, g_band)
@@ -194,21 +273,6 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   g_enhanced = np.clip(((g - rgb_min) / (rgb_max - rgb_min))*255, 0, 255)
   r_enhanced = np.clip(((r - rgb_min) / (rgb_max - rgb_min))*255, 0, 255)
 
-  # determine no data locations
-  b_no_data = np.where(b == 0.0)
-  g_no_data = np.where(g == 0.0)
-  r_no_data = np.where(r == 0.0)
-
-  # Validity for the alpha band. A pixel is valid only where ALL THREE bands
-  # carry data -- an incomplete triple is not renderable colour. Mirrors
-  # Satellogic's `isfinite(red) & isfinite(green) & isfinite(blue)`.
-  #
-  # Derived HERE, from the same post-clip float arrays the zeroing below uses,
-  # and NOT from the enhanced uint8 output: ImageEnhance.Brightness can drive a
-  # legitimately dark pixel to 0, which would then be indistinguishable from
-  # fill. Reading validity from the source is what keeps real black valid.
-  alpha = (((r != 0.0) & (g != 0.0) & (b != 0.0)) * 255).astype(np.uint8)
-
   # increase brightness
   print('\t* Enhancing image')
   rgbArray = np.zeros( (rows,cols,3), 'uint8' )
@@ -222,9 +286,9 @@ def gen_rgb(r_file, g_file, b_file, rayleigh=False, enhance=2):
   b = np.reshape(rgb_enhanced.getdata(band=2), (rows,cols))
 
   # assign a value of 0 to each no data location
-  r[r_no_data] = 0
-  g[g_no_data] = 0
-  b[b_no_data] = 0
+  r[~valid] = 0
+  g[~valid] = 0
+  b[~valid] = 0
 
   # return bands, alpha mask and geographic information
   return r,g,b,alpha,projref,in_geo
@@ -484,6 +548,26 @@ def gen_color_infrared(safe, outname, level, mask=None, rayleigh=False):
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
+def normalized_difference(a, b, nodata=-9999.0):
+  """(a - b) / (a + b), nodata where either input is nodata (NaN).
+
+  Inputs are clamped to the physical range [0, 1] first. With ESA's offset
+  applied, real dark pixels can carry small negative reflectance (measured:
+  84% of clear Lake Tahoe water has B08 < 0 in a PB 05.11 L2A scene), which
+  would push the index past +/-1. Reflectance cannot be negative, so the clamp
+  projects that noise onto its physical floor: clear water with NIR ~0 gives
+  NDWI = 1, its correct limit, instead of a nodata hole. A zero denominator
+  (both bands at 0) is nodata -- the ratio is undefined there.
+  """
+  valid = np.isfinite(a) & np.isfinite(b)
+  a = np.clip(a, 0, 1)
+  b = np.clip(b, 0, 1)
+  denom = a + b
+  valid &= denom > 0
+  out = np.full(np.shape(a), nodata, dtype=np.float64)
+  out[valid] = (a[valid] - b[valid]) / denom[valid]
+  return out
+
 def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
   # check for band geotiffs
   # extract bands from .jp2 file if necessary
@@ -511,20 +595,10 @@ def gen_ndwi(safe, outname, level, mask=None, rayleigh=False):
     g_ray = get_rayleigh_correction(g_file, 'B03')
     g = g - g_ray
 
-  # determine shape
-  rows, cols = np.shape(g)
-
-  # clip green and NIR bands
-  g = np.clip(g, 0, 1)
-  nir = np.clip(nir, 0, 1)
-
   # calculate NDWI
   print('\t* Calculating NDWI')
-  ndwi = np.zeros((rows,cols))
-  ndwi[:] = -9999.0
-  valid = np.where((g > 0) & (nir > 0))
-  ndwi[valid] = (g[valid] - nir[valid]) / (g[valid] + nir[valid])
-  
+  ndwi = normalized_difference(g, nir)
+
   # write NDWI image to file
   print('\t* Generating NDWI geotiff')
   result = dump_geotiff_float(outname, ndwi, projref, in_geo, nodata=-9999.0)
@@ -561,19 +635,9 @@ def gen_mndwi(safe, outname, level, mask=None, rayleigh=False):
     g_ray = get_rayleigh_correction(g_file, 'B03')
     g = g - g_ray
 
-  # determine shape
-  rows, cols = np.shape(g)
-
-  # clip bands
-  g = np.clip(g, 0, 1)
-  swir = np.clip(swir, 0, 1)
-
   # calculate mNDWI
   print('\t* Calculating MNDWI')
-  mndwi = np.zeros((rows,cols))
-  mndwi[:] = -9999.0
-  valid = np.where((g > 0) & (swir >0))
-  mndwi[valid] = (g[valid] - swir[valid])/(g[valid] + swir[valid])
+  mndwi = normalized_difference(g, swir)
 
   # write mNDWI image to file
   print('\t* Generating MNDWI geotiff')
@@ -611,19 +675,9 @@ def gen_ndvi(safe, outname, level, mask=None, rayleigh=False):
     r_ray = get_rayleigh_correction(r_file, 'B04')
     r = r - r_ray
   
-  # determine shape
-  rows, cols = np.shape(r)
-  
-  # clip bands
-  r = np.clip(r, 0, 1)
-  nir = np.clip(nir, 0, 1)
-
   # calculate NDVI
   print('\t* Calculating NDVI')
-  ndvi = np.zeros((rows,cols))
-  ndvi[:] = -9999.0
-  valid = np.where((r > 0) & (nir > 0))
-  ndvi[valid] = (nir[valid]-r[valid])/(nir[valid]+r[valid])
+  ndvi = normalized_difference(nir, r)
   
   # write NDVI image to file
   print('\t* Generating NDVI geotiff')
@@ -656,19 +710,9 @@ def gen_nbr(safe, outname, level, mask=None):
   swir, in_geo, projref = get_geo(swir_file)
   nir, in_geo, projref = get_geo(nir_file)
 
-  # determine shape
-  rows, cols = np.shape(nir)
-
-  # clip bands
-  nir = np.clip(nir, 0, 1)
-  swir = np.clip(swir, 0, 1)
-
   # calculate NBR
   print('\t* Calculating NBR')
-  nbr = np.zeros((rows,cols))
-  nbr[:] = -9999.0
-  valid = np.where((nir > 0) & (swir > 0))
-  nbr[valid] = (nir[valid] - swir[valid]) / (nir[valid] + swir[valid])
+  nbr = normalized_difference(nir, swir)
 
   # write NBR image to file
   print('\t* Generating NBR geotiff')
@@ -885,7 +929,13 @@ def gen_water_extent(indir, nstd, outname, mask):
   nir_rst = rio.open(nir_merged)
   nir_nd_val = nir_rst.nodata
   nir_array = nir_rst.read()[0]
-  nd_locs = np.where(nir_array == nir_nd_val)
+  # Band nodata is NaN (extract_band_geotiffs); a real dark-water reflectance
+  # can be <= 0 once ESA's offset is applied, so finiteness is the only valid
+  # nodata test. (`== nodata` is always False for NaN.)
+  nir_valid = np.isfinite(nir_array)
+  if nir_nd_val is not None and not np.isnan(nir_nd_val):
+    nir_valid &= nir_array != nir_nd_val
+  nd_locs = np.where(~nir_valid)
 
   # get image bounds in WGS84
   xmin, ymin, xmax, ymax = nir_rst.bounds
@@ -962,7 +1012,7 @@ def gen_water_extent(indir, nstd, outname, mask):
       )
 
   # water pixels from reference data that are cloud-free and valid  in the NIR data
-  water = np.where((ref_simple_array == 4) & (cloudMask == 0) & (nir_array != 0))
+  water = np.where((ref_simple_array == 4) & (cloudMask == 0) & nir_valid)
   mean = np.nanmean(nir_array[water])   # mean of water pixels
   std = np.nanstd(nir_array[water])     # standard deviation of water pixels
   nir_thresh = mean + (nstd * std)      # NIR water threshold is a given number of standard deviations above the mean
@@ -991,7 +1041,7 @@ def gen_water_extent(indir, nstd, outname, mask):
   clouds_shadow = np.where(cloudMask == 1) # clouds and cloud shadow
   classified_flood[clouds_shadow] = 5 
 
-  classified_flood[nir_array == 0] = 0    # no data
+  classified_flood[~nir_valid] = 0    # no data
 
   # write reclassified water extent to file
   print('\t* Generating Water Extent geotiff')

@@ -123,8 +123,9 @@ SCALE = {2: (2.75e-5, -0.2), 1: (2.0e-5, -0.1)}
 QA_CLEAR = 21824  # L8/9 QA_PIXEL: clear, low-confidence cloud/cirrus/snow
 
 
-def _scene(root, level, sun_elevation):
+def _scene(root, level, sun_elevation, sr=None, qa=None):
     """Write B2..B7 + QA_PIXEL GeoTIFFs and an MTL for one 4-pixel scene."""
+    sr = SR if sr is None else sr
     d = root / f"L{level}_{sun_elevation:g}"
     d.mkdir()
     tag = "L2SP" if level == 2 else "L1TP"
@@ -133,7 +134,7 @@ def _scene(root, level, sun_elevation):
     mult, add = SCALE[level]
     params = "".join(
         f"<REFLECTANCE_MULT_BAND_{b}>{mult}</REFLECTANCE_MULT_BAND_{b}>"
-        f"<REFLECTANCE_ADD_BAND_{b}>{add}</REFLECTANCE_ADD_BAND_{b}>" for b in SR)
+        f"<REFLECTANCE_ADD_BAND_{b}>{add}</REFLECTANCE_ADD_BAND_{b}>" for b in sr)
     (d / f"LC09_{tag}_015035_20260601_20260602_02_T1_MTL.xml").write_text(
         f"<LANDSAT_METADATA_FILE><IMAGE_ATTRIBUTES><SUN_ELEVATION>{sun_elevation}"
         f"</SUN_ELEVATION></IMAGE_ATTRIBUTES><{grp}>{params}</{grp}>"
@@ -153,8 +154,9 @@ def _scene(root, level, sun_elevation):
 
     files = {b: write(f"X_B{b}.TIF",
                       np.round((np.array(v) - add) / mult).astype(np.uint16))
-             for b, v in SR.items()}
-    files["qa"] = write("X_QA_PIXEL.TIF", np.full(4, QA_CLEAR, np.uint16))
+             for b, v in sr.items()}
+    files["qa"] = write("X_QA_PIXEL.TIF", np.full(4, QA_CLEAR, np.uint16)
+                        if qa is None else np.asarray(qa, np.uint16))
     return d, files, 90.0 - sun_elevation
 
 
@@ -165,8 +167,8 @@ def _read(path, band=1):
     return arr
 
 
-def _index(tmp_path, name, level, sun_elevation):
-    d, f, sza = _scene(tmp_path, level, sun_elevation)
+def _index(tmp_path, name, level, sun_elevation, sr=None, qa=None):
+    d, f, sza = _scene(tmp_path, level, sun_elevation, sr=sr, qa=qa)
     out = str(d / f"{name}.tif")
     fn, bands = {
         "ndvi": (lf.genNdvi, ("5", "4")),
@@ -220,6 +222,58 @@ class TestLandsatProductsEndToEnd:
         low = _natural_color(tmp_path, level=1, sun_elevation=30.0)
         assert (low >= high).all()
         assert (low > high).any()
+
+
+class TestLandsatNegativeReflectance:
+    """LaSRC routinely returns slightly negative SR over dark targets (NIR/SWIR
+    over water, blue over shadow). The index functions used to allocate with
+    np.empty and compute only where every band was >= 0, so those pixels kept
+    UNINITIALISED memory -- clear-water NDWI read 0 (or whatever the allocator
+    last held) instead of ~+1. Inputs are now clamped to the USGS SR valid
+    range [0, 1] and every pixel is written.
+    """
+    # pixels: vegetation | clear water (NIR, SWIR < 0) | negative blue | QA fill
+    SR_NEG = {
+        "2": [0.03, 0.04, -0.01, 0.05], "3": [0.06, 0.075, 0.06, 0.06],
+        "4": [0.04, 0.03, 0.04, 0.08], "5": [0.40, -0.0075, 0.40, 0.12],
+        "6": [0.20, -0.005, 0.20, 0.25], "7": [0.09, -0.005, 0.09, 0.22],
+    }
+    QA = [QA_CLEAR, QA_CLEAR, QA_CLEAR, 1]
+
+    def _run(self, tmp_path, name):
+        return _index(tmp_path, name, level=2, sun_elevation=45.0,
+                      sr=self.SR_NEG, qa=self.QA)
+
+    def test_clear_water_ndwi_is_one(self, tmp_path):
+        ndwi = self._run(tmp_path, "ndwi")
+        assert ndwi[1] == pytest.approx(1.0)        # pre-fix: 0.0 / garbage
+        assert ndwi[3] == -9999.0                   # QA fill stays nodata
+
+    def test_clear_water_mndwi_is_one(self, tmp_path):
+        assert self._run(tmp_path, "mndwi")[1] == pytest.approx(1.0)
+
+    def test_clear_water_ndvi_is_minus_one(self, tmp_path):
+        ndvi = self._run(tmp_path, "ndvi")
+        assert ndvi[1] == pytest.approx(-1.0)
+        assert ndvi[0] == pytest.approx((0.40 - 0.04) / 0.44, abs=1e-3)
+
+    def test_water_with_nir_and_swir_negative_nbr_is_nodata(self, tmp_path):
+        # both bands clamp to 0 -> 0/0 is undefined -> nodata, not garbage
+        assert self._run(tmp_path, "nbr")[1] == -9999.0
+
+    def test_negative_blue_evi_uses_clamped_blue(self, tmp_path):
+        evi = self._run(tmp_path, "evi")
+        expected = 2.5 * (0.40 - 0.04) / (0.40 + 6 * 0.04 - 7.5 * 0.0 + 1)
+        assert evi[2] == pytest.approx(expected, abs=1e-3)  # pre-fix: garbage
+        assert evi[3] == -9999.0
+
+    def test_no_index_allocates_with_np_empty(self):
+        tree = ast.parse(open(lf.__file__).read())
+        offenders = [fn.name for fn in tree.body if isinstance(fn, ast.FunctionDef)
+                     and fn.name.startswith("gen")
+                     for n in ast.walk(fn)
+                     if isinstance(n, ast.Attribute) and n.attr == "empty"]
+        assert offenders == []
 
 
 class TestSentinel2StretchProperties:

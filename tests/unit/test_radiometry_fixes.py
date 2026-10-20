@@ -36,8 +36,9 @@ def _write_float(path, arr):
 
 
 class TestSentinel2StretchNoWrap:
-    # 0 = fill, then two dark-but-valid reflectances, then a mid value.
-    REFL = np.array([[0.0, 0.01, 0.03, 0.5]], dtype=np.float32)
+    # NaN = fill (extract_band_geotiffs' nodata), then two dark-but-valid
+    # reflectances, then a mid value.
+    REFL = np.array([[np.nan, 0.01, 0.03, 0.5]], dtype=np.float32)
 
     def _run(self, tmp_path):
         # gen_rgb reads the band name from the second-to-last '_' token.

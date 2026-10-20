@@ -87,7 +87,7 @@ inputs:
     default: "1"
   - name: merge
     label: Merge tiles
-    doc: Mosaic all matched tiles into one product per date (--merge).
+    doc: Mosaic matched tiles into one product per acquisition (satellite pass; normally one per date). Passes are never mixed (--merge).
     type: boolean
     default: true
   - name: mask

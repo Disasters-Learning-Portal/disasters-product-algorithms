@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -524,6 +525,89 @@ def _build_output_filename(
         f"{sat}_{level}_{product}{variant_token}{tile_token}"
         f"{merged_token}{masked_token}_{timestamp}.tif"
     )
+
+
+def acquisition_key(item):
+    """
+    Identify the satellite pass (datatake) a STAC item belongs to.
+
+    `--merge` mosaics one ACQUISITION, never several: tiles from different
+    passes differ in date, illumination and atmosphere, and a first-wins
+    mosaic across them silently stitches pre-event pixels into a post-event
+    product. A datatake is the natural unit -- one pass of one satellite --
+    and is safer than the UTC calendar date, which can split a single pass:
+    Sentinel-2 crosses ~10:30 local solar time, i.e. ~00:00 UTC near 157 E
+    (eastern Australia: real passes at 23:54 and 00:04 UTC).
+
+    `s2:datatake_id` (e.g. "GS2A_20210715T165901_031669_N05.00") ends in the
+    processing baseline. That suffix is DROPPED: Earth Search lists the same
+    acquisition at more than one baseline (sentinel-2-l1c `_0` at N03.01 and
+    `_1` at N05.00, identical datetime), and those copies must land in the
+    same group -- as separate groups they would be written to the same
+    merged filename and overwrite each other.
+
+    Falls back to (platform, UTC date) when the property is absent.
+    """
+    datatake = item.properties.get("s2:datatake_id")
+    if datatake:
+        return re.sub(r"_N\d{2}\.\d{2}$", "", datatake)
+    print(
+        f"WARNING: {item.id} has no s2:datatake_id; grouping it by "
+        f"platform + UTC date for --merge."
+    )
+    return (
+        f"{item.properties.get('platform', '')}_"
+        f"{item.datetime.strftime('%Y%m%d')}"
+    )
+
+
+def processing_baseline(item):
+    """
+    The item's processing baseline as a float (05.11 -> 5.11), or 0.0 when
+    unknown -- read from `s2:processing_baseline`, else from the
+    `_Nxx.xx` suffix of `s2:datatake_id`.
+    """
+    value = item.properties.get("s2:processing_baseline")
+    if value is None:
+        match = re.search(
+            r"_N(\d{2}\.\d{2})$",
+            item.properties.get("s2:datatake_id", ""),
+        )
+        value = match.group(1) if match else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def drop_superseded_baselines(items):
+    """
+    Keep only the newest processing baseline of each (acquisition, tile).
+
+    Earth Search lists some acquisitions more than once -- sentinel-2-l1c
+    carries `_0` (e.g. N03.01) and `_1` (N05.00) copies of the same tile
+    with an identical datetime. Both copies produce the SAME per-tile output
+    filename, so processing both lets whichever runs last overwrite the
+    other (search order, not science, decides). The later baseline is the
+    reprocessing with the newer calibration, so it is the one kept. The
+    radiometric offset is still read per item (rule 52), so either copy
+    converts correctly; this only removes the duplicate.
+    """
+    best = {}
+    for item in items:
+        key = (acquisition_key(item), _get_sat_level_tile(item)[2])
+        if key not in best or (
+            processing_baseline(item) > processing_baseline(best[key])
+        ):
+            best[key] = item
+    kept_ids = {id(item) for item in best.values()}
+    for item in items:
+        if id(item) not in kept_ids:
+            print(
+                f"Skipping {item.id}: superseded by a newer processing "
+                f"baseline of the same acquisition and tile."
+            )
+    return [item for item in items if id(item) in kept_ids]
 
 
 def _nstd_variant_token(nstd):

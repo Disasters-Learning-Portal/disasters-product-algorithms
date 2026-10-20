@@ -473,15 +473,25 @@ def _build_output_filename(
 
         Plain:              SAT_LEVEL_product_TILE_TIMESTAMP.tif
         Masked:              SAT_LEVEL_product_TILE_masked_TIMESTAMP.tif
-        Merged:              SAT_LEVEL_product_merged_TIMESTAMP.tif
-        Merged and masked:   SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
+        Merged:              SAT_LEVEL_product_ORBIT_merged_DATE_day.tif
+        Merged and masked:   SAT_LEVEL_product_ORBIT_merged_masked_DATE_day.tif
+
+    A merged mosaic follows the repo convention (.clinerules.md rule 27):
+    DATE only, then `_day` -- it spans several tile sensing times, so no
+    single time is true of it (the old name carried the first tile's time,
+    chosen by item-id order). DATE is the pass's own sensing-start date
+    from the datatake id, the same date ESA puts in its product name, so a
+    pass straddling 00:00 UTC still gets one date. ORBIT is ESA's relative
+    orbit (`R112`, from `s2:product_uri`): with the time gone, it is what
+    keeps two passes of one satellite on one day (high latitudes) from
+    writing the same file.
 
     Parameters
     ----------
     item : pystac.Item
         The STAC item supplying SAT/LEVEL/timestamp. When merged=True,
-        pass the first item (by sort order) among the tiles being
-        merged.
+        pass any item of the acquisition being merged -- the orbit and
+        date are properties of the pass, not of the tile.
 
     algorithm_name : str
         Algorithm/product name as used in the algorithm catalog, e.g.
@@ -512,19 +522,59 @@ def _build_output_filename(
     """
     sat, level, tile = _get_sat_level_tile(item)
     product = _product_token(algorithm_name)
+
+    variant_token = f"_{variant}" if variant else ""
+    masked_token = "_masked" if masked else ""
+
+    if merged:
+        orbit = _orbit_token(item)
+        orbit_token = f"_{orbit}" if orbit else ""
+        return (
+            f"{sat}_{level}_{product}{variant_token}{orbit_token}"
+            f"_merged{masked_token}_{_acquisition_date(item)}_day.tif"
+        )
+
     timestamp = item.datetime.replace(microsecond=0).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    variant_token = f"_{variant}" if variant else ""
-    tile_token = "" if merged else f"_{tile}"
-    merged_token = "_merged" if merged else ""
-    masked_token = "_masked" if masked else ""
-
     return (
-        f"{sat}_{level}_{product}{variant_token}{tile_token}"
-        f"{merged_token}{masked_token}_{timestamp}.tif"
+        f"{sat}_{level}_{product}{variant_token}_{tile}"
+        f"{masked_token}_{timestamp}.tif"
     )
+
+
+def _orbit_token(item):
+    """
+    ESA relative orbit of the item's pass, e.g. "R112".
+
+    Read from `s2:product_uri` (the ESA product name, `..._N0511_R112_T...`),
+    else `sat:relative_orbit`. Falls back to the ABSOLUTE orbit embedded in
+    `s2:datatake_id` ("A002799") -- still unique per pass -- and finally to
+    nothing, with a warning.
+    """
+    match = re.search(r"_R(\d{3})_", item.properties.get("s2:product_uri", ""))
+    if match:
+        return f"R{match.group(1)}"
+    relative = item.properties.get("sat:relative_orbit")
+    if relative is not None:
+        return f"R{int(relative):03d}"
+    match = re.search(r"_(\d{6})_N\d{2}\.\d{2}$", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return f"A{match.group(1)}"
+    print(f"WARNING: no orbit metadata on {item.id}; merged name has no orbit token.")
+    return ""
+
+
+def _acquisition_date(item):
+    """
+    YYYY-MM-DD of the pass: the sensing-start date in `s2:datatake_id`
+    ("GS2C_20250319T171041_..."), else the item's own UTC date.
+    """
+    match = re.match(r"GS2[A-Z]_(\d{4})(\d{2})(\d{2})T", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return "-".join(match.groups())
+    return item.datetime.strftime("%Y-%m-%d")
 
 
 def acquisition_key(item):

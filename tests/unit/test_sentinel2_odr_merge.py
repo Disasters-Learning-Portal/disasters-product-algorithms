@@ -29,12 +29,15 @@ from sentinel2 import sentinel2_odr_functions as odr  # noqa: E402
 
 
 class FakeItem:
-    def __init__(self, item_id, when, datatake, baseline=None, platform="sentinel-2a"):
+    def __init__(self, item_id, when, datatake, baseline=None, platform="sentinel-2a",
+                 product_uri=None):
         self.id = item_id
         self.datetime = when
         self.properties = {"s2:datatake_id": datatake, "platform": platform}
         if baseline is not None:
             self.properties["s2:processing_baseline"] = baseline
+        if product_uri is not None:
+            self.properties["s2:product_uri"] = product_uri
 
 
 # Two tiles per pass, overlapping in columns 4-5 (as adjacent MGRS tiles do).
@@ -141,3 +144,74 @@ class TestAcquisitionKey:
     def test_processing_baseline_from_datatake_suffix(self):
         assert odr.processing_baseline(FakeItem("x", PRE, "GS2A_X_N05.11")) == 5.11
         assert odr.processing_baseline(FakeItem("x", PRE, "GS2A_X")) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Merged filename: repo convention (rule 27) -- date only + `_day` -- with
+# ESA's relative orbit so same-day passes of one satellite don't collide.
+# Property values copied from a live sentinel-2-c1-l2a item (S2C T15TVF
+# 2025-03-19): datatake GS2C_20250319T171041_002799_N05.11, product_uri
+# S2C_MSIL2A_20250319T171041_N0511_R112_T15TVF_20250319T222513.SAFE.
+# ---------------------------------------------------------------------------
+
+LIVE = FakeItem(
+    "S2C_T15TVF_20250319T171419_L2A",
+    dt.datetime(2025, 3, 19, 17, 22, 40, tzinfo=dt.timezone.utc),
+    "GS2C_20250319T171041_002799_N05.11", "05.11", "sentinel-2c",
+    "S2C_MSIL2A_20250319T171041_N0511_R112_T15TVF_20250319T222513.SAFE")
+
+
+class TestMergedFilename:
+
+    def test_merged_name_is_date_day_with_orbit(self):
+        assert odr._build_output_filename(LIVE, "ndvi", merged=True) == \
+            "S2C_MSIL2A_ndvi_R112_merged_2025-03-19_day.tif"
+
+    def test_merged_masked_variant(self):
+        assert odr._build_output_filename(
+            LIVE, "we", merged=True, masked=True, variant="NSTD_1_5") == \
+            "S2C_MSIL2A_waterExtent_NSTD_1_5_R112_merged_masked_2025-03-19_day.tif"
+
+    def test_per_tile_name_unchanged(self):
+        assert odr._build_output_filename(LIVE, "ndvi") == \
+            "S2C_MSIL2A_ndvi_T15TVF_2025-03-19T17:22:40Z.tif"
+
+    def test_date_is_pass_start_not_tile_time(self):
+        # A pass starting 23:58 UTC whose tile is sensed after midnight is
+        # dated by the PASS (datatake), so the whole pass gets one date.
+        item = FakeItem("S2B_T56JNQ_20250319T000244_L2A",
+                        dt.datetime(2025, 3, 19, 0, 0, 5, tzinfo=dt.timezone.utc),
+                        "GS2B_20250318T235851_041955_N05.11", "05.11", "sentinel-2b",
+                        "S2B_MSIL2A_20250318T235851_N0511_R030_T56JNQ_20250319T010000.SAFE")
+        assert odr._build_output_filename(item, "ndvi", merged=True).endswith(
+            "_R030_merged_2025-03-18_day.tif")
+
+    def test_orbit_fallbacks(self):
+        item = FakeItem("S2C_T15TVF_20250319T171419_L2A", LIVE.datetime,
+                        "GS2C_20250319T171041_002799_N05.11")
+        assert odr._orbit_token(item) == "A002799"       # absolute orbit
+        item.properties["sat:relative_orbit"] = 112
+        assert odr._orbit_token(item) == "R112"
+
+    def test_merged_name_is_fixed_point_of_repo_renamers(self):
+        from shared_utils.cog_utils import get_final_filename
+        from shared_utils.file_naming import extract_datetime_from_filename
+        name = odr._build_output_filename(LIVE, "ndvi", merged=True)
+        assert get_final_filename(name, "202503_Flood_IA") == name
+        assert extract_datetime_from_filename(name) == ("2025-03-19", "day")
+
+
+def test_two_same_day_passes_of_one_satellite_get_two_files(tmp_path, monkeypatch):
+    # High latitudes: adjacent orbits of ONE satellite can both cover the AOI
+    # on one day. Date-only names alone would collide; the orbit keeps them.
+    day = dt.datetime(2025, 6, 21, 11, 0, 0, tzinfo=dt.timezone.utc)
+    items = [
+        FakeItem("S2A_T15TVG_20250621T110000_L2A", day, "GS2A_20250621T105000_052000_N05.11",
+                 "05.11", product_uri="S2A_MSIL2A_20250621T105000_N0511_R051_T15TVG_X.SAFE"),
+        FakeItem("S2A_T15TVF_20250621T124000_L2A", day.replace(hour=12, minute=40),
+                 "GS2A_20250621T123000_052001_N05.11", "05.11",
+                 product_uri="S2A_MSIL2A_20250621T123000_N0511_R052_T15TVF_X.SAFE"),
+    ]
+    out = _run(tmp_path, monkeypatch, items, {items[0].id: 1.0, items[1].id: 2.0})
+    assert sorted(out) == ["S2A_MSIL2A_ndvi_R051_merged_2025-06-21_day.tif",
+                           "S2A_MSIL2A_ndvi_R052_merged_2025-06-21_day.tif"]

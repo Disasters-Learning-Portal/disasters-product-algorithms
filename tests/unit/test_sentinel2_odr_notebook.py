@@ -252,6 +252,10 @@ class TestUploadMapping:
         class _Item:
             id = "S2C_T15TVG_20250813T170704_L2A"
             datetime = dt.datetime(2025, 8, 13, 17, 12, 26)
+            properties = {
+                "s2:datatake_id": "GS2C_20250813T170704_004999_N05.11",
+                "s2:product_uri": "S2C_MSIL2A_20250813T170704_N0511_R069_T15TVG_X.SAFE",
+            }
 
         folders = self._folders(upload_src)
         products = list(exec_config(config_src)["PRODUCTS"])

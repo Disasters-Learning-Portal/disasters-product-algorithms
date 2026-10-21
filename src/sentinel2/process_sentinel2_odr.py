@@ -39,11 +39,13 @@ from sentinel2.sentinel2_odr_functions import (
     merge_products,
     acquisition_key,
     drop_superseded_baselines,
+    water_extent_merge_method,
     _build_output_filename,
     _nstd_variant_token,
 )
 
 from shared_utils.cog_utils import convert_to_cog
+from shared_utils.landcover import pooled_water_statistics
 from shared_utils.cog_metadata import load_metadata_json
 
 
@@ -465,6 +467,36 @@ def main():
     # mixing thresholds into one raster.
     local_paths = []
 
+    # Water extent: ONE NIR threshold per acquisition. Each tile's water
+    # sample is gathered first and pooled over every tile of its satellite
+    # pass, so the tiles of one pass -- the same observation -- classify
+    # with the same threshold instead of seaming at their overlap
+    # (shared_utils.landcover.pooled_water_statistics).
+    water_stats = {}
+
+    if algorithm_type == "water_extent":
+
+        parts = {}
+
+        for item in items:
+            print(f"\nGathering water-threshold sample: {item.id}")
+            parts.setdefault(acquisition_key(item), []).append(
+                generate_water_extent(
+                    item=item,
+                    algorithm=algorithm,
+                    algorithm_name=args.product,
+                    output_dir=args.output,
+                    cloud_mask=args.cloud_mask,
+                    sample_only=True,
+                )
+            )
+
+        for acquisition, acquisition_parts in parts.items():
+            print(f"\nPooled water statistics for {acquisition}:")
+            water_stats[acquisition] = pooled_water_statistics(
+                acquisition_parts
+            )
+
     for i, item in enumerate(items, start=1):
 
         print()
@@ -493,6 +525,9 @@ def main():
                             output_dir=args.output,
                             cloud_mask=args.cloud_mask,
                             nstd=nstd,
+                            water_stats=water_stats[
+                                acquisition_key(item)
+                            ],
                         ),
                     )
                 )
@@ -596,7 +631,18 @@ def main():
             )
             merged_path = os.path.join(args.output, merged_name)
 
-            merge_products(list(paths_sorted), merged_path)
+            # Water extent: a cloud flag from ANY tile of the pass wins
+            # over a valid class (water_extent_merge_method); everything
+            # else keeps rasterio's first-valid-pixel rule.
+            merge_products(
+                list(paths_sorted),
+                merged_path,
+                method=(
+                    water_extent_merge_method
+                    if algorithm_type == "water_extent"
+                    else "first"
+                ),
+            )
 
             print(f"Merged product created: {merged_path}")
 

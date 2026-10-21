@@ -215,3 +215,132 @@ def test_two_same_day_passes_of_one_satellite_get_two_files(tmp_path, monkeypatc
     out = _run(tmp_path, monkeypatch, items, {items[0].id: 1.0, items[1].id: 2.0})
     assert sorted(out) == ["S2A_MSIL2A_ndvi_R051_merged_2025-06-21_day.tif",
                            "S2A_MSIL2A_ndvi_R052_merged_2025-06-21_day.tif"]
+
+
+# ---------------------------------------------------------------------------
+# Water extent across the tiles of ONE pass:
+#   * one NIR threshold per acquisition, pooled over its tiles
+#   * in the merge, a cloud flag (class 5) from any tile wins
+# Measured on real data (Iowa T15TVG/T15TVF, 2024-07-22): per-tile thresholds
+# were 0.425 vs 0.462 and the tiles disagreed on water/not-water for 5.5% of
+# their overlap; across 12 passes their SCL cloud flags disagreed on 0.7-9.7%
+# of overlap pixels, 13% of the disputes being cloud shadow.
+# ---------------------------------------------------------------------------
+
+class _Asset:
+    extra_fields = {}
+
+
+def _we_items():
+    when = dt.datetime(2025, 7, 1, 10, 30, tzinfo=dt.timezone.utc)
+    dtk = "GS2A_20250701T102000_052000_N05.11"
+    uri = "S2A_MSIL2A_20250701T102000_N0511_R065_T33UUP_X.SAFE"
+    items = [FakeItem(f"S2A_{t}_20250701T102000_L2A", when, dtk, "05.11", product_uri=uri)
+             for t in ("T33UUP", "T33UUQ", "T33UVP")]
+    for it in items:
+        it.assets = {"nir": _Asset()}
+    return items
+
+
+def _we_scene(item_id):
+    """20x40 B08 DN. Cols 0-9 WorldCover 80 water, 10-39 cropland at 1450.
+    Tile UUP's water is dark (1150/1250), UUQ's brighter (1550/1650): per
+    tile, UUP's threshold (1250) calls the cropland dry and UUQ's (1650)
+    calls it water -- a seam. UVP has no water at all."""
+    nir = np.full((20, 40), 1450, np.uint16)
+    wc = np.full((20, 40), 40, np.uint8)
+    if "UVP" not in item_id:
+        lo, hi = (1150, 1250) if "UUP" in item_id else (1550, 1650)
+        nir[:, 0:10] = np.where(np.indices((20, 10)).sum(0) % 2, lo, hi)
+        wc[:, 0:10] = 80
+    return nir, wc
+
+
+def _run_we(tmp_path, monkeypatch, items, merge):
+    profile = {"crs": "EPSG:32633", "transform": from_origin(500000, 5000000, 10, 10),
+               "width": 40, "height": 20, "count": 1, "dtype": "uint16", "driver": "GTiff"}
+    current = {}
+
+    def fake_read(asset, **kw):
+        nir, wc = _we_scene(current["id"])
+        return nir, dict(profile)
+
+    def fake_worldcover(nir_profile, year, output_path):
+        _, wc = _we_scene(current["id"])
+        with rio.open(output_path, "w", **{**profile, "dtype": "uint8"}) as d:
+            d.write(wc, 1)
+
+    real = odr.generate_water_extent
+
+    def tracking_generate(item, **kw):
+        current["id"] = item.id
+        return real(item=item, **kw)
+
+    monkeypatch.setattr(odr, "get_asset_metadata", lambda a: ("x", 1e-4, -0.1, 10, 0))
+    monkeypatch.setattr(odr, "read_algorithm_band", fake_read)
+    monkeypatch.setattr(odr, "_download_worldcover_for_water_extent", fake_worldcover)
+    monkeypatch.setattr(proc, "generate_water_extent", tracking_generate)
+    monkeypatch.setattr(proc, "search_sentinel2", lambda **kw: list(items))
+    monkeypatch.setattr(proc, "convert_to_cog", lambda outfile, **kw: outfile)
+    monkeypatch.setattr(sys, "argv", [
+        "process_sentinel2_odr", "--product", "we", "--level", "2",
+        "--start-date", "2025-07-01", "--end-date", "2025-07-01",
+        "--bbox", "14.9", "45.0", "15.1", "45.2", "--output", str(tmp_path)]
+        + (["--merge"] if merge else []))
+    proc.main()
+    out = {}
+    for p in sorted(tmp_path.glob("*waterExtent*.tif")):
+        with rio.open(p) as src:
+            out[p.name] = src.read(1)
+    return out
+
+
+def test_tiles_of_one_pass_share_one_threshold(tmp_path, monkeypatch):
+    out = _run_we(tmp_path, monkeypatch, _we_items(), merge=False)
+    land = {next(t for t in name.split("_") if t.startswith("T33")): arr[3:17, 13:37]
+            for name, arr in out.items()}
+    # Pooled threshold ~1606 DN: the shared cropland is classified the SAME
+    # way in every tile of the pass. Pre-fix: UUP 0 (dry), UUQ 4 (flooded).
+    assert (land["T33UUP"] == land["T33UUQ"]).all()
+    assert (land["T33UUP"] == 4).all()
+
+
+def test_tile_without_reference_water_uses_the_pass_threshold(tmp_path, monkeypatch):
+    # Pre-fix: UVP raised "No valid permanent-water pixels" and the run died.
+    out = _run_we(tmp_path, monkeypatch, _we_items(), merge=False)
+    uvp = next(a for n, a in out.items() if "T33UVP" in n)
+    assert (uvp[3:17, 3:37] == 4).all()
+
+
+def _we_tif(path, arr):
+    with rio.open(path, "w", driver="GTiff", count=1, dtype="uint8", height=arr.shape[0],
+                  width=arr.shape[1], nodata=0, crs="EPSG:32633",
+                  transform=from_origin(500000, 5000000, 10, 10)) as d:
+        d.write(arr.astype(np.uint8), 1)
+    return str(path)
+
+
+@pytest.mark.parametrize("order", ["clear_first", "cloud_first"])
+def test_cloud_flag_from_any_tile_wins(tmp_path, order):
+    # Same pixel, same pass: one tile's SCL says cloud/shadow (5), the other
+    # says flooded crop (4). Pre-fix (first-wins) the answer was 4 or 5
+    # depending on item-id order; it must be 5 either way.
+    clear = _we_tif(tmp_path / "a.tif", np.array([[4, 1, 0, 2]]))
+    cloud = _we_tif(tmp_path / "b.tif", np.array([[5, 1, 3, 0]]))
+    inputs = [clear, cloud] if order == "clear_first" else [cloud, clear]
+    out = odr.merge_products(inputs, str(tmp_path / "m.tif"), method=odr.water_extent_merge_method)
+    with rio.open(out) as src:
+        got = src.read(1)[0].tolist()
+    assert got[0] == 5            # cloud wins
+    assert got[1] == 1            # agreement unchanged
+    assert got[2] == 3            # nodata (0) yields to data
+    assert got[3] == 2
+
+
+def test_pooled_statistics_rules():
+    from shared_utils.landcover import pooled_water_statistics
+    mean, std = pooled_water_statistics([(np.array([1., 3.]), np.array([1., 3.])),
+                                         (np.array([]), np.array([]))])
+    assert (mean, std) == (2.0, 1.0)
+    with pytest.raises(RuntimeError, match="any tile of this acquisition"):
+        pooled_water_statistics([(np.array([]), np.array([]))])

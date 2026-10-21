@@ -1616,6 +1616,7 @@ from shared_utils.landcover import (  # noqa: E402
     WORLDCOVER_WATER_SAMPLE_CODES as _WORLDCOVER_WATER_SAMPLE_CODES,
     reclass_cdl_array as _reclass_cdl_array,
     reclass_worldcover_array as _reclass_worldcover_array,
+    pooled_water_statistics,
     select_water_sample,
 )
 
@@ -1630,6 +1631,8 @@ def generate_water_extent(
     output_dir="./s3_temp",
     cloud_mask=False,
     nstd=None,
+    water_stats=None,
+    sample_only=False,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1688,6 +1691,17 @@ def generate_water_extent(
     nstd : float or None
         Standard-deviation multiplier for the NIR water threshold.
         Falls back to the algorithm config's `nstd`, then to 1.0.
+
+    water_stats : (float, float) or None
+        (mean, std) of the water-sample NIR POOLED over every tile of this
+        item's acquisition (shared_utils.landcover.pooled_water_statistics).
+        When given, the threshold is mean + nstd*std from these, so all
+        tiles of one pass classify with one threshold. None computes them
+        from this tile alone.
+
+    sample_only : bool
+        If True, return (permanent_water_nir, sample_nir) -- this tile's
+        contribution to the pooled statistics -- and write nothing.
 
     Returns
     -------
@@ -2037,12 +2051,23 @@ def generate_water_extent(
         (~nir_nd_mask)
     )
 
-    # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises on
-    # an empty sample (shared with the .SAFE and Landsat paths).
-    water_sample_mask = select_water_sample(
-        permanent_water_mask,
-        water_sample_mask,
-    )
+    # sample_only: return this tile's contribution to the acquisition's
+    # POOLED threshold (shared_utils.landcover.pooled_water_statistics)
+    # and stop. No per-tile empty-sample check -- a tile without
+    # reference water is normal; the pooled totals decide.
+    if sample_only:
+        return (
+            nir_array[permanent_water_mask].astype(np.float64),
+            nir_array[water_sample_mask].astype(np.float64),
+        )
+
+    if water_stats is None:
+        # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises
+        # on an empty sample (shared with the .SAFE and Landsat paths).
+        water_sample_mask = select_water_sample(
+            permanent_water_mask,
+            water_sample_mask,
+        )
 
     # -------------------------------------------------------------
     # Calculate dynamic NIR threshold
@@ -2052,17 +2077,22 @@ def generate_water_extent(
     # This is the actual logic from the old workflow.
     # -------------------------------------------------------------
 
-    water_nir = nir_array[
-        water_sample_mask
-    ]
+    if water_stats is not None:
+        # Pooled over every tile of this acquisition by the caller, so
+        # all tiles of one pass classify with ONE threshold.
+        mean, std = water_stats
+    else:
+        water_nir = nir_array[
+            water_sample_mask
+        ]
 
-    mean = np.nanmean(
-        water_nir
-    )
+        mean = np.nanmean(
+            water_nir
+        )
 
-    std = np.nanstd(
-        water_nir
-    )
+        std = np.nanstd(
+            water_nir
+        )
 
     # -------------------------------------------------------------
     # nstd: caller wins, then the algorithm configuration, then 1.0.
@@ -3088,6 +3118,30 @@ def merge_products(tif_paths, output_path, method="first"):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return output_path
+
+
+# Water-extent class for cloud / cloud shadow (generate_water_extent).
+WATER_EXTENT_CLOUD_CLASS = 5
+
+
+def water_extent_merge_method(merged_data, new_data, merged_mask, new_mask, **kwargs):
+    """
+    rasterio.merge method for water-extent tiles of ONE acquisition:
+    first valid pixel, except that a CLOUD flag from any tile wins.
+
+    Overlapping tiles of one pass are the same observation, but Sen2Cor
+    classifies each tile separately and their SCL disagrees on 0.7-9.7% of
+    overlap pixels (12 real Iowa passes, 2024). The disputed pixels are
+    82% thin cirrus and 13% cloud SHADOW; a shadow published as "clear"
+    has low NIR and reads as flood water. A first-wins merge settled the
+    dispute by item-id order; taking the union of the cloud flags is the
+    conservative, order-independent rule. Nodata (0, masked) still yields
+    to data, exactly as rasterio's copy_first.
+    """
+    fill = merged_mask & ~new_mask
+    np.copyto(merged_data, new_data, where=fill, casting="unsafe")
+    cloud = ~new_mask & (new_data == WATER_EXTENT_CLOUD_CLASS)
+    np.copyto(merged_data, new_data, where=cloud, casting="unsafe")
 
 
 # The high-level process_index / process_composite / process_items

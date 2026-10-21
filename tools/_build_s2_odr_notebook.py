@@ -423,10 +423,14 @@ else:
 ## Output naming
 
 ```
-<SAT>_<LEVEL>_<product>[_NSTD_<n>]_<TILE>[_merged][_masked]_<TIMESTAMP>.tif
+Per tile:  <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<TILE>[_masked]_<YYYY-MM-DDTHH:MM:SSZ>.tif
+Merged:    <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<ORBIT>_merged[_masked]_<YYYY-MM-DD>_day.tif
 ```
 
-e.g. `S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif`
+e.g. `S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif` (one tile) and
+`S2C_MSIL2A_ndvi_R112_merged_2025-08-13_day.tif` (one pass, mosaicked). A
+merged file is ONE satellite pass: a date range gives one merged file per pass,
+never a mosaic across dates. `R112` is ESA's relative orbit.
 
 **The activation event is NOT in the filename.** It lives in the GeoTIFF tags
 and the S3 prefix — the same convention `bake_event_metadata.ipynb` and

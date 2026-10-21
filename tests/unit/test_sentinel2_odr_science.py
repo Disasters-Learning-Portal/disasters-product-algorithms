@@ -488,6 +488,12 @@ class _FakeItem:
     def __init__(self, item_id, dt):
         self.id = item_id
         self.datetime = dt
+        # Shape of a live Earth Search item's pass metadata (the merged name
+        # reads the date from the datatake and the orbit from product_uri).
+        self.properties = {} if dt is None else {
+            "s2:datatake_id": f"G{item_id[:3]}_{dt:%Y%m%dT%H%M%S}_045000_N05.11",
+            "s2:product_uri": f"{item_id[:3]}_MSIL2A_{dt:%Y%m%dT%H%M%S}_N0511_R026_T16SED_X.SAFE",
+        }
 
 
 class TestNaming:
@@ -550,6 +556,7 @@ class TestNaming:
         name = s2._build_output_filename(item_c1, "ndvi", merged=True)
         assert "_merged_" in name
         assert "T16SED" not in name
+        assert name.endswith("_R026_merged_2026-04-23_day.tif")
 
     def test_masked_token(self, item_c1):
         assert "_masked_" in s2._build_output_filename(

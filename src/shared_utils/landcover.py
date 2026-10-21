@@ -309,3 +309,36 @@ def read_reclass(path):
     import rasterio
     with rasterio.open(path) as src:
         return src.read(1), src.read(2).astype(bool)
+
+
+def pooled_water_statistics(parts):
+    """Mean and std of the NIR water sample POOLED over several tiles.
+
+    `parts` is a list of (permanent_water_values, sample_values) arrays, one
+    per tile of ONE acquisition (see sentinel2_odr_functions.acquisition_key).
+    Tiles of one satellite pass share the illumination and the atmosphere,
+    so their thresholds should be one number: computed per tile, two
+    adjacent tiles of a real pass (T15TVG/T15TVF, 2024-07-22) got 0.425 vs
+    0.462 NIR reflectance and disagreed on water/not-water for 5.5% of their
+    overlap -- a seam decided by which tile the merge kept. Pooling also
+    gives a tile with no reference water of its own the pass's threshold
+    instead of an error.
+
+    Same rules as select_water_sample, applied to the pooled totals:
+    fall back to all permanent water below MIN_WATER_SAMPLE sample pixels;
+    raise when there is no water at all.
+    """
+    permanent = np.concatenate([np.asarray(p, dtype=np.float64) for p, _ in parts]) if parts else np.array([])
+    sample = np.concatenate([np.asarray(s, dtype=np.float64) for _, s in parts]) if parts else np.array([])
+    print(f"\t* Pooled permanent-water pixels: {permanent.size:,} over {len(parts)} tile(s)")
+    print(f"\t* Pooled threshold sample pixels: {sample.size:,}")
+    if sample.size < MIN_WATER_SAMPLE and permanent.size >= MIN_WATER_SAMPLE:
+        print(f"\t* Pooled sample below {MIN_WATER_SAMPLE} px; falling back to "
+              f"the full permanent-water bucket for the threshold.")
+        sample = permanent
+    if sample.size == 0:
+        raise RuntimeError(
+            "No valid permanent-water pixels were found in any tile of this "
+            "acquisition after applying the land-cover and cloud masks. "
+            "Cannot calculate the NIR water threshold.")
+    return float(np.nanmean(sample)), float(np.nanstd(sample))

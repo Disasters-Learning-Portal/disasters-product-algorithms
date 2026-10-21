@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -472,15 +473,25 @@ def _build_output_filename(
 
         Plain:              SAT_LEVEL_product_TILE_TIMESTAMP.tif
         Masked:              SAT_LEVEL_product_TILE_masked_TIMESTAMP.tif
-        Merged:              SAT_LEVEL_product_merged_TIMESTAMP.tif
-        Merged and masked:   SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
+        Merged:              SAT_LEVEL_product_ORBIT_merged_DATE_day.tif
+        Merged and masked:   SAT_LEVEL_product_ORBIT_merged_masked_DATE_day.tif
+
+    A merged mosaic follows the repo convention (.clinerules.md rule 27):
+    DATE only, then `_day` -- it spans several tile sensing times, so no
+    single time is true of it (the old name carried the first tile's time,
+    chosen by item-id order). DATE is the pass's own sensing-start date
+    from the datatake id, the same date ESA puts in its product name, so a
+    pass straddling 00:00 UTC still gets one date. ORBIT is ESA's relative
+    orbit (`R112`, from `s2:product_uri`): with the time gone, it is what
+    keeps two passes of one satellite on one day (high latitudes) from
+    writing the same file.
 
     Parameters
     ----------
     item : pystac.Item
         The STAC item supplying SAT/LEVEL/timestamp. When merged=True,
-        pass the first item (by sort order) among the tiles being
-        merged.
+        pass any item of the acquisition being merged -- the orbit and
+        date are properties of the pass, not of the tile.
 
     algorithm_name : str
         Algorithm/product name as used in the algorithm catalog, e.g.
@@ -511,19 +522,142 @@ def _build_output_filename(
     """
     sat, level, tile = _get_sat_level_tile(item)
     product = _product_token(algorithm_name)
+
+    variant_token = f"_{variant}" if variant else ""
+    masked_token = "_masked" if masked else ""
+
+    if merged:
+        orbit = _orbit_token(item)
+        orbit_token = f"_{orbit}" if orbit else ""
+        return (
+            f"{sat}_{level}_{product}{variant_token}{orbit_token}"
+            f"_merged{masked_token}_{_acquisition_date(item)}_day.tif"
+        )
+
     timestamp = item.datetime.replace(microsecond=0).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    variant_token = f"_{variant}" if variant else ""
-    tile_token = "" if merged else f"_{tile}"
-    merged_token = "_merged" if merged else ""
-    masked_token = "_masked" if masked else ""
-
     return (
-        f"{sat}_{level}_{product}{variant_token}{tile_token}"
-        f"{merged_token}{masked_token}_{timestamp}.tif"
+        f"{sat}_{level}_{product}{variant_token}_{tile}"
+        f"{masked_token}_{timestamp}.tif"
     )
+
+
+def _orbit_token(item):
+    """
+    ESA relative orbit of the item's pass, e.g. "R112".
+
+    Read from `s2:product_uri` (the ESA product name, `..._N0511_R112_T...`),
+    else `sat:relative_orbit`. Falls back to the ABSOLUTE orbit embedded in
+    `s2:datatake_id` ("A002799") -- still unique per pass -- and finally to
+    nothing, with a warning.
+    """
+    match = re.search(r"_R(\d{3})_", item.properties.get("s2:product_uri", ""))
+    if match:
+        return f"R{match.group(1)}"
+    relative = item.properties.get("sat:relative_orbit")
+    if relative is not None:
+        return f"R{int(relative):03d}"
+    match = re.search(r"_(\d{6})_N\d{2}\.\d{2}$", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return f"A{match.group(1)}"
+    print(f"WARNING: no orbit metadata on {item.id}; merged name has no orbit token.")
+    return ""
+
+
+def _acquisition_date(item):
+    """
+    YYYY-MM-DD of the pass: the sensing-start date in `s2:datatake_id`
+    ("GS2C_20250319T171041_..."), else the item's own UTC date.
+    """
+    match = re.match(r"GS2[A-Z]_(\d{4})(\d{2})(\d{2})T", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return "-".join(match.groups())
+    return item.datetime.strftime("%Y-%m-%d")
+
+
+def acquisition_key(item):
+    """
+    Identify the satellite pass (datatake) a STAC item belongs to.
+
+    `--merge` mosaics one ACQUISITION, never several: tiles from different
+    passes differ in date, illumination and atmosphere, and a first-wins
+    mosaic across them silently stitches pre-event pixels into a post-event
+    product. A datatake is the natural unit -- one pass of one satellite --
+    and is safer than the UTC calendar date, which can split a single pass:
+    Sentinel-2 crosses ~10:30 local solar time, i.e. ~00:00 UTC near 157 E
+    (eastern Australia: real passes at 23:54 and 00:04 UTC).
+
+    `s2:datatake_id` (e.g. "GS2A_20210715T165901_031669_N05.00") ends in the
+    processing baseline. That suffix is DROPPED: Earth Search lists the same
+    acquisition at more than one baseline (sentinel-2-l1c `_0` at N03.01 and
+    `_1` at N05.00, identical datetime), and those copies must land in the
+    same group -- as separate groups they would be written to the same
+    merged filename and overwrite each other.
+
+    Falls back to (platform, UTC date) when the property is absent.
+    """
+    datatake = item.properties.get("s2:datatake_id")
+    if datatake:
+        return re.sub(r"_N\d{2}\.\d{2}$", "", datatake)
+    print(
+        f"WARNING: {item.id} has no s2:datatake_id; grouping it by "
+        f"platform + UTC date for --merge."
+    )
+    return (
+        f"{item.properties.get('platform', '')}_"
+        f"{item.datetime.strftime('%Y%m%d')}"
+    )
+
+
+def processing_baseline(item):
+    """
+    The item's processing baseline as a float (05.11 -> 5.11), or 0.0 when
+    unknown -- read from `s2:processing_baseline`, else from the
+    `_Nxx.xx` suffix of `s2:datatake_id`.
+    """
+    value = item.properties.get("s2:processing_baseline")
+    if value is None:
+        match = re.search(
+            r"_N(\d{2}\.\d{2})$",
+            item.properties.get("s2:datatake_id", ""),
+        )
+        value = match.group(1) if match else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def drop_superseded_baselines(items):
+    """
+    Keep only the newest processing baseline of each (acquisition, tile).
+
+    Earth Search lists some acquisitions more than once -- sentinel-2-l1c
+    carries `_0` (e.g. N03.01) and `_1` (N05.00) copies of the same tile
+    with an identical datetime. Both copies produce the SAME per-tile output
+    filename, so processing both lets whichever runs last overwrite the
+    other (search order, not science, decides). The later baseline is the
+    reprocessing with the newer calibration, so it is the one kept. The
+    radiometric offset is still read per item (rule 52), so either copy
+    converts correctly; this only removes the duplicate.
+    """
+    best = {}
+    for item in items:
+        key = (acquisition_key(item), _get_sat_level_tile(item)[2])
+        if key not in best or (
+            processing_baseline(item) > processing_baseline(best[key])
+        ):
+            best[key] = item
+    kept_ids = {id(item) for item in best.values()}
+    for item in items:
+        if id(item) not in kept_ids:
+            print(
+                f"Skipping {item.id}: superseded by a newer processing "
+                f"baseline of the same acquisition and tile."
+            )
+    return [item for item in items if id(item) in kept_ids]
 
 
 def _nstd_variant_token(nstd):
@@ -1482,6 +1616,7 @@ from shared_utils.landcover import (  # noqa: E402
     WORLDCOVER_WATER_SAMPLE_CODES as _WORLDCOVER_WATER_SAMPLE_CODES,
     reclass_cdl_array as _reclass_cdl_array,
     reclass_worldcover_array as _reclass_worldcover_array,
+    pooled_water_statistics,
     select_water_sample,
 )
 
@@ -1496,6 +1631,8 @@ def generate_water_extent(
     output_dir="./s3_temp",
     cloud_mask=False,
     nstd=None,
+    water_stats=None,
+    sample_only=False,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1554,6 +1691,17 @@ def generate_water_extent(
     nstd : float or None
         Standard-deviation multiplier for the NIR water threshold.
         Falls back to the algorithm config's `nstd`, then to 1.0.
+
+    water_stats : (float, float) or None
+        (mean, std) of the water-sample NIR POOLED over every tile of this
+        item's acquisition (shared_utils.landcover.pooled_water_statistics).
+        When given, the threshold is mean + nstd*std from these, so all
+        tiles of one pass classify with one threshold. None computes them
+        from this tile alone.
+
+    sample_only : bool
+        If True, return (permanent_water_nir, sample_nir) -- this tile's
+        contribution to the pooled statistics -- and write nothing.
 
     Returns
     -------
@@ -1903,12 +2051,23 @@ def generate_water_extent(
         (~nir_nd_mask)
     )
 
-    # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises on
-    # an empty sample (shared with the .SAFE and Landsat paths).
-    water_sample_mask = select_water_sample(
-        permanent_water_mask,
-        water_sample_mask,
-    )
+    # sample_only: return this tile's contribution to the acquisition's
+    # POOLED threshold (shared_utils.landcover.pooled_water_statistics)
+    # and stop. No per-tile empty-sample check -- a tile without
+    # reference water is normal; the pooled totals decide.
+    if sample_only:
+        return (
+            nir_array[permanent_water_mask].astype(np.float64),
+            nir_array[water_sample_mask].astype(np.float64),
+        )
+
+    if water_stats is None:
+        # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises
+        # on an empty sample (shared with the .SAFE and Landsat paths).
+        water_sample_mask = select_water_sample(
+            permanent_water_mask,
+            water_sample_mask,
+        )
 
     # -------------------------------------------------------------
     # Calculate dynamic NIR threshold
@@ -1918,17 +2077,22 @@ def generate_water_extent(
     # This is the actual logic from the old workflow.
     # -------------------------------------------------------------
 
-    water_nir = nir_array[
-        water_sample_mask
-    ]
+    if water_stats is not None:
+        # Pooled over every tile of this acquisition by the caller, so
+        # all tiles of one pass classify with ONE threshold.
+        mean, std = water_stats
+    else:
+        water_nir = nir_array[
+            water_sample_mask
+        ]
 
-    mean = np.nanmean(
-        water_nir
-    )
+        mean = np.nanmean(
+            water_nir
+        )
 
-    std = np.nanstd(
-        water_nir
-    )
+        std = np.nanstd(
+            water_nir
+        )
 
     # -------------------------------------------------------------
     # nstd: caller wins, then the algorithm configuration, then 1.0.
@@ -2954,6 +3118,30 @@ def merge_products(tif_paths, output_path, method="first"):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return output_path
+
+
+# Water-extent class for cloud / cloud shadow (generate_water_extent).
+WATER_EXTENT_CLOUD_CLASS = 5
+
+
+def water_extent_merge_method(merged_data, new_data, merged_mask, new_mask, **kwargs):
+    """
+    rasterio.merge method for water-extent tiles of ONE acquisition:
+    first valid pixel, except that a CLOUD flag from any tile wins.
+
+    Overlapping tiles of one pass are the same observation, but Sen2Cor
+    classifies each tile separately and their SCL disagrees on 0.7-9.7% of
+    overlap pixels (12 real Iowa passes, 2024). The disputed pixels are
+    82% thin cirrus and 13% cloud SHADOW; a shadow published as "clear"
+    has low NIR and reads as flood water. A first-wins merge settled the
+    dispute by item-id order; taking the union of the cloud flags is the
+    conservative, order-independent rule. Nodata (0, masked) still yields
+    to data, exactly as rasterio's copy_first.
+    """
+    fill = merged_mask & ~new_mask
+    np.copyto(merged_data, new_data, where=fill, casting="unsafe")
+    cloud = ~new_mask & (new_data == WATER_EXTENT_CLOUD_CLASS)
+    np.copyto(merged_data, new_data, where=cloud, casting="unsafe")
 
 
 # The high-level process_index / process_composite / process_items

@@ -37,11 +37,15 @@ from sentinel2.sentinel2_odr_functions import (
     generate_composite,
     generate_water_extent,
     merge_products,
+    acquisition_key,
+    drop_superseded_baselines,
+    water_extent_merge_method,
     _build_output_filename,
     _nstd_variant_token,
 )
 
 from shared_utils.cog_utils import convert_to_cog
+from shared_utils.landcover import pooled_water_statistics
 from shared_utils.cog_metadata import load_metadata_json
 
 
@@ -193,8 +197,9 @@ def main():
         "--merge",
         action="store_true",
         help=(
-            "Mosaic all matched Sentinel-2 tiles into a single output "
-            "product instead of writing one file per tile."
+            "Mosaic the matched Sentinel-2 tiles into one product per "
+            "acquisition (satellite pass; normally one per date) instead "
+            "of writing one file per tile. Passes are never mixed."
         ),
     )
 
@@ -445,6 +450,11 @@ def main():
         f"Found {len(items)} Sentinel-2 scene(s)."
     )
 
+    # The same acquisition can be listed at more than one processing
+    # baseline; keep the newest per tile so the copies don't overwrite
+    # each other's per-tile output.
+    items = drop_superseded_baselines(items)
+
     # -----------------------------------------------------------------
     # Generate product GeoTIFF(s), one per scene
     # -----------------------------------------------------------------
@@ -456,6 +466,36 @@ def main():
     # nstd=1 tiles together and nstd=1.5 tiles together, rather than
     # mixing thresholds into one raster.
     local_paths = []
+
+    # Water extent: ONE NIR threshold per acquisition. Each tile's water
+    # sample is gathered first and pooled over every tile of its satellite
+    # pass, so the tiles of one pass -- the same observation -- classify
+    # with the same threshold instead of seaming at their overlap
+    # (shared_utils.landcover.pooled_water_statistics).
+    water_stats = {}
+
+    if algorithm_type == "water_extent":
+
+        parts = {}
+
+        for item in items:
+            print(f"\nGathering water-threshold sample: {item.id}")
+            parts.setdefault(acquisition_key(item), []).append(
+                generate_water_extent(
+                    item=item,
+                    algorithm=algorithm,
+                    algorithm_name=args.product,
+                    output_dir=args.output,
+                    cloud_mask=args.cloud_mask,
+                    sample_only=True,
+                )
+            )
+
+        for acquisition, acquisition_parts in parts.items():
+            print(f"\nPooled water statistics for {acquisition}:")
+            water_stats[acquisition] = pooled_water_statistics(
+                acquisition_parts
+            )
 
     for i, item in enumerate(items, start=1):
 
@@ -485,6 +525,9 @@ def main():
                             output_dir=args.output,
                             cloud_mask=args.cloud_mask,
                             nstd=nstd,
+                            water_stats=water_stats[
+                                acquisition_key(item)
+                            ],
                         ),
                     )
                 )
@@ -543,29 +586,38 @@ def main():
 
     if args.merge:
 
-        # Group by variant so each parameterisation mosaics separately.
-        # Merging an nstd=1 tile with an nstd=1.5 tile would produce a
-        # raster whose threshold varies by location.
-        variants = {}
+        # One mosaic per (acquisition, variant). Grouping by ACQUISITION
+        # (datatake, i.e. one satellite pass) keeps every date in the
+        # requested range as its own product: the merge is first-wins, so
+        # mixing passes would stitch pre-event pixels into a post-event
+        # mosaic wherever tiles overlap. Grouping by variant keeps an
+        # nstd=1 tile from being merged with an nstd=1.5 tile, which would
+        # produce a raster whose threshold varies by location.
+        groups = {}
 
         for variant, item, path in local_paths:
-            variants.setdefault(variant, []).append((item, path))
+            groups.setdefault(
+                (acquisition_key(item), variant), []
+            ).append((item, path))
 
         files_to_cog = []
 
-        for variant, group in variants.items():
+        for (acquisition, variant), group in sorted(
+            groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
+        ):
 
             print()
             print("=" * 70)
             print(
-                f"Merging {len(group)} tile(s)"
+                f"Merging {len(group)} tile(s) from {acquisition}"
                 + (f" [{variant}]" if variant else "")
             )
             print("=" * 70)
 
             # Sort by item id for a deterministic merge order and a
             # deterministic choice of "first" item for the merged
-            # filename.
+            # filename. Within one acquisition, overlapping tiles are the
+            # same observation, so the order does not change the science.
             items_sorted, paths_sorted = zip(
                 *sorted(group, key=lambda pair: pair[0].id)
             )
@@ -579,7 +631,18 @@ def main():
             )
             merged_path = os.path.join(args.output, merged_name)
 
-            merge_products(list(paths_sorted), merged_path)
+            # Water extent: a cloud flag from ANY tile of the pass wins
+            # over a valid class (water_extent_merge_method); everything
+            # else keeps rasterio's first-valid-pixel rule.
+            merge_products(
+                list(paths_sorted),
+                merged_path,
+                method=(
+                    water_extent_merge_method
+                    if algorithm_type == "water_extent"
+                    else "first"
+                ),
+            )
 
             print(f"Merged product created: {merged_path}")
 

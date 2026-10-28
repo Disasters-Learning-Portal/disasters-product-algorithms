@@ -71,11 +71,12 @@ Homepage = "https://github.com/klesinger/disasters-product-algorithms"
 where = ["src"]
 include = ["landsat*", "sentinel2*", "satellogic*", "skysat*", "umbra*", "capella*", "iceye*", "shared_utils*", "raster_tools*"]
 
-# The Sentinel-2 STAC pipeline reads its algorithm catalog from a JSON
-# file shipped alongside the code. Without this it is absent from an
-# installed copy and `process_sentinel2_odr` cannot find its default
-# --algorithm-file.
+# The Sentinel-2 and Landsat STAC pipelines read their algorithm catalogs
+# from a JSON file shipped alongside the code. Without this it is absent
+# from an installed copy and `process_sentinel2_odr` / `process_landsat_odr`
+# cannot find the default --algorithm-file.
 [tool.setuptools.package-data]
+landsat = ["algorithms-landsat.json"]
 sentinel2 = ["algorithms-sentinel2.json"]
 
 # NOTE: Black Marble is NOT part of this package. The VEDA Black Marble nighttime-lights

@@ -30,6 +30,7 @@ TESTING_DIR = os.path.join(NB_DIR, "testing-notebooks")
 
 SENSOR_NOTEBOOKS = {
     "landsat_workflow.ipynb": "landsat",
+    "landsat_odr_workflow.ipynb": "landsat",
     "sentinel2_workflow.ipynb": "sentinel2",
     "sentinel2_odr_workflow.ipynb": "sentinel2",
     "satellogic_workflow.ipynb": "satellogic",

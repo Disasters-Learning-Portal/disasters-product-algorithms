@@ -233,10 +233,9 @@ class TestUploadMapping:
             )
 
     def test_no_landsat_leftovers_in_the_mapping(self, upload_src):
-        """The draft carried `cloudMask` and `pan`, neither of which the STAC
-        Sentinel-2 pipeline produces."""
+        """The draft carried `pan`, which the STAC Sentinel-2 pipeline does not
+        produce. (`cloudMask` is legitimate since `--product cloud_mask`.)"""
         folders = self._folders(upload_src)
-        assert "cloudMask" not in folders
         assert "pan" not in folders
 
     def test_real_filenames_all_resolve_to_a_folder(self, config_src, upload_src):

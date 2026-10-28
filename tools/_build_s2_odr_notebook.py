@@ -33,7 +33,7 @@ title: Sentinel-2 STAC Processing Workflow
 description: Generate Sentinel-2 disaster-response COGs by querying a STAC API (Earth Search) over a bounding box and date range, reading the cloud-optimized assets directly from S3 — no scene download and no Copernicus credentials.
 author:
   - Ethan Kerr (Editor, UAH)
-date: August 31, 2026
+date: October 27, 2026
 execute:
    freeze: true
 ---
@@ -95,13 +95,13 @@ LEVEL = "2"
 
 # Inclusive, YYYY-MM-DD. Sentinel-2 revisit is ~5 days, so a single day
 # catches only one orbit swath -- widen the window if a run finds no scenes.
-START_DATE = "2025-08-12"
-END_DATE = "2025-08-14"
+START_DATE = "2026-10-09"
+END_DATE = "2026-10-12"
 
 # [MIN_LON, MIN_LAT, MAX_LON, MAX_LAT] in WGS84.
 # Any tile intersecting this box is processed IN FULL (110 km), so a small
 # box is fine -- it selects scenes, it does not crop them.
-BBOX = [-93.70, 42.00, -93.55, 42.10]
+BBOX = [-94.24, 41.39, -92.67, 42.47]
 
 # Only scenes below this scene-level cloud percentage are processed.
 CLOUD_COVER = 50
@@ -111,23 +111,17 @@ CLOUD_COVER = 50
 # ------------------------------------------------------------------------------
 
 PRODUCTS = {
-    "true_color": True,
+    "true_color": False,
     "natural_color": False,
     "color_infrared": False,
     "swir": False,
-    "ndvi": True,
-    "ndwi": False,
+    "ndvi": False,
+    "ndwi": True,
     "mndwi": False,
     "nbr": False,
     "evi": False,
-    "we": False,
+    "cloud_mask": False,
 }
-
-# Water-extent NIR threshold(s), in standard deviations above the mean NIR of
-# the permanent-water reference sample. One COG per value; the filename
-# carries an NSTD_<value> token. Higher = MORE pixels classified as water.
-# Only used when "we" is enabled above.
-WE_NSTD = [1]
 
 # ------------------------------------------------------------------------------
 # Processing toggles
@@ -138,13 +132,13 @@ WE_NSTD = [1]
 CLOUD_MASK = True
 
 # Mosaic all matched tiles into a single product instead of one file per tile.
-MERGE = False
+MERGE = True
 
 # ------------------------------------------------------------------------------
 # Output
 # ------------------------------------------------------------------------------
 
-OUTPUT_DIR = "/tmp/s2_stac_output"
+OUTPUT_DIR = "/tmp/s3_tmp"
 
 # ------------------------------------------------------------------------------
 # S3 upload -- OFF by default.
@@ -343,9 +337,6 @@ for product, enabled in PRODUCTS.items():
     if MERGE:
         process_cmd.append("--merge")
 
-    if product == "we" and WE_NSTD:
-        process_cmd += ["--we-nstd", *[str(n) for n in WE_NSTD]]
-
     print(f"Command: {' '.join(process_cmd)}\\n")
 
     process = subprocess.Popen(
@@ -411,13 +402,20 @@ for path in NEW_COGS:
 # ==============================================================================
 # PREVIEW THE COGs
 # ==============================================================================
+from pathlib import Path
 from shared_utils.plotting import preview_cogs
 
-if NEW_COGS:
-    print(f"Previewing {len(NEW_COGS)} COG(s)...")
-    preview_cogs(NEW_COGS, sample_n=10)
+cogs = sorted([
+    str(path)
+    for path in Path(OUTPUT_DIR).rglob("*")
+    if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+])
+
+if cogs:
+    print(f"Previewing {len(cogs)} COG(s)...")
+    preview_cogs(cogs, sample_n=10)
 else:
-    print("No COGs produced by this run.")
+    print(f"No COGs found in {OUTPUT_DIR}.")
 '''),
     md("""
 ## Output naming
@@ -472,6 +470,7 @@ _PRODUCT_KEYS = {
     "nbr": "NBR",
     "evi": "EVI",
     "waterExtent": "waterExtent",
+    "cloudMask": "cloudMask",
 }
 PRODUCT_FOLDERS = {
     token: product_dir(PRODUCT_SENSOR, key) for token, key in _PRODUCT_KEYS.items()
@@ -482,7 +481,7 @@ _unmapped = {
     p for p, on in PRODUCTS.items() if on
 } - {
     "true_color", "natural_color", "color_infrared", "swir", "ndvi",
-    "ndwi", "mndwi", "nbr", "evi", "we",
+    "ndwi", "mndwi", "nbr", "evi", "we", "cloud_mask",
 }
 if _unmapped:
     raise ValueError(f"products with no folder mapping: {sorted(_unmapped)}")

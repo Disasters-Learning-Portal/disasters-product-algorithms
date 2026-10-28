@@ -124,6 +124,59 @@ class SimpleProcessor:
 
         return len(keys)
 
+    # Fallback patterns, in the notebook-facing {category_name: regex} shape.
+    DEFAULT_PATTERNS = {
+        'trueColor': r'trueColor|truecolor|true_color',
+        'colorInfrared': r'colorInfrared|colorIR|color_infrared',
+        'naturalColor': r'naturalColor|natural_color',
+        'NDVI': r'NDVI|ndvi',
+        'MNDWI': r'MNDWI|mndwi',
+        'SAR': r'SAR|sar|Sentinel-1|sentinel1',
+        'optical': r'B\d+\.tif|band\d+',
+    }
+
+    def _category_lookup(self) -> Dict[str, str]:
+        """
+        Build the `{regex: category_name}` map that `file_naming.categorize_file`
+        expects, from the `{category_name: regex}` map notebooks configure.
+
+        The two dicts are TRANSPOSED, and getting this wrong is silent rather
+        than loud. `categorize_file` returns the dict VALUE, so feeding it the
+        notebook-shaped dict directly still matches (a category name like
+        'trueColor' is itself a valid regex) but hands back the *regex string*
+        as the category. Every downstream lookup — `_get_output_dir`,
+        `_get_nodata_value`, `config['filename_creators']` — is keyed by
+        category NAME, so all three miss: outputs land in
+        `uncategorized/trueColor|truecolor|true_color/` and per-category nodata
+        is dropped. Nothing raises; the COGs are just in the wrong place with
+        the wrong nodata.
+
+        `categorize_file`'s `{regex: subdir}` contract is deliberately left
+        alone — it is pinned by tests/unit/test_file_naming.py and used as
+        documented by local_file_processing_template.ipynb. The mismatch is
+        this class's to absorb, so the inversion lives here.
+
+        Configured patterns REPLACE DEFAULT_PATTERNS rather than merging with
+        them. The old `{**default, **user}` merge keyed the override off the
+        category NAME, so a notebook that spelled a category differently got
+        both entries — and the default, being first, won the match. Every
+        operator template names its indices in lowercase ('ndvi', 'mndwi')
+        while the defaults are uppercase, so `S2_MNDWI_x.tif` categorized as
+        the default 'MNDWI' and the template's own OUTPUT_DIRS['mndwi'] /
+        NODATA_VALUES['mndwi'] never applied. Templates enumerate the complete
+        category set they want, so the defaults are a fallback for notebooks
+        that configure nothing at all — not a base layer to patch.
+
+        Insertion order is preserved so `categorize_file`'s first-match-wins is
+        unchanged; if two names share one regex, the first wins for the same
+        reason.
+        """
+        patterns = self.config.get('categorization_patterns') or self.DEFAULT_PATTERNS
+        lookup: Dict[str, str] = {}
+        for name, pattern in patterns.items():
+            lookup.setdefault(pattern, name)
+        return lookup
+
     def _categorize_files(self, file_list: List[str]) -> Dict[str, List[str]]:
         """
         Automatically categorize files by product type.
@@ -136,26 +189,11 @@ class SimpleProcessor:
             file_list: List of file paths
 
         Returns:
-            Dictionary of categorized files
+            Dictionary keyed by CATEGORY NAME (not by regex — see _category_lookup).
         """
         from shared_utils.file_naming import categorize_file
 
-        # Use notebook-provided patterns if available, otherwise use defaults
-        user_patterns = self.config.get('categorization_patterns', {})
-
-        # Default patterns as fallback
-        default_patterns = {
-            'trueColor': r'trueColor|truecolor|true_color',
-            'colorInfrared': r'colorInfrared|colorIR|color_infrared',
-            'naturalColor': r'naturalColor|natural_color',
-            'NDVI': r'NDVI|ndvi',
-            'MNDWI': r'MNDWI|mndwi',
-            'SAR': r'SAR|sar|Sentinel-1|sentinel1',
-            'optical': r'B\d+\.tif|band\d+',
-        }
-
-        # Merge patterns - user patterns take precedence
-        patterns = {**default_patterns, **user_patterns}
+        patterns = self._category_lookup()
 
         categories: Dict[str, List[str]] = {}
         uncategorized_files = []
@@ -207,7 +245,10 @@ class SimpleProcessor:
                 print(f"    → {new_name}")
 
         print("\nSettings:")
-        print(f"  • Compression: ZSTD level 22")
+        # Read from config — _process_category forwards these, so a hardcoded
+        # "ZSTD level 22" misreported every template (both ship level 9).
+        print(f"  • Compression: {self.config.get('compression', 'ZSTD')} "
+              f"level {self.config.get('compression_level', 22)}")
         target_crs = self._normalize_target_crs()
         print(f"  • Target CRS: {target_crs if target_crs else 'Keep original (no reprojection)'}")
         print(f"  • Overwrite existing: {self.config.get('overwrite', False)}")
@@ -397,10 +438,14 @@ class SimpleProcessor:
             New filename
         """
         from shared_utils.file_naming import create_output_filename
+        # Inverted for the same reason as _categorize_files: create_output_filename
+        # routes `categories` through categorize_file and compares the result
+        # against `passthrough_categories` ('AVIRIS'), so it needs the category
+        # NAME back, not the regex that matched.
         return create_output_filename(
             original_path,
             self.config['event_name'],
-            categories=self.config.get('categorization_patterns'),
+            categories=self._category_lookup(),
         )
 
     def _normalize_target_crs(self) -> Optional[str]:

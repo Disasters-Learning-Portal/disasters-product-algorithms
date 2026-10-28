@@ -73,9 +73,16 @@ jobs:
             GitHub Action path").
 
             To work around it we PINNED a fork
-            (`Disasters-Learning-Portal/ogc-app-pack-generator`) whose ONLY change is
+            (`Disasters-Learning-Portal/ogc-app-pack-generator`), whose main change is
             deploying the CWL at the just-pushed commit (`git rev-parse HEAD`) instead
             of `github.sha`. `.github/workflows/register-dps.yml` uses that fork.
+
+            SECOND FORK PATCH — the fork also bumps the action's four JavaScript
+            actions to their node24 majors (`actions/checkout@v7`,
+            `actions/setup-python@v7`, `docker/login-action@v4`,
+            `docker/build-push-action@v7`); upstream is on v4/v5/v3/v5, which all
+            target the DEPRECATED Node 20. Retiring the fork loses that bump, so it
+            is only a clean swap if upstream has bumped too.
 
             Our automation has detected that UPSTREAM now appears FIXED, so the fork
             should be retired. Please:
@@ -87,6 +94,14 @@ jobs:
                `github.event.after`, or a captured post-commit SHA), NOT from
                `github.sha`. If it STILL uses `github.sha`, upstream is NOT fixed —
                STOP, open NO PR, and just report that in your session notes.
+
+               While you have upstream's `action.yml` open, also check its
+               `actions/checkout`, `actions/setup-python`, `docker/login-action` and
+               `docker/build-push-action` pins. If any still targets Node 20 (checkout
+               <= v4, setup-python <= v5, login-action <= v3, build-push-action <= v5),
+               say so PROMINENTLY in the PR body: switching back to upstream
+               reintroduces the deprecated-Node-20 warnings that fork patch #2 removed,
+               and the fork may be worth keeping for that reason alone.
 
             If genuinely fixed, open a pull request whose BASE branch is `dev` (NOT main)
             that RETIRES the fork:

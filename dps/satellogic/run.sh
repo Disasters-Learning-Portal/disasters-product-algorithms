@@ -24,8 +24,7 @@ source "${basedir}/../_validate.sh"
 DATE=""
 PRODUCT="truecolor"
 LEVEL="L1D"
-VISUALIZE="false"
-GAMMA="0.7"
+GAMMA="2.2"
 FILTER_SIZE="5"
 # SOURCE is hardcoded to "csda" for Satellogic (ticket #320); not a job input.
 SOURCE_LABEL="csda"
@@ -40,6 +39,11 @@ ENABLE_S3_UPLOAD="true"
 STAGING_UPLOAD="true"
 STAGING_BUCKET="nasa-disasters-staging"
 STAGING_DEST_BASE="dps_output"
+# Sensor key for shared_utils/product_paths.py. With it set, _finalize.sh
+# publishes each product to its canonical, hard-coded destination
+# ProgramData/<Sensor>/<Product>/<filename> rather than mirroring the local
+# <date>/<product>/ tree under STAGING_DEST_BASE.
+PRODUCT_SENSOR="satellogic"
 # DELETE_COG is likewise LOCKED (not a job input / flag): after upload the scratch
 # COG in ~/drcs_outputs is always removed to free worker disk -- the product already
 # lives in nasa-disasters-staging and the DPS output/ bucket, so nothing is lost.
@@ -54,7 +58,6 @@ while [[ $# -gt 0 ]]; do
     --gamma)             GAMMA="$2"; shift 2;;
     --filter_size)       FILTER_SIZE="$2"; shift 2;;
     --activation_event)  ACTIVATION_EVENT="$2"; shift 2;;
-    --visualize)         if [[ "${2:-}" =~ ^(true|false)$ ]]; then VISUALIZE="$2"; shift 2; else VISUALIZE="true"; shift; fi ;;
     *) echo "WARN: ignoring unrecognized arg: $1"; shift;;
   esac
 done
@@ -88,7 +91,6 @@ args=( --product "${PRODUCT}"
        --gamma "${GAMMA}"
        --filter_size "${FILTER_SIZE}"
        --metadata-json "${META_JSON}" )
-[[ "${VISUALIZE}" == "true" ]] && args+=( --visualize )
 
 conda run --live-stream --name disasters_dps process_satellogic "${args[@]}"
 

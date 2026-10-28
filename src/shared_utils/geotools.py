@@ -50,7 +50,11 @@ def get_geo(f, band=1):
   projref = ds.GetProjectionRef()
   return img, in_geo, projref
 
-def dump_geotiff_float(filename, arr, projref, in_geo):
+def dump_geotiff_float(filename, arr, projref, in_geo, nodata=None):
+  # nodata defaults to None = write no nodata tag, which is what the SAR
+  # callers (capella/umbra/iceye) rely on: their output is dB backscatter
+  # where every finite value is legitimate, and they declare nodata at the
+  # CLI instead. Pass a value only for products that reserve a fill.
   format = 'GTiff'
   rows, cols = np.shape(arr)
   driver = gdal.GetDriverByName(format)
@@ -61,6 +65,8 @@ def dump_geotiff_float(filename, arr, projref, in_geo):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(arr)
+  if nodata is not None:
+    out_ds.GetRasterBand(1).SetNoDataValue(float(nodata))
   out_ds = None
   return filename
 
@@ -78,12 +84,23 @@ def dump_geotiff_byte(filename, arr, projref, in_geo):
   out_ds = None
   return filename
 
-def dump_geotiff_rgb(filename, r, g, b, projref, in_geo):
+def dump_geotiff_rgb(filename, r, g, b, projref, in_geo, alpha=None):
+  """Write an 8-bit RGB GeoTIFF, optionally with a 4th alpha band.
+
+  alpha=None (default) writes the legacy 3-band output unchanged. Pass a
+  uint8 array (0 = transparent / nodata, 255 = valid) to get a 4-band RGBA
+  whose band 4 is tagged GCI_AlphaBand. Use alpha instead of a scalar nodata
+  whenever 0 is a legitimate sample — for an 8-bit composite it always is.
+  The caller must then pass nodata=False to convert_to_cog: a scalar nodata
+  declared alongside an alpha band shadows it (rasterio NodataShadowWarning)
+  and masks real black pixels.
+  """
   # Write a GeoTIFF
   format = 'GTiff'
   rows, cols = np.shape(r)
   driver = gdal.GetDriverByName(format)
-  out_ds = driver.Create(filename, cols, rows, 3, gdal.GDT_Byte)
+  n_bands = 4 if alpha is not None else 3
+  out_ds = driver.Create(filename, cols, rows, n_bands, gdal.GDT_Byte)
   out_cs = osr.SpatialReference()
   out_cs.ImportFromWkt(projref)
   out_ds.SetProjection(out_cs.ExportToWkt())
@@ -91,6 +108,10 @@ def dump_geotiff_rgb(filename, r, g, b, projref, in_geo):
   out_ds.GetRasterBand(1).WriteArray(r)
   out_ds.GetRasterBand(2).WriteArray(g)
   out_ds.GetRasterBand(3).WriteArray(b)
+  if alpha is not None:
+      alpha_band = out_ds.GetRasterBand(4)
+      alpha_band.WriteArray(alpha)
+      alpha_band.SetColorInterpretation(gdal.GCI_AlphaBand)
   out_ds = None
   return filename
 

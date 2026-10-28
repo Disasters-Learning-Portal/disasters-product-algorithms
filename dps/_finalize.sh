@@ -3,6 +3,10 @@
 # Contract: the caller has already produced the product COG(s) in ${OUT_HOME}
 # and set these variables:
 #   OUT_HOME ACTIVATION_EVENT ENABLE_S3_UPLOAD S3_BUCKET S3_DEST_BASE DELETE_COG
+#   PRODUCT_SENSOR -- optional; the shared_utils/product_paths.py sensor key. Set,
+#   the staging publish keys every product by its canonical destination
+#   ProgramData/<Sensor>/<Product>/<filename>. Unset, the old OUT_HOME-relative
+#   key under STAGING_DEST_BASE/<event> is used.
 # Staging publish (ALL sensors set these today): when STAGING_UPLOAD=true the
 #   publish step targets the MAAP org bucket STAGING_BUCKET under
 #   STAGING_DEST_BASE/<event> using short-lived MAAP workspace credentials (the DPS
@@ -14,10 +18,22 @@
 # ambient operational bucket) -> delete the COGs from ${OUT_HOME} to free home-dir
 # space (the output/ copy is retained for DPS). No PNG quicklooks are produced.
 
+# DPS_DRY_RUN=1 -- TEST HOOK. Copies products into output/ as usual, then SKIPS the
+# S3 publish and the scratch delete, printing what it would have done. This is what
+# lets tests/e2e run a real run.sh end to end (real download, real COG, real event
+# bake) without writing to nasa-disasters-staging or destroying the products the test
+# then inspects. It is an ENVIRONMENT variable on purpose: a DPS job receives named
+# CWL flags and never sets env, so no job input can reach it and the "publishing is
+# always on, destination is locked" invariant still holds for every real run.
 mkdir -p output
 
 # 1) copy products into the DPS output/ dir -- DPS uploads these
 cp -r "${OUT_HOME}/." output/ 2>/dev/null || true
+
+if [[ "${DPS_DRY_RUN:-0}" == "1" ]]; then
+  echo "DPS_DRY_RUN=1: skipping S3 publish and scratch-COG delete (products left in ${OUT_HOME} and output/)."
+  return 0 2>/dev/null || exit 0
+fi
 
 # 2) publish products (COG) to S3
 if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
@@ -28,11 +44,15 @@ if [[ "${ENABLE_S3_UPLOAD}" == "true" ]]; then
     #     by their OUT_HOME-relative path (same collision-safety as 3b).
     STAGING_PREFIX="${STAGING_DEST_BASE}/${ACTIVATION_EVENT}"
     echo "Publishing products to s3://${STAGING_BUCKET}/${STAGING_PREFIX}/ (MAAP workspace creds) ..."
-    conda run --live-stream --name disasters_dps python - "${STAGING_BUCKET}" "${STAGING_PREFIX}" "${OUT_HOME}" <<'PY'
+    conda run --live-stream --name disasters_dps python - "${STAGING_BUCKET}" "${STAGING_PREFIX}" "${OUT_HOME}" "${PRODUCT_SENSOR:-}" <<'PY'
 import sys
 from shared_utils.staging_upload import upload_dir_to_staging
 bucket, dest_prefix, out_home = sys.argv[1], sys.argv[2], sys.argv[3]
-upload_dir_to_staging(out_home, bucket, dest_prefix)
+# With PRODUCT_SENSOR set, each product is keyed by its canonical destination
+# ProgramData/<Sensor>/<Product>/<filename>; dest_prefix is then unused. Unset
+# (empty) keeps the previous dest_prefix + OUT_HOME-relative key.
+sensor = sys.argv[4] or None
+upload_dir_to_staging(out_home, bucket, dest_prefix, sensor=sensor)
 PY
   else
     # 3b) operational path: publish to S3_BUCKET via the DPS worker's ambient role

@@ -8,6 +8,7 @@ import argparse
 import os
 
 from capella.capella_v2 import (
+    CAPELLA_NODATA,
     retrieve_capella_resources,
     group_capella_scenes,
     sigmaCalib
@@ -15,25 +16,26 @@ from capella.capella_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.scratch import download_scratch
+
+
+# Fixed processing parameters. Capella has exactly one calibration product and
+# one vendor bucket, and every activation wants the same COG encoding, so these
+# are constants rather than CLI flags -- the same treatment Satellogic got in
+# PR #45 and Umbra's filter in PR #44. Changing one is a code change with a
+# review, not a per-run argument. See .clinerules.md rule 37.
+CAPELLA_BUCKET = "csdap-capellaspace-delivery"
+CAPELLA_PREFIX = "disasters"
+SOURCE = "CSDA"
+COMPRESSION = "ZSTD"
+COMPRESSION_LEVEL = 22
+DST_CRS = None  # native projection; no warp
 
 
 def main():
 
     parser = argparse.ArgumentParser(
         description="Process Capella imagery"
-    )
-
-    parser.add_argument(
-        "--product",
-        choices=["sigma"],
-        required=True,
-        help="Calibration product to generate"
-    )
-
-    parser.add_argument(
-        "--apply_filter",
-        action="store_true",
-        help="Apply Lee filtering"
     )
 
     parser.add_argument(
@@ -50,58 +52,12 @@ def main():
     )
 
     parser.add_argument(
-        "--prefix",
-        default="disasters",
-        help="S3 prefix"
-    )
-
-    parser.add_argument(
-        "--bucket",
-        default="csdap-capellaspace-delivery",
-        help="S3 bucket"
-    )
-
-    parser.add_argument(
         "--output",
         default="/tmp/s3_temp",
         help="Output directory"
     )
 
     # COG options
-    parser.add_argument(
-        "-nodata",
-        type=float,
-        default=-9999.0,
-        help="No-data value for COG outputs (default -9999.0). SAR backscatter is "
-             "float32 dB where 0 dB is a legitimate value, so nodata must never be 0."
-    )
-
-    parser.add_argument(
-        "-compression",
-        type=str,
-        default="ZSTD",
-        help="Compression type for COG"
-    )
-
-    parser.add_argument(
-        "-compression_level",
-        type=int,
-        default=22,
-        help="Compression level for COG"
-    )
-
-    parser.add_argument(
-        "-dst_crs",
-        type=str,
-        default="native",
-        help=(
-            "Target CRS for COG output. 'native' (default) preserves the "
-            "source UTM projection; pass 'EPSG:3857' (Web Mercator) for "
-            "optimal VEDA titiler-pgstac tiling (also required by "
-            "veda-data-airflow build_stac)."
-        ),
-    )
-
     parser.add_argument(
         "--metadata-json",
         type=str,
@@ -116,15 +72,18 @@ def main():
 
     args = parser.parse_args()
 
-    dst_crs_value = None if args.dst_crs.lower() == "native" else args.dst_crs
     metadata = load_metadata_json(args.metadata_json)
+    # Fill in the vendor as the default provenance, but never clobber a
+    # SOURCE the operator supplied via --metadata-json (DPS passes
+    # source_label through, and it is a required job input).
+    metadata.setdefault("SOURCE", SOURCE)
 
     print("Retrieving Capella resources...")
 
     tifs = retrieve_capella_resources(
         date=args.date,
-        bucket=args.bucket,
-        prefix=args.prefix
+        bucket=CAPELLA_BUCKET,
+        prefix=CAPELLA_PREFIX
     )
 
     # One group per GEO band = one genuine scene. Folders may hold several
@@ -136,60 +95,54 @@ def main():
     if not scenes:
         raise FileNotFoundError(
             f"No Capella GEO band found for --date {args.date} "
-            f"in s3://{args.bucket}/{args.prefix}"
+            f"in s3://{CAPELLA_BUCKET}/{CAPELLA_PREFIX}"
         )
 
     print(f"Found {len(scenes)} Capella scene(s) for --date {args.date}")
 
     cog_paths = []
 
-    for i, scene_tifs in enumerate(scenes, start=1):
+    # Raw scenes download into a per-run scratch dir that is deleted when the
+    # run ends -- success, failure or Ctrl-C. They used to land in a shared
+    # /tmp/s3_temp that nothing cleaned, filling /tmp one scene per run.
+    with download_scratch("capella") as download_dir:
 
-        print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
+        for i, scene_tifs in enumerate(scenes, start=1):
 
-        # Keep single-scene output flat (byte-identical to before). Isolate each
-        # scene in its own subdir only when there are several, so identically
-        # named (same-timestamp) COGs don't clobber each other locally or in S3.
-        scene_out = (
-            args.output if len(scenes) == 1
-            else os.path.join(args.output, f"scene_{i}")
-        )
+            print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
 
-        outfile = None
-        source_tif = None
-
-        if args.product == "sigma":
-
-            outfile, source_tif = sigmaCalib(
-                scene_tifs,
-                save_location=scene_out,
-                do_filt=args.apply_filter,
-                filter_size=args.filter_size
+            # Keep single-scene output flat (byte-identical to before). Isolate each
+            # scene in its own subdir only when there are several, so identically
+            # named (same-timestamp) COGs don't clobber each other locally or in S3.
+            scene_out = (
+                args.output if len(scenes) == 1
+                else os.path.join(args.output, f"scene_{i}")
             )
 
-        if not outfile:
-            continue
+            # Speckle filtering is always on; --filter_size only tunes the kernel.
+            outfile, _source_tif = sigmaCalib(
+                scene_tifs,
+                save_location=scene_out,
+                filter_size=args.filter_size,
+                download_dir=download_dir,
+            )
 
-        print("Converting to COG...")
+            if not outfile:
+                continue
 
-        cog_path = convert_to_cog(
-            outfile,
-            nodata=args.nodata,
-            dst_crs=dst_crs_value,
-            compression=args.compression,
-            compression_level=args.compression_level,
-            metadata=metadata,
-        )
+            print("Converting to COG...")
 
-        print(f"COG created: {cog_path}")
-        cog_paths.append(cog_path)
+            cog_path = convert_to_cog(
+                outfile,
+                nodata=CAPELLA_NODATA,
+                dst_crs=DST_CRS,
+                compression=COMPRESSION,
+                compression_level=COMPRESSION_LEVEL,
+                metadata=metadata,
+            )
 
-        # Delete the raw downloaded source raster now that a valid COG exists.
-        # Gated on COG success (a failure/exception above skips cleanup so the
-        # download is preserved for a retry).
-        if cog_path and source_tif and os.path.exists(source_tif):
-            os.remove(source_tif)
-            print(f"Removed source raster: {source_tif}")
+            print(f"COG created: {cog_path}")
+            cog_paths.append(cog_path)
 
     print(f"\nCreated {len(cog_paths)} COG(s).")
 

@@ -16,9 +16,27 @@
 #   allow Actions to PUSH to a branch and to OPEN ISSUES, so we sync by pushing
 #   clean merges and routing conflicts to an Issue for a human. This mirrors how
 #   register-dps.yml already pushes generated CWL to deploy-algorithm.
-#   (If you later want mandatory PR review instead, swap GITHUB_TOKEN for a PAT /
-#   GitHub App token with pull-requests:write and open a PR — a user/app token is
-#   not subject to the org's Actions-PR restriction.)
+#   (If you later want mandatory PR review instead, swap in a PAT / GitHub App
+#   token with pull-requests:write and open a PR — a user/app token is not subject
+#   to the org's Actions-PR restriction.)
+#
+# WHY A PAT (`DISASTERS_RELEASE_PAT`) AND NOT GITHUB_TOKEN:
+#   GitHub REFUSES any push from a GitHub App (which the default GITHUB_TOKEN is)
+#   that creates or updates a file under `.github/workflows/`:
+#     ! [remote rejected] HEAD -> deploy-algorithm (refusing to allow a GitHub App
+#       to create or update workflow `.github/workflows/register-dps.yml` without
+#       `workflows` permission)
+#   and there is NO `workflows:` key you can add to the `permissions:` block — that
+#   permission simply does not exist for GITHUB_TOKEN. So any dev commit that edits
+#   a workflow file made this sync fail at the push, leaving deploy-algorithm stale
+#   (hit 2026-08-12 by a one-line pin bump in register-dps.yml; the merge itself was
+#   clean, so the conflict-issue path never fired — the run just failed). The
+#   release workflow already needs a token for a similar bypass reason, and its
+#   fine-grained `DISASTERS_RELEASE_PAT` carries Contents + PRs + **Workflows =
+#   Read & write**, which is exactly what this push needs. Reuse it here.
+#   ⚠️ Same expiry caveat as release.yaml: when that PAT expires, this falls back
+#   to GITHUB_TOKEN and workflow-file syncs start failing again with the message
+#   above. Fix = regenerate the PAT and update the secret.
 #
 # --- WHERE THIS FILE MUST LIVE -----------------------------------------------
 #   The `push` trigger runs the workflow DEFINITION FROM THE PUSHED COMMIT — the
@@ -28,8 +46,11 @@
 #   from the DEFAULT branch (`main`) — they only appear/run if this file is ALSO
 #   on `main`. It never needs to live on deploy-algorithm.
 #
-# RECURSION: the merge push uses GITHUB_TOKEN, so it does NOT trigger further
-# workflow runs, and nothing triggers on push to deploy-algorithm anyway — no loop.
+# RECURSION: the merge push now uses a PAT, and PAT pushes DO trigger workflows
+# (GITHUB_TOKEN pushes don't) — but no workflow triggers on push to
+# `deploy-algorithm` (only `dev`, `main`, and PRs), so there is still no loop.
+# Keep it that way: adding a `push: branches: [deploy-algorithm]` trigger anywhere
+# would now actually fire on every sync.
 
 name: Sync dev -> deploy-algorithm (auto-merge)
 run-name: >-
@@ -70,14 +91,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout deploy-algorithm (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Check out the TARGET so we merge dev INTO it and push it back. A
           # merge needs real history of both branches -> fetch-depth: 0.
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
-          # Persist GITHUB_TOKEN as the push credential.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Persist the push credential. PAT FIRST, GITHUB_TOKEN as fallback —
+          # see "WHY A PAT" in the header. `||` picks GITHUB_TOKEN only when the
+          # PAT secret is empty/unset (e.g. expired and cleared), so the sync
+          # keeps working for non-workflow changes instead of failing outright.
+          token: ${{ secrets.DISASTERS_RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity (github-actions[bot])
         run: |

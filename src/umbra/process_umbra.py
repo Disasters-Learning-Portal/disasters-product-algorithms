@@ -17,6 +17,7 @@ from umbra.umbra_v2 import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.scratch import download_scratch
 
 
 def main():
@@ -119,46 +120,51 @@ def main():
 
     cog_paths = []
 
-    for i, scene_tifs in enumerate(scenes, start=1):
+    # Raw scenes download into a per-run scratch dir that is deleted when the
+    # run ends -- success, failure or Ctrl-C. They used to land in a shared
+    # /tmp/s3_temp that nothing cleaned, filling /tmp one scene per run.
+    with download_scratch("umbra") as download_dir:
 
-        print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
+        for i, scene_tifs in enumerate(scenes, start=1):
 
-        # Keep single-scene output flat (byte-identical to before). Isolate each
-        # scene in its own subdir only when there are several, so identically
-        # named (same-timestamp) COGs don't clobber each other locally or in S3.
-        scene_out = (
-            args.output if len(scenes) == 1
-            else os.path.join(args.output, f"scene_{i}")
-        )
+            print(f"\nProcessing scene {i}/{len(scenes)}: {scene_tifs[0]}")
 
-        print(f"Generating {args.product}...")
-
-        outfile = None
-
-        # Lee filtering is baked into each calibration (always on); the kernel
-        # comes straight from --filter_size.
-        if args.product == "sigma":
-            outfile = sigmaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
-        elif args.product == "beta":
-            outfile = betaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
-        elif args.product == "gamma":
-            outfile = gammaCalib(scene_tifs, scene_out, filter_size=args.filter_size)
-
-        # COG Conversion Step
-        if outfile:
-            print("Converting to COG...")
-
-            cog_path = convert_to_cog(
-                outfile,
-                nodata=args.nodata,
-                dst_crs=dst_crs_value,
-                compression=args.compression,
-                compression_level=args.compression_level,
-                metadata=metadata,
+            # Keep single-scene output flat (byte-identical to before). Isolate each
+            # scene in its own subdir only when there are several, so identically
+            # named (same-timestamp) COGs don't clobber each other locally or in S3.
+            scene_out = (
+                args.output if len(scenes) == 1
+                else os.path.join(args.output, f"scene_{i}")
             )
 
-            print(f"COG created: {cog_path}")
-            cog_paths.append(cog_path)
+            print(f"Generating {args.product}...")
+
+            outfile = None
+
+            # Lee filtering is baked into each calibration (always on); the kernel
+            # comes straight from --filter_size.
+            if args.product == "sigma":
+                outfile = sigmaCalib(scene_tifs, scene_out, filter_size=args.filter_size, download_dir=download_dir)
+            elif args.product == "beta":
+                outfile = betaCalib(scene_tifs, scene_out, filter_size=args.filter_size, download_dir=download_dir)
+            elif args.product == "gamma":
+                outfile = gammaCalib(scene_tifs, scene_out, filter_size=args.filter_size, download_dir=download_dir)
+
+            # COG Conversion Step
+            if outfile:
+                print("Converting to COG...")
+
+                cog_path = convert_to_cog(
+                    outfile,
+                    nodata=args.nodata,
+                    dst_crs=dst_crs_value,
+                    compression=args.compression,
+                    compression_level=args.compression_level,
+                    metadata=metadata,
+                )
+
+                print(f"COG created: {cog_path}")
+                cog_paths.append(cog_path)
 
     print(f"\nCreated {len(cog_paths)} COG(s).")
 

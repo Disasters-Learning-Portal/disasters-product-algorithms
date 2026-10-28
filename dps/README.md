@@ -28,6 +28,7 @@ dps/
 ├── environment.yml          # SHARED lean conda env (name: disasters_dps)
 ├── _finalize.sh             # SHARED output flow: output/ -> S3 -> delete COG (no PNGs)
 ├── register_algorithms.py   # legacy maap-py registration helper (see "Registering")
+├── delete_algorithm.ipynb   # undeploy a registered process (see "Deleting an algorithm")
 ├── README.md
 └── <name>/                  # one subfolder per algorithm
     ├── build-env.sh         # conda env update + pip install repo (boilerplate)
@@ -40,6 +41,15 @@ are used by every algorithm. Everything else lives in a per-algorithm `<name>/` 
 The existing algorithms (`landsat`, `sentinel2`, `capella`, `umbra`, `satellogic`) are
 concrete examples of the pattern — copy the closest one when adding a new algorithm.
 
+**Two Sentinel-2 algorithms are registered on purpose.** `sentinel2/` downloads
+`.SAFE` archives from Copernicus (needs `COP_USER`/`COP_PASS` MAAP secrets and
+`p7zip`); `sentinel2_odr/` queries a STAC API and reads COGs straight from the AWS
+Open Data Registry (ODR) bucket
+(no credentials, no download). They carry DIFFERENT `algorithm_name`s so both
+stay runnable and can be compared on real activations before the `.SAFE` one is
+retired — a rename would replace rather than add. See issue #144 and
+"Sentinel-2: TWO algorithms during the STAC migration" in [docs/DPS.md](../docs/DPS.md).
+
 One algorithm deliberately deviates: **`list_dates/`** (registered as `list-dates`)
 is a **discovery** tool, not a processing algorithm — it takes a `sensor` selector
 (capella|umbra|satellogic) and runs its own `report_dates.py`, which calls each
@@ -49,18 +59,23 @@ carry a `--list_dates` flag. It has **no `_finalize.sh` step** (no COG; only an
 `available_<sensor>_dates.csv` artifact). See `docs/DPS.md` "Scene-date discovery".
 
 A second deviates in a different way: **`blackmarble/`** (registered as `black-marble`)
-is the **VEDA Black Marble** nighttime-lights pipeline — a **vendored, self-contained
-package** at `src/blackmarble/` (source: `github.com/HarshiniGirish/veda-black-marble`),
-not a `process_*` sensor. Its `run.sh` still follows the run.sh contract and the shared
-`_finalize.sh` output flow, but it (a) is **bbox + date** driven (downloads VIIRS
-VNP46A2 from Earthdata, Landsat from a STAC catalog, and OSM roads — no vendor-bucket
-file input), (b) is invoked as **`python -m blackmarble.cli`** (it has **no
-`[project.scripts]` console script** on purpose), (c) writes its **own** COG (not via
-`shared_utils.convert_to_cog`), and (d) carries a **heavy dependency stack isolated to
-`dps/environment.yml`** — deliberately kept out of the hub image, CI, and base install.
-Its NASA Earthdata token comes from a **MAAP secret** at run time (default name
-`EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input. See `docs/DPS.md`
-"Black Marble (VEDA nighttime lights)".
+wraps the **VEDA Black Marble** nighttime-lights pipeline, which is **not code in this
+repo**. It is maintained upstream by NASA-IMPACT at
+`github.com/NASA-IMPACT/veda-black-marble` and is **pip-installed into the DPS worker
+env** by a `git+https://…` entry in `dps/environment.yml` (pinned to a commit SHA until
+upstream tags a release). Everything under `dps/blackmarble/` is a thin wrapper that
+follows the normal run.sh contract and the shared `_finalize.sh` output flow, but it
+(a) is **bbox + date** driven (downloads VIIRS VNP46A2 from Earthdata, Landsat from a
+STAC catalog, and OSM roads — no vendor-bucket file input), (b) calls upstream's own
+**`blackmarble` console script** unmodified, and (c) writes its **own** COG (not via
+`shared_utils.convert_to_cog`). Its NASA Earthdata token comes from a **MAAP secret** at
+run time (default name `EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input.
+
+> **Don't re-vendor it.** An earlier iteration copied the package into `src/blackmarble/`
+> (~19 MB, from a personal fork). That was removed: Black Marble has its own repo and
+> release path, and a local copy would silently drift from upstream.
+
+See `docs/DPS.md` "Black Marble (VEDA nighttime lights)".
 
 ## The run.sh contract
 
@@ -159,6 +174,17 @@ the MAAP Settings config (`maapApiUrl` / `maapToken`).
 
 `register_algorithms.py` uses maap-py's **legacy** schema and does **not** consume the
 flat OGC config — it's kept for reference only; prefer the GUI.
+
+## Deleting an algorithm
+
+The GUI registers but does **not** delete. Undeploy with
+[`delete_algorithm.ipynb`](delete_algorithm.ipynb) (kernel: `disasters_dps`), which
+lists the OGC processes, dry-runs the selection, then
+`DELETE /api/ogc/processes/<processID>`. You delete by the numeric **`processID`**, not
+by `algorithm_name`, and only the deployer can delete their own process (`403`
+otherwise). **Renaming an algorithm does not move it** — re-registering under a new
+`algorithm_name` leaves the old process registered and runnable, so delete it here.
+Details: [docs/DPS.md → Deleting (undeploying) an algorithm](../docs/DPS.md#deleting-undeploying-an-algorithm).
 
 `algorithm_version` in each manifest is the git ref DPS clones — `dev` tracks active
 development; pin a tag (e.g. `v0.10.0`) for reproducible production runs. Either way the

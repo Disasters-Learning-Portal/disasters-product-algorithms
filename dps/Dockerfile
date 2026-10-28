@@ -84,17 +84,97 @@ RUN conda run --live-stream --name disasters_dps pip install --no-deps --no-cach
 RUN chmod +x /app/disasters-product-algorithms/dps/*/run.sh \
              /app/disasters-product-algorithms/dps/*.sh 2>/dev/null || true
 
+# --- pyspectral offline data (Sentinel-2 L1C Rayleigh correction) ---------
+# Installing the conda package is NOT enough. Rayleigh() needs an RSR file
+# and an aerosol LUT that pyspectral does not ship, and it will try to
+# DOWNLOAD both on first use -- fatal on a DPS worker with no outbound
+# network, and fatal in the middle of an activation rather than here.
+#
+# PSP_CONFIG_FILE is the ONLY env var pyspectral reads (there is no
+# PSP_DATA_ROOT). It must point at a file that EXISTS or get_config()
+# raises, hence writing the yaml rather than only setting the variable.
+# An absolute data root also makes the data independent of $HOME, so it
+# stays visible to whatever uid the job runs as -- data downloaded as
+# root into ~/.local/share/pyspectral would not be.
+ENV PSP_CONFIG_FILE=/opt/pyspectral/pyspectral.yaml
+RUN mkdir -p /opt/pyspectral /opt/pyspectral_data \
+    && printf '%s\n' \
+        'rsr_dir: /opt/pyspectral_data' \
+        'rayleigh_dir: /opt/pyspectral_data' \
+        'download_from_internet: False' \
+        > /opt/pyspectral/pyspectral.yaml \
+    # download_rsr()/download_luts() are unconditional -- they do not
+    # consult download_from_internet -- so the False above does not block
+    # this step. Only the one aerosol type Rayleigh() defaults to; all 11
+    # would be ~600 MB.
+    && conda run --live-stream --name disasters_dps python -c \
+        "from pyspectral.utils import download_rsr, download_luts; \
+         download_rsr(); \
+         download_luts(aerosol_types=['marine_clean_aerosol'])" \
+    && chmod -R a+rX /opt/pyspectral /opt/pyspectral_data
+
 # --- build-time smoke check ----------------------------------------------
 # Fail the build EARLY (not at DPS job time) if the env name drifted from
 # dps/environment.yml's `name: disasters_dps`, or if any `process_*` entry point
 # is broken. `conda run --name disasters_dps` is the exact invocation run.sh
 # uses, so this proves the runtime contract holds. --help exits 0 without doing
 # real work; the import line proves every sensor package + shared_utils resolves.
+# The last two lines cover the UPSTREAM blackmarble package (pip-installed from
+# github.com/NASA-IMPACT/veda-black-marble by dps/environment.yml, not vendored here):
+# the import proves the VCS install landed with its WRS2 package data, and the --help
+# proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
+# obstore) all resolved. This is the only build-time gate on that install.
+#
+# `bm_noaa.py --self-check` is the gate on the NOAA-20 variant. That script retargets the
+# pinned upstream package from VNP46A2 to VJ146A2 by setting a MODULE CONSTANT
+# (blackmarble.acquire.viirs.BM_SHORT_NAME) -- upstream has no flag for it. If upstream
+# renames that constant or moves the HDF5 layer path, a naive patch would silently do
+# NOTHING: the job would download Suomi-NPP granules, publish them under a NOAA-20 product
+# name, and exit 0. --self-check applies the patch offline (no token, no network) and
+# fails if the contract moved, so that drift breaks THIS BUILD rather than an activation.
+#
+# `bm_georef.py --self-check` is the same kind of gate on the LANDSAT GEOREFERENCING patch,
+# which applies to BOTH platforms. Upstream renders band tiles at mosaic coordinates into a
+# window-sized array and then pastes them at the window offset, applying that offset twice
+# and putting every product ~3.6 km north-west of truth. A stale patch fails silently in the
+# worst way -- the job publishes a misregistered COG that passes cog_validate, has a correct
+# transform, and lands over the right city, so nothing downstream notices. --self-check
+# validates upstream's shape AND pushes markers at known coordinates through the patched
+# path offline, asserting they land within 200 m (unpatched puts them ~3600 m out, or off
+# the grid entirely).
+#
+# The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
+# non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
+# does NOT pull in, and nothing above notices: `blackmarble --help` and every
+# `process_* --help` pass fine without them, so a missing driver only surfaces at DPS
+# job time as `plugin gdal_<DRV>.so is not available`. That has now bitten twice --
+# JP2OpenJPEG (Sentinel-2 .jp2 bands, silent empty-success) and HDF5 (Black Marble
+# VIIRS .h5 granules, permanentFail). Assert on the plugin FILE, not on
+# `gdal.GetDriverByName("HDF5")`: GDAL's deferred plugin loading registers a PROXY
+# driver even when the .so is absent (that proxy is what emits the "could have been
+# recognized by driver HDF5, but plugin ... is not available" message), so
+# GetDriverByName returns non-None either way and gates nothing. The glob tolerates
+# any version suffix conda-forge adds. Adding a driver dep to dps/environment.yml?
+# Add it here too.
 RUN conda run --name disasters_dps process_capella --help >/dev/null \
+    && conda run --name disasters_dps process_sentinel2_odr --help >/dev/null \
     && conda run --name disasters_dps python -c \
         "import shared_utils, capella, umbra, satellogic, landsat, sentinel2" \
+    && conda run --name disasters_dps python -c \
+        "import sentinel2.sentinel2_odr_functions" \
     && conda run --name disasters_dps python -c "import blackmarble" \
-    && conda run --name disasters_dps python -m blackmarble.cli --help >/dev/null
+    && conda run --name disasters_dps blackmarble --help >/dev/null \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/dps/blackmarble/bm_georef.py --self-check \
+    && conda run --name disasters_dps python \
+        /app/disasters-product-algorithms/tools/pyspectral_selfcheck.py \
+    && conda run --name disasters_dps bash -c '\
+        for drv in HDF5 JP2OpenJPEG; do \
+          ls "$CONDA_PREFIX"/lib/gdalplugins/gdal_${drv}*.so >/dev/null 2>&1 \
+            || { echo "MISSING GDAL plugin gdal_${drv}.so - add the matching libgdal-* package to dps/environment.yml"; exit 1; }; \
+        done'
 
 # MAAP's OGC runtime invokes the CWL baseCommand
 # (disasters-product-algorithms/dps/<sensor>/run.sh) from /app. Match that CWD.

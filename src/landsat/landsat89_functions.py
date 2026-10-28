@@ -31,6 +31,10 @@ from scipy.signal import medfilt2d
 from pyproj import Transformer
 import geopandas as gpd
 from shapely.geometry import box
+from shared_utils.product_paths import product_dir
+from shared_utils.landcover import (
+    read_reclass, reclass_cdl_array, reclass_path, reclass_worldcover_array,
+    select_water_sample, write_reclass)
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -267,11 +271,32 @@ def getSolarZenithAngle(indir):
   solarZenithAngle = 90. - float(sun_elevation)
   return solarZenithAngle
 
+def getProcessingLevel(indir):
+  # Collection 2 processing level ('1' or '2') from the MTL filename,
+  # e.g. LC09_L2SP_..._MTL.xml -> '2', LC09_L1TP_..._MTL.xml -> '1'
+  metadataFile = glob.glob(os.path.join(indir, '*_MTL.xml'))[0]
+  return os.path.basename(metadataFile).split('_')[1][1]
+
+def normalizeSunAngle(refl, indir, sun_zen):
+  # Divide by cos(solar zenith) ONLY for Level-1 TOA reflectance. The USGS
+  # Collection 2 sun-angle correction is part of the L1 TOA conversion; L2
+  # surface reflectance (LaSRC) is already corrected, and dividing it again
+  # inflates it by 1/cos(SZA) (~1.3x at 40 deg, 2x at 60 deg).
+  # References:
+  #   L1 TOA rho = rho'/cos(SZA): https://www.usgs.gov/landsat-missions/using-usgs-landsat-level-1-data-product
+  #   L2 SR = DN*0.0000275 - 0.2, no sun-angle step: https://www.usgs.gov/faqs/how-do-i-use-a-scale-factor-landsat-level-2-science-products
+  #   LaSRC input is sun-angle-corrected TOA: https://above.gsfc.nasa.gov/pdfs/Landsat_Surface_Reflectance_ABoVE_21Apr2017.pdf
+  #   EVI is defined on L2 SR: https://www.usgs.gov/landsat-missions/landsat-enhanced-vegetation-index
+  if getProcessingLevel(indir) != '1':
+    return refl
+  print("\t* Normalizing TOA reflectance by the cosine of the zenith angle")
+  return refl/np.cos(np.radians(sun_zen))
+
 def getReflectanceConstants(indir, band):  
   # Extract multiplicative scale factor and additive offset from metadata
 
   metadataFile = glob.glob(os.path.join(indir, '*_MTL.xml'))[0]
-  level = os.path.basename(metadataFile).split('_')[1][1]
+  level = getProcessingLevel(indir)
   metadata = ET.parse(metadataFile)
   root = metadata.getroot()
   if level == '1':
@@ -301,9 +326,7 @@ def genPanchromatic(b8_file, sunzen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '8')
   b8 = (mult_scale_factor*b8)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b8 = b8/np.cos(np.radians(sunzen))
+  b8 = normalizeSunAngle(b8, indir, sunzen)
 
   # Convert from reflectance to 8-bit values
   print("\n\t* Converting reflectance to 8-bit values")
@@ -355,9 +378,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   r_nodata = np.where(r == 0)
   r = (mult_scale_factor*r)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle...")
-  r = r/np.cos(np.radians(sunzen))
+  r = normalizeSunAngle(r, indir, sunzen)
   r[r_nodata] = 0
   
 
@@ -375,9 +396,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   g_nodata = np.where(g == 0)
   g = (mult_scale_factor*g)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  g = g/np.cos(np.radians(sunzen))
+  g = normalizeSunAngle(g, indir, sunzen)
   g[g_nodata] = 0
   
   ### Blue ###
@@ -394,9 +413,7 @@ def genTrueColor( b4_file, b3_file, b2_file,qa_file, sunzen, outname, mask=None,
   b_nodata = np.where(b == 0)
   b = (mult_scale_factor*b)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b = b/np.cos(np.radians(sunzen))
+  b = normalizeSunAngle(b, indir, sunzen)
   b[b_nodata] = 0
   
 
@@ -474,9 +491,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   b4 = (mult_scale_factor*b4)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b4 = b4/np.cos(np.radians(sun_zen))
+  b4 = normalizeSunAngle(b4, indir, sun_zen)
 
   ### B5 ###
   print("\n\t* Opening B5 file")
@@ -491,9 +506,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   b5 = (mult_scale_factor*b5)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b5 = b5/np.cos(np.radians(sun_zen))
+  b5 = normalizeSunAngle(b5, indir, sun_zen)
 
   ### B3 ###
   print("\n\t* Opening B3 file")
@@ -508,9 +521,7 @@ def genColorInfrared(b5_file, b4_file, b3_file,qa_file, sun_zen, outname, mask=N
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   b3 = (mult_scale_factor*b3)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b3 = b3/np.cos(np.radians(sun_zen))
+  b3 = normalizeSunAngle(b3, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -597,9 +608,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   b4 = (mult_scale_factor*b4)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b4 = b4/np.cos(np.radians(sun_zen))
+  b4 = normalizeSunAngle(b4, indir, sun_zen)
 
   ### B5 ###
   print("\n\t* Opening B5 file")
@@ -614,9 +623,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   b5 = (mult_scale_factor*b5)+add_offset
 
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b5 = b5/np.cos(np.radians(sun_zen))
+  b5 = normalizeSunAngle(b5, indir, sun_zen)
 
   ### B6 ###
   print("\n\t* Opening B6 file")
@@ -631,9 +638,7 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '6')
   b6 = (mult_scale_factor*b6)+add_offset
   
-  # normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b6 = b6/np.cos(np.radians(sun_zen))
+  b6 = normalizeSunAngle(b6, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -696,6 +701,27 @@ def genNaturalColor(b6_file, b5_file, b4_file,qa_file, sun_zen, outname, mask=No
     print('\t* Applying cloud mask')
     apply_cloud_mask(outname, mask)
 
+def normalized_difference(a, b, nodatapix, nodata=-9999.0):
+  """(a - b) / (a + b) on every pixel, nodata only where the QA says fill.
+
+  Inputs are clamped to [0, 1] first -- the USGS Collection 2 surface
+  reflectance valid range (DN 7273-43636 -> ~0-1.0). Real dark targets fall
+  below it: LaSRC routinely returns slightly negative NIR over water, which
+  would push NDWI past +1. Clamping projects that onto the physical floor, so
+  clear water gets NDWI = 1 (its correct limit). Every pixel is written: the
+  old `np.empty` + `>= 0` gate left negative-reflectance pixels holding
+  uninitialised memory. A zero denominator (both bands at 0) is nodata.
+  Ref: https://www.usgs.gov/faqs/how-do-i-use-a-scale-factor-landsat-level-2-science-products
+  """
+  a = np.clip(a, 0, 1)
+  b = np.clip(b, 0, 1)
+  denom = a + b
+  valid = denom > 0
+  out = np.full(np.shape(a), nodata, dtype=np.float64)
+  out[valid] = (a[valid] - b[valid]) / denom[valid]
+  out[nodatapix] = nodata
+  return out
+
 def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   # Function to create a Landsat 8 NDVI image, based upon
   # input GeoTIFF files (full path) for B5 (NIR), B4 (red), 
@@ -718,9 +744,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Red ###
   print("\n\t* Opening Band 4 file")
@@ -737,9 +761,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   r = (mult_scale_factor*r)+add_offset
   
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  r = r/np.cos(np.radians(sun_zen))
+  r = normalizeSunAngle(r, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -754,14 +776,7 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NDVI, (NIR-R)/(NIR+R) or (B5-B4)/(B5+B4)
   print("\n\t* Calculating NDVI")
-  ndvi = np.empty(np.shape(r), 'float')
-  ok = np.where( (r >= 0) & (nir >= 0) )
-  ndvi[ok] = (nir[ok]-r[ok])/(nir[ok]+r[ok])
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  ndvi = np.clip(ndvi, -1.0, 1.0)
-  ndvi[nodatapix] = 999
+  ndvi = normalized_difference(nir, r, nodatapix)
 
 
   # Write a Raw GeoTIFF--No Color Table
@@ -774,6 +789,9 @@ def genNdvi(b5_file, b4_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndvi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
   
 
@@ -804,9 +822,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   g = (mult_scale_factor*g)+add_offset
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle...")
-  g = g/np.cos(np.radians(sun_zen))
+  g = normalizeSunAngle(g, indir, sun_zen)
 
   ### NIR ###
   print("\n\t* Opening Band 5 file")
@@ -823,10 +839,8 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
 
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -841,14 +855,7 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NDWI
   print("\n\t* Calculating NDWI")
-  ndwi = np.empty(np.shape(g), 'float')
-  ok = np.where( (g >= 0) & (nir >= 0) )
-  ndwi[ok] = (g[ok]-nir[ok])/(g[ok]+nir[ok])
-  
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  ndwi = np.clip(ndwi, -1.0, 1.0)
-  ndwi[nodatapix] = 999
+  ndwi = normalized_difference(g, nir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NDWI geotiff")
@@ -860,6 +867,9 @@ def genNdwi(b3_file, b5_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(ndwi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -889,9 +899,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '3')
   g = (mult_scale_factor*g)+add_offset  
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  g = g/np.cos(np.radians(sun_zen))
+  g = normalizeSunAngle(g, indir, sun_zen)
 
   ### Shortwave Infrared ###
   print("\n\t* Opening Band 6 file")
@@ -908,9 +916,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '6')
   swir = (mult_scale_factor*swir)+add_offset  
  
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  swir = swir/np.cos(np.radians(sun_zen))
+  swir = normalizeSunAngle(swir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -925,14 +931,7 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate MNDWI
   print("\n\t* Calculating mNDWI")
-  mndwi = np.empty(np.shape(g), 'float')
-  ok = np.where( (g >= 0) & (swir >= 0) )
-  mndwi[ok] = (g[ok]-swir[ok])/(g[ok]+swir[ok])
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  mndwi = np.clip(mndwi, -1.0, 1.0)
-  mndwi[nodatapix] = 999
+  mndwi = normalized_difference(g, swir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating a mNDWI geotiff ")
@@ -944,6 +943,9 @@ def genmNdwi(b3_file, b6_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(mndwi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -973,9 +975,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### Red ###
   print("\n\t* Opening Band 4 file")
@@ -992,9 +992,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '4')
   r = (mult_scale_factor*r)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  r = r/np.cos(np.radians(sun_zen))
+  r = normalizeSunAngle(r, indir, sun_zen)
 
   ### Blue ###
   print("\n\t* Opening Band 2 file")
@@ -1011,9 +1009,7 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '2')
   b = (mult_scale_factor*b)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  b = b/np.cos(np.radians(sun_zen))
+  b = normalizeSunAngle(b, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -1028,16 +1024,24 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate EVI
   print("\n\t* Calculating EVI")
-  evi = np.empty(np.shape(nir), 'float')
-  ok = np.where( (r >= 0) & (nir >= 0) & (b >= 0))
-  num = (nir[ok] - r[ok])
-  denom = (nir[ok]+(6*r[ok])- (7.5*b[ok])+1)
-  evi[ok] = 2.5*(num/denom)
+  # Every pixel is written (np.full, not np.empty: the old `>= 0` gate left
+  # negative-reflectance pixels -- routine for blue over dark targets in L2 SR
+  # -- holding uninitialised memory). Inputs are clamped to the USGS SR valid
+  # range [0, 1], as in normalized_difference. EVI's denominator is not a sum
+  # of non-negative terms (-7.5*blue), so it can pass through 0: guard its
+  # magnitude rather than its sign.
+  nir = np.clip(nir, 0, 1)
+  r = np.clip(r, 0, 1)
+  b = np.clip(b, 0, 1)
+  evi = np.full(np.shape(nir), -9999.0)
+  denom = nir + (6*r) - (7.5*b) + 1
+  ok = np.abs(denom) > 1e-6
+  evi[ok] = 2.5*((nir[ok] - r[ok])/denom[ok])
 
   # Clip to a reasonable range
   print("\t* Clipping to a reasonable range")
-  evi = np.clip(evi, -1.0, 1.0)
-  evi[nodatapix] = 999
+  evi[ok] = np.clip(evi[ok], -1.0, 1.0)
+  evi[nodatapix] = -9999.0
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating EVI geotiff")
@@ -1049,6 +1053,9 @@ def genEvi(b5_file, b4_file, b2_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(evi)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -1074,9 +1081,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '5')
   nir = (mult_scale_factor*nir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir = nir/np.cos(np.radians(sun_zen))
+  nir = normalizeSunAngle(nir, indir, sun_zen)
 
   ### SWIR ###
   print("\n\t* Opening Band 7 file")
@@ -1093,9 +1098,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   mult_scale_factor, add_offset = getReflectanceConstants(indir, '7')
   swir = (mult_scale_factor*swir)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  swir = swir/np.cos(np.radians(sun_zen))
+  swir = normalizeSunAngle(swir, indir, sun_zen)
 
   ### Quality ###
   print("\n\t* Opening Quality file")
@@ -1110,16 +1113,7 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
 
   # Calculate NBR
   print("\n\t* Calculating NBR")
-  nbr = np.empty(np.shape(nir), 'float')
-  ok = np.where( (nir >= 0) & (swir >= 0))
-  num = (nir[ok] - swir[ok])
-  denom = (nir[ok] + swir[ok])
-  nbr[ok] = num/denom
-
-  # Clip to a reasonable range
-  print("\t* Clipping to a reasonable range")
-  nbr = np.clip(nbr, -1.0, 1.0)
-  nbr[nodatapix] = 999
+  nbr = normalized_difference(nir, swir, nodatapix)
 
   # Write a Raw GeoTIFF--No Color Table
   print("\t* Generating NBR geotiff")
@@ -1131,6 +1125,9 @@ def genNbr(b5_file, b7_file, qa_file, sun_zen, outname, mask=None):
   out_ds.SetProjection(out_cs.ExportToWkt())
   out_ds.SetGeoTransform(in_geo)
   out_ds.GetRasterBand(1).WriteArray(nbr)
+  # Invalid pixels were filled with -9999.0 above; tag it so downstream
+  # readers mask it instead of treating it as a real index value.
+  out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
   out_ds = None
 
 
@@ -1173,35 +1170,14 @@ def download_cdl(image, year, outname):
 
 def reclass_cdl(cdl_path, no_data_locs):
     # WARNING: AOIs that extend outside of the U.S. boundaries (ocean, Canada, Mexico) will have no data
-    # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-    codes_dict = {1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 10: 1, 11: 1, 12: 1, 13: 1, \
-    14: 1, 21: 1, 22: 1, 23: 1, 24: 1, 25: 1, 26: 1, 27: 1, 28: 1, 29: 1, 30: 1, \
-    31: 1, 32: 1, 33: 1, 34: 1, 35: 1, 36: 1, 37: 1, 38: 1, 39: 1, 41: 1, 42: 1, \
-    43: 1, 44: 1, 45: 1, 46: 1, 47: 1, 48: 1, 49: 1, 50: 1, 51: 1, 52: 1, 53: 1, \
-    54: 1, 55: 1, 56: 1, 57: 1, 58: 1, 59: 1, 60: 1, 61: 1, 66: 1, 67: 1, 68: 1, \
-    69: 1, 70: 1, 71: 1, 72: 1, 74: 1, 75: 1, 76: 1, 77: 1, 204: 1, 205: 1, 206: 1, \
-    207: 1, 208: 1, 209: 1, 210: 1, 211: 1, 212: 1, 213: 1, 214: 1, 215: 1, 216: 1, \
-    217: 1, 218: 1, 219: 1, 220: 1, 221: 1, 222: 1, 223: 1, 224: 1, 225: 1, 226: 1, \
-    227: 1, 228: 1, 229: 1, 230: 1, 231: 1, 232: 1, 233: 1, 234: 1, 235: 1, 236: 1, \
-    237: 1, 238: 1, 239: 1, 240: 1, 241: 1, 242: 1, 243: 1, 244: 1, 245: 1, 246: 1, \
-    247: 1, 248: 1, 249: 1, 250: 1, 254: 1, 176: 1, \
-    121: 2, 122: 2, 123: 2, 124: 2, \
-    131: 3, 141: 3, 142: 3, 143: 3, 152: 3, 190: 3, 195: 3, \
-    111: 4, 112: 4, 92: 4, \
-    0: 999, 81: 999, 88: 999}
-
-    # open full CDL file
+    # Buckets and the threshold-sample codes come from the ONE shared table
+    # (shared_utils.landcover, .clinerules.md rule 65).
     cdl_rst = rio.open(cdl_path)
-    cdl_array = cdl_rst.read()[0]
-
-    # reclassify the CDL
-    translated_codes = np.vectorize(codes_dict.get)(cdl_array).astype('uint16')  # this one line does all the work :)
-    translated_codes[no_data_locs] = 999
-
-    # write the reclassified CDL to file
-    cdl_reclass_out_file = cdl_path.replace('.tif', '_reclass.tif')
-    dump_geotiff(translated_codes, cdl_rst.crs, cdl_rst.transform, 999, cdl_reclass_out_file)
-    return cdl_reclass_out_file
+    cdl_array = cdl_rst.read(1)
+    nd_mask = np.zeros(cdl_array.shape, dtype=bool)
+    nd_mask[no_data_locs] = True
+    buckets, sample = reclass_cdl_array(cdl_array, nd_mask)
+    return write_reclass(reclass_path(cdl_path), buckets, sample, cdl_rst.crs, cdl_rst.transform)
 
 def download_worldcover(image, year, outname):
   outdir = Path(outname).parent
@@ -1306,19 +1282,14 @@ def download_worldcover(image, year, outname):
   match_geotiff(outname, image, outname)
 
 def reclass_worldcover(wc_path, no_data_locs):
-  # cropland/grassland = 1, developed = 2, other vegetation =3, permanent water=4, no data = 999
-  codes_dict = {0: 999, 10: 3, 20:3, 30:1, 40:1, 50:2, 60:3, 70:999, 80:4, 90:3, 95:3, 100:3}
-  wc_rst = rio.open(wc_path)
-  wc_array = wc_rst.read()[0]
-
-  # reclassify WorldCover
-  translated_codes = np.vectorize(codes_dict.get)(wc_array).astype('uint16')
-  translated_codes[no_data_locs] = 999
-
-  # write reclassified WorldCover to file
-  wc_reclass_out_file = wc_path.replace('.tif', '_reclass.tif')
-  dump_geotiff(translated_codes, wc_rst.crs, wc_rst.transform, 999, wc_reclass_out_file)
-  return wc_reclass_out_file
+    # Buckets and the threshold-sample codes come from the ONE shared table
+    # (shared_utils.landcover, .clinerules.md rule 65).
+    wc_rst = rio.open(wc_path)
+    wc_array = wc_rst.read(1)
+    nd_mask = np.zeros(wc_array.shape, dtype=bool)
+    nd_mask[no_data_locs] = True
+    buckets, sample = reclass_worldcover_array(wc_array, nd_mask)
+    return write_reclass(reclass_path(wc_path), buckets, sample, wc_rst.crs, wc_rst.transform)
 
 def gen_water_extent(indir, nstd, outname, mask, sun_zen):
   # get nir band
@@ -1344,9 +1315,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
   mult_scale_factor, add_offset = getReflectanceConstants(safe, '5')
   nir_array = (mult_scale_factor*nir_array)+add_offset
 
-  # Normalize by the cosine of the zenith angle
-  print("\t* Normalizing by the cosine of the zenith angle")
-  nir_array = nir_array/np.cos(np.radians(sun_zen))
+  nir_array = normalizeSunAngle(nir_array, safe, sun_zen)
   
   # get year
   year = os.path.basename(indir)[:4]
@@ -1378,7 +1347,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
     
     # check for existing CDL files
     cdl_name = os.path.join(cdl_dir, f'CDL_{year}.tif')
-    cdl_check = glob.glob(cdl_name.replace('.tif', '_reclass.tif'))
+    cdl_check = glob.glob(reclass_path(cdl_name))
     if len(cdl_check) == 0:
       print('\t* Downloading CDL')
       # download and resample CDL
@@ -1399,7 +1368,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
 
     # check for existing WorldCover files
     wc_name = os.path.join(wc_dir, f'WorldCover_{year}.tif')
-    wc_check = glob.glob(wc_name.replace('.tif', '_reclass.tif'))
+    wc_check = glob.glob(reclass_path(wc_name))
     if len(wc_check) == 0:
       if not os.path.isfile(wc_name):
         print('\t* Downloading WorldCover')
@@ -1412,7 +1381,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
       ref_simple = wc_check[0]
 
   # open reclassified CDl and cloud mask
-  ref_simple_array = rio.open(ref_simple).read()[0]
+  ref_simple_array, ref_sample_mask = read_reclass(ref_simple)
   cloudMask_rst = rio.open(mask)
 
   # resample cloud mask if it doesn't match the inputted data
@@ -1428,7 +1397,13 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
      cloudMask = cloudMask_rst.read(1)
 
   # water pixels from reference data that are cloud-free and valid  in the NIR data
-  water = np.where((ref_simple_array == 4) & (cloudMask == 0) & (nir_array != 0))
+  # Two masks, as in the STAC path (.clinerules.md rules 54/65): every
+  # bucket-4 pixel is LABELLED permanent water, but only the strict
+  # endmember (CDL 111 / WorldCover 80) SEEDS the NIR threshold --
+  # aquaculture is real water but turbid and periodically drained.
+  permanent_water = (ref_simple_array == 4) & (cloudMask == 0) & (nir_array != 0)
+  sample = ref_sample_mask & (cloudMask == 0) & (nir_array != 0)
+  water = np.where(select_water_sample(permanent_water, sample))
   mean = np.nanmean(nir_array[water])   # mean of water pixels
   std = np.nanstd(nir_array[water])     # standard deviation of water pixels
   nir_thresh = mean + (nstd * std)      # NIR water threshold is a given number of standard deviations above the mean
@@ -1443,7 +1418,7 @@ def gen_water_extent(indir, nstd, outname, mask, sun_zen):
 
   classified_flood = np.zeros(water_extent.shape, dtype=np.byte)
 
-  classified_flood[water] = 1  # permanent water
+  classified_flood[permanent_water] = 1  # permanent water
 
   flood_dev = np.where((ref_simple_array == 2) & (water_extent == 1)) # flooded developed
   classified_flood[flood_dev] = 2
@@ -1595,7 +1570,7 @@ def ls_merge(dir_to_merge, mask=False, method='first'):
     # so it no longer *ends* in "merged.tif". *merged*.tif matches both the
     # pre-rename (..._merged.tif) and renamed forms; per-scene cloud masks don't
     # contain "merged", so this stays unambiguous.
-    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, 'cloudMask', '*merged*.tif'))[0]
+    cm_merged = glob.glob(os.path.join(Path(dir_to_merge).parent, product_dir('landsat', 'cloudMask'), '*merged*.tif'))[0]
     # apply cloud mask
     apply_cloud_mask(merged_output, cm_merged)
     # apply_cloud_mask writes to <dir_to_merge>/masked/<basename with _masked

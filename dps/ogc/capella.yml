@@ -54,36 +54,11 @@ inputs:
     doc: "Target acquisition date, YYYYMMDDHHMMSS. Closest matching Capella scene is selected. Discover valid dates via the 'list-dates' algorithm (sensor=capella). REQUIRED for a real run (run.sh rejects an empty date)."
     type: string?
     default: ""
-  - name: product
-    label: Calibration product
-    doc: "Calibration product to generate. Only 'sigma' (sigma-naught) is supported."
-    type: string?
-    default: "sigma"
-  - name: bucket
-    label: Vendor S3 bucket
-    doc: CSDA Capella vendor S3 bucket to fetch source rasters from (DPS worker needs read access).
-    type: string?
-    default: "csdap-capellaspace-delivery"
-  - name: prefix
-    label: Vendor S3 prefix
-    doc: Key prefix within the vendor bucket to search for scenes.
-    type: string?
-    default: "disasters"
-  - name: apply_filter
-    label: Apply Lee filter
-    doc: Apply a Lee speckle filter to the sigma0 product.
-    type: boolean?
-    default: false
   - name: filter_size
     label: Lee filter window size
-    doc: Lee filter window size in pixels (only used when apply_filter is true).
+    doc: "Lee speckle-filter window size in pixels. Filtering is always applied; this only tunes the kernel. Must be 3, 5 or 7."
     type: int?
     default: 5
-  - name: dst_crs
-    label: Target CRS
-    doc: "Target CRS: native (default, no warp, preserves source UTM) | EPSG:3857 | EPSG:4326."
-    type: string?
-    default: "native"
   - name: activation_event
     label: Activation event
     doc: "Activation event, e.g. 202511_Flood_TX. The placeholder YYYYMM_Hazard_Location is REJECTED at run time -- set a real value for a real run."
@@ -92,16 +67,6 @@ inputs:
   - name: source_label
     label: Source
     doc: "Data origin, e.g. USGS, NASA, NOAA, Capella Space. REQUIRED for a real run (run.sh rejects an empty source)."
-    type: string?
-    default: ""
-  - name: compression_level
-    label: COG compression level
-    doc: "ZSTD level 1-22. Lower = faster/larger; higher = slower/smaller. 22 = max (default)."
-    type: int?
-    default: 22
-  - name: nodata
-    label: No-data value (optional)
-    doc: "Override the auto-detected no-data value; leave blank to auto-detect."
     type: string?
     default: ""
 outputs:

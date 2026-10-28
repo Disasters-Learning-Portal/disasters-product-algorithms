@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -478,15 +479,25 @@ def _build_output_filename(
 
         Plain:              SAT_LEVEL_product_TILE_TIMESTAMP.tif
         Masked:              SAT_LEVEL_product_TILE_masked_TIMESTAMP.tif
-        Merged:              SAT_LEVEL_product_merged_TIMESTAMP.tif
-        Merged and masked:   SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
+        Merged:              SAT_LEVEL_product_ORBIT_merged_DATE_day.tif
+        Merged and masked:   SAT_LEVEL_product_ORBIT_merged_masked_DATE_day.tif
+
+    A merged mosaic follows the repo convention (.clinerules.md rule 27):
+    DATE only, then `_day` -- it spans several tile sensing times, so no
+    single time is true of it (the old name carried the first tile's time,
+    chosen by item-id order). DATE is the pass's own sensing-start date
+    from the datatake id, the same date ESA puts in its product name, so a
+    pass straddling 00:00 UTC still gets one date. ORBIT is ESA's relative
+    orbit (`R112`, from `s2:product_uri`): with the time gone, it is what
+    keeps two passes of one satellite on one day (high latitudes) from
+    writing the same file.
 
     Parameters
     ----------
     item : pystac.Item
         The STAC item supplying SAT/LEVEL/timestamp. When merged=True,
-        pass the first item (by sort order) among the tiles being
-        merged.
+        pass any item of the acquisition being merged -- the orbit and
+        date are properties of the pass, not of the tile.
 
     algorithm_name : str
         Algorithm/product name as used in the algorithm catalog, e.g.
@@ -517,19 +528,142 @@ def _build_output_filename(
     """
     sat, level, tile = _get_sat_level_tile(item)
     product = _product_token(algorithm_name)
+
+    variant_token = f"_{variant}" if variant else ""
+    masked_token = "_masked" if masked else ""
+
+    if merged:
+        orbit = _orbit_token(item)
+        orbit_token = f"_{orbit}" if orbit else ""
+        return (
+            f"{sat}_{level}_{product}{variant_token}{orbit_token}"
+            f"_merged{masked_token}_{_acquisition_date(item)}_day.tif"
+        )
+
     timestamp = item.datetime.replace(microsecond=0).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    variant_token = f"_{variant}" if variant else ""
-    tile_token = "" if merged else f"_{tile}"
-    merged_token = "_merged" if merged else ""
-    masked_token = "_masked" if masked else ""
-
     return (
-        f"{sat}_{level}_{product}{variant_token}{tile_token}"
-        f"{merged_token}{masked_token}_{timestamp}.tif"
+        f"{sat}_{level}_{product}{variant_token}_{tile}"
+        f"{masked_token}_{timestamp}.tif"
     )
+
+
+def _orbit_token(item):
+    """
+    ESA relative orbit of the item's pass, e.g. "R112".
+
+    Read from `s2:product_uri` (the ESA product name, `..._N0511_R112_T...`),
+    else `sat:relative_orbit`. Falls back to the ABSOLUTE orbit embedded in
+    `s2:datatake_id` ("A002799") -- still unique per pass -- and finally to
+    nothing, with a warning.
+    """
+    match = re.search(r"_R(\d{3})_", item.properties.get("s2:product_uri", ""))
+    if match:
+        return f"R{match.group(1)}"
+    relative = item.properties.get("sat:relative_orbit")
+    if relative is not None:
+        return f"R{int(relative):03d}"
+    match = re.search(r"_(\d{6})_N\d{2}\.\d{2}$", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return f"A{match.group(1)}"
+    print(f"WARNING: no orbit metadata on {item.id}; merged name has no orbit token.")
+    return ""
+
+
+def _acquisition_date(item):
+    """
+    YYYY-MM-DD of the pass: the sensing-start date in `s2:datatake_id`
+    ("GS2C_20250319T171041_..."), else the item's own UTC date.
+    """
+    match = re.match(r"GS2[A-Z]_(\d{4})(\d{2})(\d{2})T", item.properties.get("s2:datatake_id", ""))
+    if match:
+        return "-".join(match.groups())
+    return item.datetime.strftime("%Y-%m-%d")
+
+
+def acquisition_key(item):
+    """
+    Identify the satellite pass (datatake) a STAC item belongs to.
+
+    `--merge` mosaics one ACQUISITION, never several: tiles from different
+    passes differ in date, illumination and atmosphere, and a first-wins
+    mosaic across them silently stitches pre-event pixels into a post-event
+    product. A datatake is the natural unit -- one pass of one satellite --
+    and is safer than the UTC calendar date, which can split a single pass:
+    Sentinel-2 crosses ~10:30 local solar time, i.e. ~00:00 UTC near 157 E
+    (eastern Australia: real passes at 23:54 and 00:04 UTC).
+
+    `s2:datatake_id` (e.g. "GS2A_20210715T165901_031669_N05.00") ends in the
+    processing baseline. That suffix is DROPPED: Earth Search lists the same
+    acquisition at more than one baseline (sentinel-2-l1c `_0` at N03.01 and
+    `_1` at N05.00, identical datetime), and those copies must land in the
+    same group -- as separate groups they would be written to the same
+    merged filename and overwrite each other.
+
+    Falls back to (platform, UTC date) when the property is absent.
+    """
+    datatake = item.properties.get("s2:datatake_id")
+    if datatake:
+        return re.sub(r"_N\d{2}\.\d{2}$", "", datatake)
+    print(
+        f"WARNING: {item.id} has no s2:datatake_id; grouping it by "
+        f"platform + UTC date for --merge."
+    )
+    return (
+        f"{item.properties.get('platform', '')}_"
+        f"{item.datetime.strftime('%Y%m%d')}"
+    )
+
+
+def processing_baseline(item):
+    """
+    The item's processing baseline as a float (05.11 -> 5.11), or 0.0 when
+    unknown -- read from `s2:processing_baseline`, else from the
+    `_Nxx.xx` suffix of `s2:datatake_id`.
+    """
+    value = item.properties.get("s2:processing_baseline")
+    if value is None:
+        match = re.search(
+            r"_N(\d{2}\.\d{2})$",
+            item.properties.get("s2:datatake_id", ""),
+        )
+        value = match.group(1) if match else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def drop_superseded_baselines(items):
+    """
+    Keep only the newest processing baseline of each (acquisition, tile).
+
+    Earth Search lists some acquisitions more than once -- sentinel-2-l1c
+    carries `_0` (e.g. N03.01) and `_1` (N05.00) copies of the same tile
+    with an identical datetime. Both copies produce the SAME per-tile output
+    filename, so processing both lets whichever runs last overwrite the
+    other (search order, not science, decides). The later baseline is the
+    reprocessing with the newer calibration, so it is the one kept. The
+    radiometric offset is still read per item (rule 52), so either copy
+    converts correctly; this only removes the duplicate.
+    """
+    best = {}
+    for item in items:
+        key = (acquisition_key(item), _get_sat_level_tile(item)[2])
+        if key not in best or (
+            processing_baseline(item) > processing_baseline(best[key])
+        ):
+            best[key] = item
+    kept_ids = {id(item) for item in best.values()}
+    for item in items:
+        if id(item) not in kept_ids:
+            print(
+                f"Skipping {item.id}: superseded by a newer processing "
+                f"baseline of the same acquisition and tile."
+            )
+    return [item for item in items if id(item) in kept_ids]
 
 
 def _nstd_variant_token(nstd):
@@ -1480,224 +1614,17 @@ def _download_worldcover_for_water_extent(
     return output_path
 
 
-# CDL codes allowed to seed the permanent-water NIR statistics.
-# 111 = NLCD "Open Water" (<25% vegetation or soil cover) -- the
-# cleanest available endmember. Deliberately excludes 92 Aquaculture
-# and the legacy 83, both of which are labelled water in the product
-# but are poor reflectance references.
-_CDL_WATER_SAMPLE_CODES = frozenset({111})
-
-# WorldCover codes allowed to seed the permanent-water NIR statistics.
-# 80 = "Permanent water bodies" is the only water class in the legend.
-_WORLDCOVER_WATER_SAMPLE_CODES = frozenset({80})
-
-
-def _reclass_cdl_array(
-    cdl_array,
-    nir_nodata_mask,
-):
-    """
-    Reclassify the USDA CDL into the water-extent buckets.
-
-    Buckets:
-        1 = cropland/grassland
-        2 = developed
-        3 = other non-developed land cover
-        4 = permanent water
-        999 = no data / excluded
-
-    Returns
-    -------
-    translated : numpy.ndarray (uint16)
-        The bucket per pixel.
-    sample_mask : numpy.ndarray (bool)
-        Pixels eligible to seed the permanent-water NIR statistics.
-        A strict subset of bucket 4 -- see _CDL_WATER_SAMPLE_CODES.
-    """
-
-    codes_dict = {
-        1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
-        6: 1, 10: 1, 11: 1, 12: 1,
-        13: 1, 14: 1, 21: 1, 22: 1,
-        23: 1, 24: 1, 25: 1, 26: 1,
-        27: 1, 28: 1, 29: 1, 30: 1,
-        31: 1, 32: 1, 33: 1, 34: 1,
-        35: 1, 36: 1, 37: 1, 38: 1,
-        39: 1, 41: 1, 42: 1, 43: 1,
-        44: 1, 45: 1, 46: 1, 47: 1,
-        48: 1, 49: 1, 50: 1, 51: 1,
-        52: 1, 53: 1, 54: 1, 55: 1,
-        56: 1, 57: 1, 58: 1, 59: 1,
-        60: 1, 61: 1, 66: 1, 67: 1,
-        68: 1, 69: 1, 70: 1, 71: 1,
-        72: 1, 74: 1, 75: 1, 76: 1,
-        77: 1, 204: 1, 205: 1,
-        206: 1, 207: 1, 208: 1,
-        209: 1, 210: 1, 211: 1,
-        212: 1, 213: 1, 214: 1,
-        215: 1, 216: 1, 217: 1,
-        218: 1, 219: 1, 220: 1,
-        221: 1, 222: 1, 223: 1,
-        224: 1, 225: 1, 226: 1,
-        227: 1, 228: 1, 229: 1,
-        230: 1, 231: 1, 232: 1,
-        233: 1, 234: 1, 235: 1,
-        236: 1, 237: 1, 238: 1,
-        239: 1, 240: 1, 241: 1,
-        242: 1, 243: 1, 244: 1,
-        245: 1, 246: 1, 247: 1,
-        248: 1, 249: 1, 250: 1,
-        254: 1, 176: 1,
-
-        # --- 1: cropland / grassland (non-crop members) ---
-        # 62 Pasture/Grass is a pre-2008 legacy code, retired in 2013
-        # and collapsed into 176.
-        62: 1,
-
-        # --- 2: developed ---
-        # 82 is the pre-2008 legacy "Developed" before it was split
-        # into the 121-124 intensity classes.
-        82: 2,
-        121: 2, 122: 2, 123: 2, 124: 2,
-
-        # --- 3: other non-developed land cover ---
-        # Named "other vegetation" historically, but it is really a
-        # catch-all for not-crop / not-developed / not-water. Barren
-        # (65, 131) and Nonag/Undefined (88) are NOT vegetation; they
-        # live here so that sand bars, beaches, playas and gravel --
-        # highly flood-relevant terrain, 131 alone is ~78,000 km2 of
-        # CONUS -- remain eligible to be mapped as flooded rather than
-        # silently excluded.
-        #
-        # Wetlands (87, 190, 195) belong here, NOT in permanent water.
-        # They are vegetation canopy over periodically saturated
-        # ground: bright in NIR, so they would contaminate the water
-        # sample, and only intermittently inundated, so calling them
-        # permanent water would blind the product to flooding in
-        # exactly the places flooding is most expected.
-        63: 3, 64: 3, 65: 3, 87: 3, 88: 3,
-        131: 3, 141: 3, 142: 3,
-        143: 3, 152: 3, 190: 3,
-        195: 3,
-
-        # --- 4: permanent water ---
-        # 83 Water is the pre-2008 legacy code; 92 Aquaculture and
-        # 111 Open Water are current.
-        83: 4, 92: 4, 111: 4,
-
-        # --- 999: no data / excluded ---
-        # 112 is Perennial Ice/Snow (NLCD class 12), NOT water. It was
-        # mapped to permanent water, which is the single most damaging
-        # entry in this table: snow reflects ~0.6-0.9 at B08's 842 nm
-        # against ~0.01-0.05 for open water, so including it inflates
-        # both the mean and the standard deviation of the water NIR
-        # sample, and the threshold is mean + nstd*std. Simulated at 5%
-        # contamination the threshold moves 1550 -> 3391 DN and false
-        # water goes from 0.3% to 25% of land. Snow only darkens in
-        # SWIR (~1600 nm), which is what NDSI exploits -- not at 842 nm.
-        # It is present in every CONUS CDL year (0.5-1.6M pixels).
-        112: 999,
-        0: 999,
-        81: 999,
-    }
-
-    translated = np.full(
-        cdl_array.shape,
-        999,
-        dtype=np.uint16,
-    )
-
-    for source_code, target_code in codes_dict.items():
-
-        translated[
-            cdl_array == source_code
-        ] = target_code
-
-    translated[
-        nir_nodata_mask
-    ] = 999
-
-    # Seed the NIR statistics from NLCD "Open Water" only. Bucket 4
-    # also holds 92 Aquaculture, which is genuinely water and belongs
-    # in the product label, but aquaculture ponds are turbid, algal and
-    # periodically drained -- all of which raise NIR and widen the
-    # threshold. 111 is the only class NLCD defines as open water with
-    # under 25% vegetation or soil cover.
-    sample_mask = (
-        np.isin(cdl_array, list(_CDL_WATER_SAMPLE_CODES))
-        & ~nir_nodata_mask
-    )
-
-    return translated, sample_mask
-
-
-def _reclass_worldcover_array(
-    worldcover_array,
-    nir_nodata_mask,
-):
-    """
-    Reclassify ESA WorldCover (v100/2020, v200/2021 -- the legend is
-    byte-identical between them) into the water-extent buckets.
-
-    Buckets:
-        1 = cropland/grassland
-        2 = developed
-        3 = other non-developed land cover
-        4 = permanent water
-        999 = no data / excluded
-
-    Returns
-    -------
-    translated, sample_mask : see _reclass_cdl_array.
-    """
-
-    codes_dict = {
-        0: 999,    # No data
-        10: 3,     # Tree cover
-        20: 3,     # Shrubland
-        30: 1,     # Grassland
-        40: 1,     # Cropland
-        50: 2,     # Built-up
-        # 60 is "Bare / sparse vegetation", defined as never exceeding
-        # 10% vegetated cover. It sits in bucket 3 for coverage, not
-        # because it is vegetation -- see the bucket-3 note in
-        # _reclass_cdl_array.
-        60: 3,
-        # 70 Snow and ice is EXCLUDED, for the same NIR-brightness
-        # reason CDL 112 is. Note this does not cost us frozen lakes:
-        # water frozen for less than 9 months stays class 80.
-        70: 999,
-        80: 4,     # Permanent water bodies
-        # 90 Herbaceous wetland / 95 Mangroves are vegetation over
-        # water -- bright in NIR, and only intermittently inundated.
-        # Not permanent water. Same reasoning as CDL 190/195.
-        90: 3,
-        95: 3,
-        100: 3,    # Moss and lichen
-    }
-
-    translated = np.full(
-        worldcover_array.shape,
-        999,
-        dtype=np.uint16,
-    )
-
-    for source_code, target_code in codes_dict.items():
-
-        translated[
-            worldcover_array == source_code
-        ] = target_code
-
-    translated[
-        nir_nodata_mask
-    ] = 999
-
-    sample_mask = (
-        np.isin(worldcover_array, list(_WORLDCOVER_WATER_SAMPLE_CODES))
-        & ~nir_nodata_mask
-    )
-
-    return translated, sample_mask
+# The land-cover crosswalks live in shared_utils.landcover -- one table for
+# every pipeline (.clinerules.md rule 65). Aliased under their historical
+# private names.
+from shared_utils.landcover import (  # noqa: E402
+    CDL_WATER_SAMPLE_CODES as _CDL_WATER_SAMPLE_CODES,
+    WORLDCOVER_WATER_SAMPLE_CODES as _WORLDCOVER_WATER_SAMPLE_CODES,
+    reclass_cdl_array as _reclass_cdl_array,
+    reclass_worldcover_array as _reclass_worldcover_array,
+    pooled_water_statistics,
+    select_water_sample,
+)
 
 # ---------------------------------------------------------------------
 # Water Extent
@@ -1710,6 +1637,8 @@ def generate_water_extent(
     output_dir="./s3_temp",
     cloud_mask=False,
     nstd=None,
+    water_stats=None,
+    sample_only=False,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1768,6 +1697,17 @@ def generate_water_extent(
     nstd : float or None
         Standard-deviation multiplier for the NIR water threshold.
         Falls back to the algorithm config's `nstd`, then to 1.0.
+
+    water_stats : (float, float) or None
+        (mean, std) of the water-sample NIR POOLED over every tile of this
+        item's acquisition (shared_utils.landcover.pooled_water_statistics).
+        When given, the threshold is mean + nstd*std from these, so all
+        tiles of one pass classify with one threshold. None computes them
+        from this tile alone.
+
+    sample_only : bool
+        If True, return (permanent_water_nir, sample_nir) -- this tile's
+        contribution to the pooled statistics -- and write nothing.
 
     Returns
     -------
@@ -2117,134 +2057,87 @@ def generate_water_extent(
         (~nir_nd_mask)
     )
 
-    water_count = np.count_nonzero(
-        permanent_water_mask
-    )
-
-    sample_count = np.count_nonzero(
-        water_sample_mask
-    )
-
-    print()
-    print(
-        f"Permanent-water reference pixels: "
-        f"{water_count:,}"
-    )
-    print(
-        f"Threshold sample pixels:          "
-        f"{sample_count:,}"
-    )
-
-    # Fall back to the full permanent-water bucket if the strict sample
-    # is too small to give a stable mean/std -- a scene whose only
-    # water is aquaculture is better served by a slightly biased
-    # threshold than by no product at all.
-    _MIN_SAMPLE = 100
-
-    if sample_count < _MIN_SAMPLE and water_count >= _MIN_SAMPLE:
-        print(
-            f"  Sample below {_MIN_SAMPLE} px; falling back to the "
-            f"full permanent-water bucket for the threshold."
-        )
-        water_sample_mask = permanent_water_mask
-        sample_count = water_count
-
-    if sample_count == 0:
-
-        raise RuntimeError(
-            "No valid permanent-water pixels were found "
-            "after applying the land-cover and cloud masks. "
-            "Cannot calculate the NIR water threshold."
+    # sample_only: return this tile's contribution to the acquisition's
+    # POOLED threshold (shared_utils.landcover.pooled_water_statistics)
+    # and stop. No per-tile empty-sample check -- a tile without
+    # reference water is normal; the pooled totals decide.
+    if sample_only:
+        return (
+            nir_array[permanent_water_mask].astype(np.float64),
+            nir_array[water_sample_mask].astype(np.float64),
         )
 
-    
-    # -------------------------------------------------------------
-    # Calculate robust dynamic NIR threshold using median + MAD
-    #
-    # The previous mean + nstd * std approach is sensitive to
-    # contaminated permanent-water samples and their upper tail.
-    #
-    # New approach:
-    #
-    #   water_median = median(water NIR)
-    #   MAD = median(abs(water NIR - water_median))
-    #   robust_std = 1.4826 * MAD
-    #   nir_thresh = water_median + nstd * robust_std
-    #
-    # The factor 1.4826 makes MAD comparable to standard deviation
-    # for normally distributed data.
-    #
-    # This preserves the interpretation of nstd while making the
-    # threshold substantially more resistant to outliers.
-    # -------------------------------------------------------------
-
-    water_nir = nir_array[water_sample_mask].astype(np.float64)
-
-    # Exclude non-finite values defensively.
-    water_nir = water_nir[np.isfinite(water_nir)]
-
-    if water_nir.size == 0:
-        raise RuntimeError(
-            "No finite NIR values remain in the permanent-water "
-            "sample. Cannot calculate the water threshold."
+    if water_stats is None:
+        # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises
+        # on an empty sample (shared with the .SAFE and Landsat paths).
+        water_sample_mask = select_water_sample(
+            permanent_water_mask,
+            water_sample_mask,
         )
 
     # -------------------------------------------------------------
-    # nstd: caller wins, then algorithm configuration, then 1.0
+    # Calculate dynamic NIR threshold
+    #
+    # IMPORTANT:
+    #
+    # This is the actual logic from the old workflow.
+    # -------------------------------------------------------------
+
+    if water_stats is not None:
+        # Pooled over every tile of this acquisition by the caller, so
+        # all tiles of one pass classify with ONE threshold.
+        mean, std = water_stats
+    else:
+        water_nir = nir_array[
+            water_sample_mask
+        ]
+
+        mean = np.nanmean(
+            water_nir
+        )
+
+        std = np.nanstd(
+            water_nir
+        )
+
+    # -------------------------------------------------------------
+    # nstd: caller wins, then the algorithm configuration, then 1.0.
+    #
+    # Compared with `is None`, not truthiness -- 0.0 is a meaningless
+    # threshold but it must not silently fall through to the default.
+    # (It is rejected by the CLI, which requires a positive value.)
     # -------------------------------------------------------------
 
     if nstd is None:
-        nstd = algorithm.get("nstd", 1.0)
+        nstd = algorithm.get(
+            "nstd",
+            1.0,
+        )
 
     nstd = float(nstd)
 
-    if not np.isfinite(nstd) or nstd < 0:
-        raise ValueError(
-            f"nstd must be a finite, non-negative number; got {nstd}."
+    nir_thresh = (
+        mean
+        + (
+            nstd
+            * std
         )
-
-    # -------------------------------------------------------------
-    # Robust statistics
-    # -------------------------------------------------------------
-
-    water_median = np.nanmedian(water_nir)
-
-    mad = np.nanmedian(
-        np.abs(water_nir - water_median)
-    )
-
-    robust_std = 1.4826 * mad
-
-    nir_thresh = water_median + nstd * robust_std
-
-    # -------------------------------------------------------------
-    # Diagnostics
-    # -------------------------------------------------------------
-
-    percentiles = np.nanpercentile(
-        water_nir,
-        [5, 25, 50, 75, 95]
     )
 
     print()
-    print("Robust water NIR statistics:")
-    print(f"  sample size: {water_nir.size:,}")
-    print(f"  median: {water_median:.2f}")
-    print(f"  MAD: {mad:.2f}")
-    print(f"  scaled MAD (robust std): {robust_std:.2f}")
-    print(f"  nstd: {nstd}")
-    print(f"  NIR threshold: {nir_thresh:.2f}")
+    print("Water NIR statistics:")
     print(
-        "  NIR percentiles (5/25/50/75/95): "
-        f"{percentiles}"
+        f"  mean: {mean}"
     )
     print(
-        f"  scene NIR median (valid, non-cloud): "
-        f"{np.nanmedian(nir_array[
-            (~nir_nd_mask) & (~cloud_mask_array)
-        ]):.2f}"
+        f"  std: {std}"
     )
-
+    print(
+        f"  nstd: {nstd}"
+    )
+    print(
+        f"  NIR threshold: {nir_thresh}"
+    )
 
     # -------------------------------------------------------------
     # Create binary water extent
@@ -3126,34 +3019,8 @@ def generate_composite(
 # ---------------------------------------------------------------------
 # Merge processing
 # ---------------------------------------------------------------------
-def _first_with_priority_value(priority_value):
-    """
-    Merge method equivalent to rasterio's "first", except that pixels
-    equal to `priority_value` in ANY input survive into the mosaic.
-    Used to keep class 5 (cloud) from every tile in water extent.
-    """
 
-    def method(
-        merged_data,
-        new_data,
-        merged_mask,
-        new_mask,
-        index=None,
-        roff=None,
-        coff=None,
-    ):
-        # Stock "first": fill only where the mosaic is still nodata
-        # and the new tile has valid data.
-        fill = merged_mask & ~new_mask
-        np.copyto(merged_data, new_data, where=fill, casting="unsafe")
-
-        # Priority overlay: the new tile's priority pixels always win.
-        keep = ~new_mask & (new_data == priority_value)
-        np.copyto(merged_data, new_data, where=keep, casting="unsafe")
-
-    return method
-
-def merge_products(tif_paths, output_path, method="first", priority_value=None):
+def merge_products(tif_paths, output_path, method="first"):
 
     if len(tif_paths) == 1:
         shutil.copy(tif_paths[0], output_path)
@@ -3238,9 +3105,6 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
             count = ref.count
             dtype = ref.dtypes[0]
 
-        if priority_value is not None:
-            method = _first_with_priority_value(priority_value)
-
         array, transform = merge(
             merge_inputs,
             method=method,
@@ -3276,6 +3140,30 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
     return output_path
 
 
+# Water-extent class for cloud / cloud shadow (generate_water_extent).
+WATER_EXTENT_CLOUD_CLASS = 5
+
+
+def water_extent_merge_method(merged_data, new_data, merged_mask, new_mask, **kwargs):
+    """
+    rasterio.merge method for water-extent tiles of ONE acquisition:
+    first valid pixel, except that a CLOUD flag from any tile wins.
+
+    Overlapping tiles of one pass are the same observation, but Sen2Cor
+    classifies each tile separately and their SCL disagrees on 0.7-9.7% of
+    overlap pixels (12 real Iowa passes, 2024). The disputed pixels are
+    82% thin cirrus and 13% cloud SHADOW; a shadow published as "clear"
+    has low NIR and reads as flood water. A first-wins merge settled the
+    dispute by item-id order; taking the union of the cloud flags is the
+    conservative, order-independent rule. Nodata (0, masked) still yields
+    to data, exactly as rasterio's copy_first.
+    """
+    fill = merged_mask & ~new_mask
+    np.copyto(merged_data, new_data, where=fill, casting="unsafe")
+    cloud = ~new_mask & (new_data == WATER_EXTENT_CLOUD_CLASS)
+    np.copyto(merged_data, new_data, where=cloud, casting="unsafe")
+
+
 # ---------------------------------------------------------------------
 # Cloud-mask preservation across a merge (indices and composites)
 #
@@ -3287,7 +3175,7 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
 # and that union is stamped onto the merged product as nodata. True
 # off-swath nodata is untouched, so it is still backfilled by other tiles.
 # Water extent does not need this: its cloud is a real class (5) handled
-# by merge_products(priority_value=5).
+# by water_extent_merge_method.
 # ---------------------------------------------------------------------
 
 _CLOUD_MASK_DIRNAME = "_cloud_masks"

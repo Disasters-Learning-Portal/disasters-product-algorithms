@@ -35,11 +35,35 @@ rio-cogeo
 geopandas
 pyproj
 
+# STAC client for the Sentinel-2 STAC pipeline
+# (sentinel2/sentinel2_odr_functions.py imports pystac_client at module
+# level). Also in pyproject [project.dependencies] for the pip path.
+pystac-client
+
+# Rayleigh scattering correction for Sentinel-2 L1C
+# (sentinel2/sentinel2_odr_functions.get_rayleigh_correction).
+# The module RAISES rather than silently skipping the correction when
+# this is missing, so it is a hard dep of the L1C path, not optional.
+# NOTE: the package alone is not enough at run time -- Rayleigh() also
+# needs RSR + LUT data files, which it will try to DOWNLOAD on first
+# use. See image/Dockerfile and dps/Dockerfile for the offline
+# provisioning, and tools/pyspectral_selfcheck.py for the gate.
+pyspectral
+
 # --- Numerical / image processing ---
 numpy
 scipy
 pillow
 lxml
+
+# --- Plotting (shared_utils/verification.py + plotting.py import these at
+# MODULE level, so `from shared_utils.verification import compare_geotiffs`
+# is an ImportError without them — even though compare_geotiffs itself draws
+# nothing. That broke section 9 of notebooks/shared_utils_reference.ipynb on
+# any env built from this file. matplotlib-base (not matplotlib) to skip the
+# Qt/PyQt GUI stack, matching dps/environment.yml. ---
+matplotlib-base
+seaborn
 
 # --- HTTP / AWS ---
 requests

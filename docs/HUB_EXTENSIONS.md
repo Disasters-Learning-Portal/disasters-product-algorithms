@@ -30,7 +30,6 @@ The current hub stack these recommendations build on top of:
 | `maap-algorithms-jupyter-extension` | Algorithm Catalog / Register / My Builds tiles — *from the MAAP base* |
 | `maap-jupyter-server-extension` | server bridge (`MAAP_API_HOST` / `MAAP_PGT`) — *from the MAAP base* |
 | `stac_ipyleaflet` | STAC layer browser on an ipyleaflet map — pip-pinned in `environment.yml` |
-| `jupyterlab-bxplorer` | S3 data browser — pip-pinned in `environment.yml` |
 | `maap-py` | MAAP DPS Python client — *from the MAAP base* |
 
 > The MAAP-Plugins tiles + `maap-py` are **inherited from the MAAP `2i2c/pangeo` base image**, not
@@ -107,10 +106,96 @@ MAAP extensions were historically **JupyterLab-3-only**; confirm a JL4 wheel exi
 | Extension | Reason |
 |---|---|
 | `jupyterlab-tabular-data-editor` | Unmaintained; JL4 unconfirmed. The built-in `CSVViewer` already covers `available_<sensor>_dates.csv`. |
-| `jupyterlab-s3-browser` | Overlaps `jupyterlab-bxplorer` (already installed). |
+| `jupyterlab-bxplorer` | **Removed 2026-08-11 (PR #94).** Imports Bootstrap 5's dist CSS *unscoped* into Lab's global stylesheet, so Bootstrap's Reboot competes with Lab's own `body{font-size}` app-wide. A real defect — but **not** the cause of the "chevrons everywhere" bug (that's the MAAP extensions; see the note below this table). Do not re-add until upstream scopes it — [BXPLORER_BOOTSTRAP_ISSUE.md](BXPLORER_BOOTSTRAP_ISSUE.md), `.clinerules.md` rule 39. |
+| `jupyterlab-s3-browser` | Unmaintained (IBM; last release 0.12.0, May 2022) and JL2/3-era — still builds on `jupyter-packaging ~=0.7.9`, JL4 unconfirmed. Lab's own file browser plus `s3fs`/`boto3` in a notebook covers the vendor-bucket browsing these workflows need. |
 | `xarray-leaflet` | Stale (~2023); `leafmap` supersedes it. |
 | `jupyterlab-slurm` / `jupyterlab-system-monitor` | JL3-era / archived. DPS isn't SLURM; `jupyter-resource-usage` (in base) covers monitoring. |
 | MAAP `umf` / `ipycmc` / `che-*` / `maap-jupyter-ide` | Eclipse-Che-only, require a Node build, or archived (JL2/3). |
+
+### Known-broken: the MAAP DPS + Algorithms extensions force scrollbars app-wide
+
+`maap-dps-jupyter-extension` and `maap_algorithms_jupyter_extension` both ship a rule
+ending `overflow: scroll !important`. `scroll` (unlike `auto`) shows a scrollbar even when
+there is nothing to scroll, and `!important` beats Lab's own `overflow: hidden` — so every
+few-px-tall piece of Lab chrome paints a scrollbar with no room for a track or thumb, i.e.
+**nothing but the two stepper arrows**. That is the "chevron icons everywhere" bug,
+[2i2c-org/infrastructure#8770](https://github.com/2i2c-org/infrastructure/issues/8770).
+Chrome-only, because Firefox and macOS overlay scrollbars have no stepper arrows.
+
+The rule is **leftover placeholder CSS from the JupyterLab extension cookiecutter**,
+byte-identical in both extensions (same template header, same webpack chunk `728`), and
+unrelated to anything either extension does:
+
+```css
+/* See the JupyterLab Developer Guide for useful CSS Patterns: … */
+.lm-Widget {
+  overflow: scroll !important;
+}
+```
+
+**This is fixed in the image — operators need to do nothing.** These extensions come from
+the MAAP base image (PR #48 dropped the pip pins), so `image/environment.yml` can't remove
+them, and disabling them would cost the Register Algorithm / Submit Jobs / My Builds /
+View My Jobs Launcher tiles. Instead `image/Dockerfile` runs
+[`image/scripts/fix_lm_widget_overflow.py`](../image/scripts/fix_lm_widget_overflow.py),
+which rewrites the rule to:
+
+```css
+.lm-Widget:not(.lm-DockPanel):not(.lm-TabBar):not(.lm-TabPanel):not(.lm-SplitPanel):not(.lm-BoxPanel):not(.lm-StackedPanel):not(.lm-MenuBar):not(.lm-Menu):not(.lm-ScrollBar) {
+  overflow: auto !important;
+}
+```
+
+It is idempotent, and deliberately not `--require`, so a future base image that ships the
+fix upstream turns it into a no-op rather than a build failure.
+
+**Why `auto` and not deletion.** The first version of the patch deleted the declaration
+outright. That killed the arrows but broke the MAAP panels — Lumino's base CSS is
+`overflow: hidden`, and the Submit Jobs form is taller than its panel, so it became
+impossible to scroll down to the Submit button. The extensions were relying on this rule to
+make their own content scrollable; their mistake was scoping it to every widget in the app
+rather than their own. `auto` paints a scrollbar exactly where content genuinely overflows,
+so MAAP's long forms scroll and chrome that doesn't overflow stays quiet.
+
+**Why it is also scoped.** `auto` alone shipped a second, subtler regression: the main dock
+area's tab bar lost its top half behind a scrollbar. Lumino's *layout* widgets position
+their children absolutely and are sized to exactly the space available, so sub-pixel
+rounding routinely leaves a child a fraction of a pixel past the edge — which `hidden`
+clips silently and `auto` turns into a real scrollbar. On the dock panel that fed back on
+itself: a horizontal scrollbar appeared, ate ~15px of the ~30px-tall `.lm-TabBar`, which
+then overflowed vertically, hiding the tab row. Excluding the layout classes drops the rule
+from the cascade for those elements, so Lab's own `overflow` applies again — no guessed
+replacement value. Verified live on a hub pod by rewriting `selectorText` in the Chrome
+console: tab bar restored, Submit Jobs still scrolls.
+
+**Residual risk:** content widgets are still matched globally, so a Lab widget whose content
+genuinely overflows can still show a scrollbar where it previously clipped. If arrows
+reappear anywhere, either add that widget's class to `LUMINO_LAYOUT` in the script, or scope
+the rule positively to the MAAP panels — the DPS panel's React root is
+`.submit-jobs-container`, but the algorithms extension defines no root class, so scoping
+that one requires inspecting its DOM.
+
+Manual escape hatches, if you are on an unpatched image:
+
+```bash
+# preferred - same patch, applied in place, then hard refresh
+python image/scripts/fix_lm_widget_overflow.py
+
+# blunt alternative: costs the MAAP Launcher tiles, reversible with `enable`
+jupyter labextension disable maap-dps-jupyter-extension maap_algorithms_jupyter_extension
+```
+
+Note the chunk filename embeds a content hash that does **not** change when we patch it, so
+a browser holding a cached copy needs a hard refresh (Ctrl/Cmd+Shift+R). Fresh pods are
+unaffected. No fixed upstream release exists — PyPI's latest are
+`maap-dps-jupyter-extension` 2.0.1 and `maap-algorithms-jupyter-extension` 1.0.1, the same
+versions named in the bug report, so this patch stays until MAAP ships a fix.
+Full detail: `.clinerules.md` rule 39.
+
+**Auditing a new extension:** run `python tools/audit_labextension_css.py` on the pod — it
+scans every installed labextension, base-image ones included, for globally-scoped CSS and
+exits non-zero on a hit. For browser-side state (zoom, computed `body` typography, which
+stylesheets carry global rules), paste `tools/lab_ui_diagnostic.js` into the Chrome console.
 
 ---
 

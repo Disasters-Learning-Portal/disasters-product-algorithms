@@ -23,7 +23,9 @@ class TestCOGPipeline:
         assert is_valid
 
         with rasterio.open(result) as src:
-            assert src.nodata == 0
+            # 3-band uint8 auto-detects to NO nodata, not 0. Every uint8 value
+            # is a legitimate sample, so 0 would mask real black imagery.
+            assert src.nodata is None
             assert src.count == 3
 
     def test_float32_with_reprojection(self, float32_geotiff):

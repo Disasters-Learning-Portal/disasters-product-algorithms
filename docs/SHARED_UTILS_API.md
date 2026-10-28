@@ -44,6 +44,7 @@ Complete reference for all functions in the `shared_utils` package.
   - [error_handling](#error_handling) - Error recovery and temp file cleanup
   - [log_utils](#log_utils) - Logging and status reporting
   - [parallel](#parallel) - Thread-pool helper for batch loops
+  - [scratch](#scratch) - Per-run download dirs + notebook OUTPUT_DIR reset
 - [Legacy / Geospatial Tools](#legacy--geospatial-tools)
   - [geotools](#geotools) - GDAL-based raster utilities
 
@@ -75,10 +76,10 @@ Main class for processing disaster imagery. Handles S3 connection, file discover
 | `compression_level` | int | No | `22` | Compression level (ZSTD `1`=fast/larger … `22`=slow/smallest). Omitting it keeps the library default 22; the `simple_disaster_template` notebooks pass `9`. |
 | `overwrite` | bool | No | `False` | Overwrite existing files |
 | `verify` | bool | No | `True` | Verify results after processing |
-| `categorization_patterns` | dict | No | built-in | Regex patterns for file categorization. Forwarded to `shared_utils.file_naming.categorize_file`. |
-| `filename_creators` | dict | No | built-in | Functions to generate output filenames |
-| `output_dirs` | dict | No | built-in | Category-to-directory mapping |
-| `nodata_values` | dict | No | built-in | Category-specific nodata values |
+| `categorization_patterns` | dict | No | built-in | `{category_name: regex}` — **note the direction**, it is the TRANSPOSE of what `file_naming.categorize_file` takes (`{regex: subdir}`). `SimpleProcessor._category_lookup()` inverts it before calling that helper, so the category handed to the three dicts below is the NAME. Supplying this **replaces** the built-in defaults rather than merging with them — list every category you want. |
+| `filename_creators` | dict | No | built-in | `{category_name: fn(path, event) -> filename}` |
+| `output_dirs` | dict | No | built-in | `{category_name: subdir}`, relative to `destination_base` |
+| `nodata_values` | dict | No | built-in | `{category_name: nodata}`; `None` = auto-detect from dtype |
 | `save_results` | bool | No | `True` | Save results CSV |
 | `max_workers` | int | No | `4` | Thread-pool size for the per-category file loop in `_process_category`. Bigger = more S3+GDAL concurrency, but oversubscribes if pushed past ~CPU count (each file's `convert_to_cog` already uses `NUM_THREADS=ALL_CPUS`). |
 
@@ -286,15 +287,63 @@ convert_to_cog(
     clip_to_webmerc: bool = None,           # ±85° lat clip; None = auto-detect
     compression: str = 'ZSTD',
     compression_level: int = 22,
-    overview_levels: int = 5,
+    overview_levels: Optional[int] = None,  # None = derived from output size (coarsest <= 512 px)
     quiet: bool = False,
     backend: str = 'rio'                    # 'rio' or 'gdal'
 ) -> str                                    # Returns path to created COG
 ```
 
-The engine: subprocess `gdalwarp` (with `NUM_THREADS=ALL_CPUS`) + `rio cogeo create`.
+**Two backends, chosen by `metadata`:**
+
+| `metadata` | COG step | Why |
+|---|---|---|
+| `None` (default) | subprocess `rio cogeo create` | Unchanged, fast |
+| a dict | in-process `rio_cogeo.cog_translate(additional_cog_metadata=...)` | The CLI has no flag for arbitrary tags, and GDAL 3.10+ refuses a post-step `SetMetadata` on a finished COG |
+
+Both are preceded by subprocess `gdalwarp` (`NUM_THREADS=ALL_CPUS`) when a reprojection is needed.
+Every caller passing `metadata=` or `--metadata-json` takes the second path — both `simple_disaster`
+notebooks and every sensor CLI.
+
+**Creation options come from one builder, `build_creation_options(compression, compression_level, raw_size_gb=None, band_count=None)`,
+consumed by BOTH backends** so they cannot drift. It always includes:
+
+- **`NUM_THREADS=ALL_CPUS`** — `.clinerules.md` rule #8. Without it GDAL compresses single-threaded
+  (one core pinned per worker).
+- **`BIGTIFF=IF_SAFER`** — not cosmetic. rio-cogeo writes an **uncompressed** scratch raster and then
+  adds overviews to it, so a source under 4 GB uncompressed can cross the classic-TIFF 4 GB offset
+  ceiling *after* GDAL's `IF_NEEDED` default has already chosen classic. libtiff then thrashes in
+  `TIFFRewriteDirectory` and `GDALClose` never practically returns — with the finished COG already
+  on disk. A 1.2 Gpx SkySat scene (3.70 GB raw, 4.38 GB with overviews) went from >27 min stuck to
+  28.9 s. Invisible on small fixtures; pinned by `TestCreationOptionParity`. See
+  disasters-portal#405.
+  Above `BIGTIFF_FORCE_GB` (3 GB) of **raw** output, `raw_size_gb=` promotes this to `BIGTIFF=YES`:
+  GDAL documents `IF_SAFER` as "only a heuristic that might not always work depending on compression
+  ratios", and on a 100+ GB mosaic the failure is `TIFFAppendToStrip: Maximum TIFF file size exceeded`,
+  hours into the run. `convert_to_cog` computes `raw_size_gb` from the post-warp raster.
+- **`INTERLEAVE=BAND` when `band_count > 3`** — a >3-band raster is rendered as a band subset (titiler
+  `bidx=5,3,2` of 8). With the default `PIXEL` interleave every block holds all bands, so that read still
+  decodes all 8: 4.19 MB per 512 px uint16 block instead of 1.57 MB, 2.7x on every tile. `BAND` stores
+  each band's blocks separately. Verified valid COG, same size, byte-identical pixels. Rasters of 3 bands
+  or fewer keep `PIXEL` (an RGB read wants all of them together).
+
+Historically the in-process backend built its own profile and had **neither** of these. If you add a
+`--co` to one backend, add it to `build_creation_options` instead — the parity test captures the real
+`rio cogeo create` argv and diffs it against the builder.
+
 Default `dst_crs` is EPSG:3857 (see CLAUDE.md / .clinerules.md for the airflow ensemble bug).
 Accepts `/vsis3/`, `/vsicurl/`, etc. — useful when called from `main_processor` in streaming mode.
+
+**Sizing note:** the scratch raster is roughly `width × height × bands` **uncompressed**, plus ~33%
+for overviews, and lives next to the output (i.e. `/tmp` for most callers). Four `map_threaded`
+workers on gigapixel scenes can need tens of GB.
+
+#### `build_creation_options(compression, compression_level) -> dict`
+
+Single source of truth for the GDAL creation options used by both `convert_to_cog` backends —
+`NUM_THREADS`, `BIGTIFF`, and the per-codec `PREDICTOR` / `ZSTD_LEVEL` / `ZLEVEL`. The companion
+`COG_GDAL_CONFIG` dict (`GDAL_NUM_THREADS`, `GDAL_TIFF_INTERNAL_MASK`) is passed to
+`cog_translate(config=...)`; without it that call runs under a bare `rasterio.Env()` and compresses
+on one thread.
 
 #### `validate_cog(cog_path) -> Tuple[bool, dict]`
 
@@ -410,6 +459,30 @@ AWS S3 client management and file operations.
 
 Initialize S3 client with automatic credential detection. Tries STS assume-role first (if `aws_credentials.py` exists), then falls back to default credentials.
 
+> **`aws_credentials.py` is gitignored and is in no checkout and on no fresh hub pod**, so the
+> fallback is the *normal* path, not an edge case — the module-level import fails, the assume-role
+> branch is skipped, and its `🔑 Attempting to authenticate…` line never prints. If you see only
+> `✅ S3 client initialized with default credentials`, the role was **never attempted**, not tried
+> and failed. On the Disasters hub those ambient credentials are the `disasters-prod` role.
+>
+> Neither this function nor `fsspec` construction proves you can **write** anywhere — a read-only
+> identity passes both. Use `can_write_to_bucket` before a long job. (An earlier version printed
+> `✅ Confirmed access to <bucket>` here; it only meant fsspec constructed, and was removed.)
+
+#### `can_write_to_bucket(s3_client, bucket, prefix='', verbose=True) -> Tuple[bool, Optional[str]]`
+
+Verify write access for real by round-tripping a tiny probe object, then deleting it. Returns
+`(ok, detail)` — `detail` is `None` on success, else the error string.
+
+Call it **before** a long conversion. `head_bucket` and fsspec both succeed for a read-only
+identity, so without this a permission problem surfaces only at the upload — after every file has
+been processed, and typically after the caller's `finally` has deleted the local outputs.
+
+The probe is written under `prefix`, not at the bucket root: grants on these buckets are commonly
+**per-prefix**, so writable at the root does not imply writable at `ProgramData/<Product>/Output/`.
+If the write succeeds but the cleanup delete fails, write access is still proven and the function
+returns `True` with a warning.
+
 #### `list_s3_files(s3_client, bucket, prefix, suffix='.tif') -> List[str]`
 
 List all files matching prefix and suffix. **Suffix matching is case-insensitive** — `suffix='.tif'` returns both `.tif` and `.TIF` keys (CSDA vendor data ships uppercase `.TIF`). The returned keys keep their real case so a subsequent fetch resolves.
@@ -456,11 +529,22 @@ Download an `s3://…` object to `save_location`, returning the local path. The 
 
 ### staging_upload
 
-Publish a DPS job's product COGs/PNGs to a MAAP **org bucket** (`nasa-disasters-staging`) using short-lived credentials from `maap.aws.workspace_bucket_credentials()`. The DPS worker's own role (`dps-verdi-role`) can't write that bucket, so an ambient `upload_file_to_s3` would `AccessDenied`. `maap-py` is imported **lazily inside** the credential call, so importing this module never requires maap-py (it's a DPS-only dep) — only a live DPS job invokes it. Used by `dps/_finalize.sh` step 3 for every sensor. See `docs/DPS.md` "All sensors → nasa-disasters-staging" and `.clinerules.md` rule 36.
+Publish product COGs/PNGs to `nasa-disasters-staging`. **Two entry points, one keying:** both consume `iter_upload_keys`, so they produce identical keys and differ only in whose credentials do the `PutObject`.
+
+| caller | function | credentials |
+|---|---|---|
+| `dps/_finalize.sh` (every sensor) | `upload_dir_to_staging` | MAAP workspace, via `maap.aws.workspace_bucket_credentials()` |
+| operator notebooks | `upload_dir_ambient` | ambient (default boto3 chain) + a per-prefix write preflight |
+
+DPS needs the MAAP path because the worker role (`dps-verdi-role`) can't write that bucket. A **notebook must not** use it: maap-py authenticates from `MAAP_PGT`, which the DPS wrapper injects and the Disasters hub never does (it's per-user and secret, and the `maapToken` in MAAP Settings lives in the JupyterLab frontend SettingRegistry, which a kernel never sees) — so it returns `HTTPError: 401` for every hub operator. On the hub the pod already assumes `disasters-prod`, so ambient is the working path. `maap-py` is imported **lazily inside** the credential call, so importing this module never requires maap-py (it's a DPS-only dep). See `docs/DPS.md` "All sensors → nasa-disasters-staging" and `.clinerules.md` rules 36 and 57.
 
 #### `upload_dir_to_staging(out_home, target_bucket, dest_prefix) -> int`
 
 Request workspace credentials, confirm `target_bucket` is granted `read_write` in `resp["authorized_s3_paths"]` (else raise, listing what *was* authorized), then upload every `**/*.tif`+`**/*.png` under `out_home` to `s3://target_bucket/<granted_prefix>/<dest_prefix>/<relpath>` — keyed by the `out_home`-relative path (collision-safe, same rule as `_finalize.sh`). Returns the number of files uploaded. Callers pass `dest_prefix = "dps_output/<activation_event>"`.
+
+#### `upload_dir_ambient(out_home, target_bucket, dest_prefix="", include=None, sensor=None, preflight=True) -> int`
+
+The notebook/hub twin of the above, with `boto3.client('s3')` in place of MAAP credentials. Same `include`/`sensor` semantics, same keys. With `preflight` (the default) it attempts a real zero-byte `PutObject` under **every distinct destination prefix** before uploading anything and raises on the first failure — grants on this bucket are per-prefix and `head_bucket` succeeds for a read-only identity, so only a real write is evidence, and failing up front beats dying part-way through the loop. Pinned by `tests/unit/test_staging_upload.py::TestAmbientUpload`.
 
 #### `resolve_authorized_path(resp, target_bucket) -> str`
 
@@ -624,9 +708,9 @@ Calculate appropriate overview factors based on image dimensions.
 
 ### file_naming
 
-**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. Both legacy (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) and new unified (`extract_datetime_from_filename`, `categorize_file`, `create_output_filename`) helpers live here; the legacy set is preserved for backwards compatibility with unit tests and `shared_utils_reference.ipynb`.
+**Single source of truth for filename transforms and categorization.** Pure Python (no GDAL dep) so it can be imported from any notebook style — CLI subprocess, Python API, or class wrappers. The legacy helpers (`extract_date_from_filename`, `create_cog_filename`, `parse_filename_components`) were removed in the unification refactor — see the note at the end of this section for what replaced them.
 
-New code should use the unified helpers:
+Use the unified helpers:
 
 ```python
 from shared_utils.file_naming import (
@@ -634,13 +718,46 @@ from shared_utils.file_naming import (
     extract_datetime_from_filename,  # -> (matched_str, 'hour'|'day') | (None, None)
     categorize_file,                  # (filename, {regex: subdir}) -> subdir | 'uncategorized'
     create_output_filename,           # (path, event, categories=None) -> '{event}_{stem}_{date}_{granularity}.tif'
+    create_nisar_filename,            # (path, event) -> two-date variant for interferometric PAIRS
     no_change,                        # passthrough builder for sub-products like AVIRIS
+    prefix_event,                     # (stem, event) -> stem with the event prefix applied at most once
+    strip_event_prefix,               # (name, event=None) -> name with a leading event prefix removed
 )
 ```
 
 `create_output_filename` auto-normalizes 8-digit `YYYYMMDD` to hyphenated `YYYY-MM-DD` so the output matches the legacy operator-facing convention.
 
-Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, etc.) are matched by the entries higher up in `DATETIME_PATTERNS` and emit `_hour.tif`; ordering is most-specific first so a filename containing both an ISO timestamp and a bare YYYYMMDD prefers the timestamp.
+Hour-granularity datetimes (`20250111T194616Z`, `2025-01-11T19:46:16Z`, `2025-01-11T194616Z`, etc.) are matched by the entries higher up in `DATETIME_PATTERNS` and emit `_hour.tif`; ordering is most-specific first so a filename containing both an ISO timestamp and a bare YYYYMMDD prefers the timestamp.
+
+**`create_output_filename` is idempotent — feeding it its own output is a no-op.** Two guards make that true, and both are load-bearing for sources that arrive already named for the activation (vendor deliveries staged under the event, or a re-run over the pipeline's own output):
+
+- The event prefix goes through `prefix_event()` in every branch, so a stem that already starts with the event token is not prefixed again.
+- A stem already ending in a canonical marker — an ISO-Zulu datetime (with `HH:MM:SS` or compact `HHMMSS`) or a `_day` / `_hour` suffix — is kept verbatim; only the prefix rule applies. Mirrors the `cog_utils._ISO_ZULU_END_RE` short-circuit in `rename_with_event` / `get_final_filename`.
+
+Both were regressions in a real activation: a SkySat delivery named `202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z.tif` came out as `202607_Fire_OR_202607_Fire_OR_SkySat_SR_TrueColor_2026-08-12T153802Z_day.tif`. The mixed `YYYY-MM-DDTHHMMSSZ` stamp also needed its own `DATETIME_PATTERNS` entry — without one, the less-specific `YYYY-MM-DDTHH` pattern matched a *prefix* of it and left `3721Z` welded to the product token. Pinned by `tests/unit/test_file_naming.py` and `tests/unit/test_simple_disaster_naming.py`.
+
+**`strip_event_prefix(name, event_name=None)` is the inverse of `prefix_event`** — for pipelines that keep the activation in the GeoTIFF tags and the S3 prefix rather than in the filename (`notebooks/simple_disaster_staging.ipynb`). Two passes, in order: `event_name` matched **case-insensitively** wins, because it is the only way to strip an event whose location token itself contains underscores (`202508_Flood_New_Mexico` — the generic shape below would eat exactly three tokens and leave `Mexico_NDVI.tif`); otherwise the generic `^YYYYMM_Hazard_Location_` shape is removed, so a *misnamed* delivery — right shape, wrong event — is still cleaned. Note the guards: an 8-digit date head (`20260812_SkySat_…`) can't match, because the anchored `\d{6}` would then need a `_` where `1` sits; and a name that is nothing but the event is returned unchanged rather than stripped down to a bare `.tif`. Only the basename is examined, so a directory component survives. Setting a builder's `event_name` to `''` only stops it *adding* a prefix — it cannot remove one the source arrived with, which is why the stripper runs first. Pinned by `tests/unit/test_file_naming.py::TestStripEventPrefix`.
+
+
+#### `create_nisar_filename(original_path, event_name)` — interferometric pairs
+
+```python
+create_nisar_filename(
+    "NISAR_D54_GUNW_20260617_20260629_unw_delon_deRamp_maskWater_cm.tif",
+    "202606_Earthquake_Venezuela",
+)
+# -> '202606_Earthquake_Venezuela_NISAR_D54_GUNW_unw_delon_deRamp_maskWater_cm_2026-06-17_2026-06-29_day.tif'
+```
+
+An interferogram is derived from **two** acquisitions, so its name carries a reference *and* a secondary date. `extract_datetime_from_filename` returns the **first** match, so `create_output_filename` promotes the *reference* (pre-event) date into the canonical trailing slot and leaves the secondary date welded mid-name as a bare `YYYYMMDD` — `..._GUNW_20260629_unw_..._cm_2026-06-17_day.tif`. Nothing errors; only the S3 key is wrong.
+
+`create_nisar_filename` keeps both dates, **in source order** (NISAR names the reference first — sorting would misreport the pair if a delivery ever did otherwise), adjacent, immediately before `_day`. The name still ends in a date plus a granularity suffix, so the repo-wide convention holds and anything reading the **last** date token gets the secondary (post-event) acquisition.
+
+- Dates are found with `(?<!\d)(\d{8})(?!\d)` and validated through `datetime.strptime`, so a 6-digit path/row or a run like `20261332` cannot masquerade as one.
+- Fewer than two real dates **falls back to `create_output_filename`**, so a whole category can safely point at it.
+- The `_STAMPED_END_RE` short-circuit runs first, so it is idempotent on its own output.
+
+Wired into both `simple_disaster_template.ipynb` tiers as the `nisar` category (listed first — `CATEGORIZATION_PATTERNS` is first-match-wins). See `.clinerules.md` rule 48 for the nodata caveat: displacement is float cm where **0 is real data**, so `NODATA_VALUES['nisar']` is `None` pending a per-activation probe of the source tag.
 
 > The earlier helpers `extract_date_from_filename`, `convert_date`,
 > `parse_filename_components`, `create_cog_filename`, and `create_output_path`
@@ -814,6 +931,42 @@ iterable (not just list) acceptance.
 
 ---
 
+### scratch
+
+Throwaway local directories. Exists because /tmp on hub pods filled up run
+after run: the vendor CLIs downloaded raw scenes into a shared `/tmp/s3_temp`
+that nothing deleted, and the workflow notebooks kept (and re-uploaded) every
+earlier run's COGs in `OUTPUT_DIR`. See [`.clinerules.md`](../.clinerules.md) rule 61.
+
+#### `download_scratch(prefix)` (context manager)
+
+```python
+from shared_utils.scratch import download_scratch
+
+with download_scratch("capella") as download_dir:
+    outfile, _ = sigmaCalib(scene_tifs, save_location=out, download_dir=download_dir)
+    convert_to_cog(outfile, ...)
+# download_dir is gone here -- after success, an exception, or Ctrl-C.
+```
+
+A fresh `tempfile.mkdtemp(prefix="<prefix>_dl_")`, removed in `finally`. Every
+vendor CLI (`process_capella`/`umbra`/`skysat`/`satellogic`) wraps its run in
+one and passes `download_dir=` to the library, whose functions otherwise keep
+their `"/tmp/s3_temp"` default (testing notebooks, iceye).
+
+#### `reset_output_dir(path) -> path`
+
+Empties (or creates) `path` and prints what it removed. **Refuses** anything not
+strictly inside a temp directory (`tempfile.gettempdir()` or `/tmp`, after
+resolving symlinks) -- including the temp root itself -- so an OUTPUT_DIR pointed
+at a real folder is never wiped. The four vendor workflow notebooks call it at
+the top of their processing cell.
+
+Pinned by [`tests/unit/test_scratch.py`](../tests/unit/test_scratch.py) and
+[`tests/unit/test_vendor_download_cleanup.py`](../tests/unit/test_vendor_download_cleanup.py).
+
+---
+
 ### version
 
 Package version + canonical `PROCESSOR_STRING` for activation-event metadata.
@@ -867,6 +1020,13 @@ Write float32 GeoTIFF.
 
 Write uint8 GeoTIFF.
 
-#### `dump_geotiff_rgb(filename, r, g, b, projref, in_geo)`
+#### `dump_geotiff_rgb(filename, r, g, b, projref, in_geo, alpha=None)`
 
-Write 3-band RGB GeoTIFF.
+Write an 8-bit RGB GeoTIFF. `alpha=None` (default) writes the legacy 3-band
+output unchanged. Pass a uint8 array (`0` = transparent/nodata, `255` = valid)
+to write a 4-band RGBA whose band 4 is tagged `GCI_AlphaBand`.
+
+Use alpha instead of a scalar nodata whenever `0` is a legitimate sample — for
+an 8-bit composite it always is. Callers must then pass `nodata=False` to
+`convert_to_cog`; a scalar nodata declared alongside an alpha band shadows it
+(rasterio `NodataShadowWarning`) and masks real black pixels.

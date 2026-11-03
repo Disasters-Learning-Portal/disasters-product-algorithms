@@ -11,6 +11,7 @@ This script handles:
     - Index generation
     - Composite generation
     - Water-extent generation
+    - Cloud-mask product generation
     - Tile merging (optional)
     - COG creation
 
@@ -29,6 +30,7 @@ side-by-side on real activations.
 
 import argparse
 import os
+import shutil
 
 from sentinel2.sentinel2_odr_functions import (
     search_sentinel2,
@@ -37,15 +39,17 @@ from sentinel2.sentinel2_odr_functions import (
     generate_composite,
     generate_water_extent,
     merge_products,
-    acquisition_key,
-    drop_superseded_baselines,
-    water_extent_merge_method,
+    apply_cloud_union,
+    cloud_mask_sidecar_path,
+    generate_cloud_mask,
+    finalize_cloud_mask,
+    finalize_composite_rgba,
+    CLOUD_MASK_NODATA,
     _build_output_filename,
     _nstd_variant_token,
 )
 
 from shared_utils.cog_utils import convert_to_cog
-from shared_utils.landcover import pooled_water_statistics
 from shared_utils.cog_metadata import load_metadata_json
 
 
@@ -111,6 +115,12 @@ COMPOSITE_PRODUCTS = {
     "swir",
 }
 
+# The cloud / cloud-shadow / thin-cirrus mask on its own, from the L2A
+# Scene Classification Layer: 1 cloud, 0 otherwise (also its nodata).
+CLOUD_MASK_PRODUCTS = {
+    "cloud_mask",
+}
+
 
 def main():
 
@@ -136,6 +146,7 @@ def main():
             "natural_color",
             "color_infrared",
             "swir",
+            "cloud_mask",
         ],
         help="Sentinel-2 product to generate",
     )
@@ -197,9 +208,8 @@ def main():
         "--merge",
         action="store_true",
         help=(
-            "Mosaic the matched Sentinel-2 tiles into one product per "
-            "acquisition (satellite pass; normally one per date) instead "
-            "of writing one file per tile. Passes are never mixed."
+            "Mosaic all matched Sentinel-2 tiles into a single output "
+            "product instead of writing one file per tile."
         ),
     )
 
@@ -306,6 +316,13 @@ def main():
             "exist for L1C products."
         )
 
+    if args.product == "cloud_mask" and args.level == "1":
+        raise ValueError(
+            "--product cloud_mask requires Sentinel-2 L2A (--level 2); the "
+            "Scene Classification Layer (SCL) does not exist for L1C "
+            "products."
+        )
+
     # -----------------------------------------------------------------
     # Validate the bounding box up front.
     #
@@ -364,6 +381,10 @@ def main():
         algorithm_type = "composite"
         nodata = COMPOSITE_NODATA
 
+    elif args.product in CLOUD_MASK_PRODUCTS:
+        algorithm_type = "cloud_mask"
+        nodata = CLOUD_MASK_NODATA
+
     else:
         raise ValueError(
             f"Unsupported Sentinel-2 product: {args.product}"
@@ -412,17 +433,27 @@ def main():
     # Load algorithm
     # -----------------------------------------------------------------
 
-    print("Loading Sentinel-2 algorithm...")
+    if algorithm_type == "cloud_mask":
 
-    algorithm = get_algorithm(
-        algorithm_type=algorithm_type,
-        algorithm_name=args.product,
-        algorithm_file=args.algorithm_file,
-    )
+        # The cloud mask is just the SCL classes; there is nothing to
+        # configure, so it has no algorithm catalog entry.
+        algorithm = {}
 
-    print(
-        f"Algorithm '{args.product}' loaded successfully."
-    )
+        print("Cloud-mask product: no algorithm catalog entry needed.")
+
+    else:
+
+        print("Loading Sentinel-2 algorithm...")
+
+        algorithm = get_algorithm(
+            algorithm_type=algorithm_type,
+            algorithm_name=args.product,
+            algorithm_file=args.algorithm_file,
+        )
+
+        print(
+            f"Algorithm '{args.product}' loaded successfully."
+        )
 
     # -----------------------------------------------------------------
     # Search Sentinel-2
@@ -450,11 +481,6 @@ def main():
         f"Found {len(items)} Sentinel-2 scene(s)."
     )
 
-    # The same acquisition can be listed at more than one processing
-    # baseline; keep the newest per tile so the copies don't overwrite
-    # each other's per-tile output.
-    items = drop_superseded_baselines(items)
-
     # -----------------------------------------------------------------
     # Generate product GeoTIFF(s), one per scene
     # -----------------------------------------------------------------
@@ -466,36 +492,6 @@ def main():
     # nstd=1 tiles together and nstd=1.5 tiles together, rather than
     # mixing thresholds into one raster.
     local_paths = []
-
-    # Water extent: ONE NIR threshold per acquisition. Each tile's water
-    # sample is gathered first and pooled over every tile of its satellite
-    # pass, so the tiles of one pass -- the same observation -- classify
-    # with the same threshold instead of seaming at their overlap
-    # (shared_utils.landcover.pooled_water_statistics).
-    water_stats = {}
-
-    if algorithm_type == "water_extent":
-
-        parts = {}
-
-        for item in items:
-            print(f"\nGathering water-threshold sample: {item.id}")
-            parts.setdefault(acquisition_key(item), []).append(
-                generate_water_extent(
-                    item=item,
-                    algorithm=algorithm,
-                    algorithm_name=args.product,
-                    output_dir=args.output,
-                    cloud_mask=args.cloud_mask,
-                    sample_only=True,
-                )
-            )
-
-        for acquisition, acquisition_parts in parts.items():
-            print(f"\nPooled water statistics for {acquisition}:")
-            water_stats[acquisition] = pooled_water_statistics(
-                acquisition_parts
-            )
 
     for i, item in enumerate(items, start=1):
 
@@ -525,9 +521,6 @@ def main():
                             output_dir=args.output,
                             cloud_mask=args.cloud_mask,
                             nstd=nstd,
-                            water_stats=water_stats[
-                                acquisition_key(item)
-                            ],
                         ),
                     )
                 )
@@ -544,6 +537,18 @@ def main():
                         output_dir=args.output,
                         nodata=nodata,
                         cloud_mask=args.cloud_mask,
+                    ),
+                )
+            ]
+
+        elif algorithm_type == "cloud_mask":
+
+            produced = [
+                (
+                    None,
+                    generate_cloud_mask(
+                        item=item,
+                        output_dir=args.output,
                     ),
                 )
             ]
@@ -586,38 +591,29 @@ def main():
 
     if args.merge:
 
-        # One mosaic per (acquisition, variant). Grouping by ACQUISITION
-        # (datatake, i.e. one satellite pass) keeps every date in the
-        # requested range as its own product: the merge is first-wins, so
-        # mixing passes would stitch pre-event pixels into a post-event
-        # mosaic wherever tiles overlap. Grouping by variant keeps an
-        # nstd=1 tile from being merged with an nstd=1.5 tile, which would
-        # produce a raster whose threshold varies by location.
-        groups = {}
+        # Group by variant so each parameterisation mosaics separately.
+        # Merging an nstd=1 tile with an nstd=1.5 tile would produce a
+        # raster whose threshold varies by location.
+        variants = {}
 
         for variant, item, path in local_paths:
-            groups.setdefault(
-                (acquisition_key(item), variant), []
-            ).append((item, path))
+            variants.setdefault(variant, []).append((item, path))
 
         files_to_cog = []
 
-        for (acquisition, variant), group in sorted(
-            groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
-        ):
+        for variant, group in variants.items():
 
             print()
             print("=" * 70)
             print(
-                f"Merging {len(group)} tile(s) from {acquisition}"
+                f"Merging {len(group)} tile(s)"
                 + (f" [{variant}]" if variant else "")
             )
             print("=" * 70)
 
             # Sort by item id for a deterministic merge order and a
             # deterministic choice of "first" item for the merged
-            # filename. Within one acquisition, overlapping tiles are the
-            # same observation, so the order does not change the science.
+            # filename.
             items_sorted, paths_sorted = zip(
                 *sorted(group, key=lambda pair: pair[0].id)
             )
@@ -625,24 +621,45 @@ def main():
             merged_name = _build_output_filename(
                 items_sorted[0],
                 args.product,
-                masked=args.cloud_mask,
+                masked=args.cloud_mask and algorithm_type != "cloud_mask",
                 merged=True,
                 variant=variant,
             )
             merged_path = os.path.join(args.output, merged_name)
 
-            # Water extent: a cloud flag from ANY tile of the pass wins
-            # over a valid class (water_extent_merge_method); everything
-            # else keeps rasterio's first-valid-pixel rule.
+            # Keep every tile's cloud mask in the mosaic.
+            #
+            #   water extent -- cloud is a real class (5), so giving that
+            #                   class priority in the merge is enough.
+            #   cloud mask   -- merged with "max", so cloud in ANY tile
+            #                   survives.
+            #   index        -- cloud is plain nodata, which looks like
+            #                   off-swath nodata, so the per-tile masks
+            #                   are unioned and stamped on afterwards.
+            #   composite    -- converted to RGBA below: cloud gray,
+            #                   other no data transparent.
             merge_products(
                 list(paths_sorted),
                 merged_path,
-                method=(
-                    water_extent_merge_method
-                    if algorithm_type == "water_extent"
-                    else "first"
-                ),
+                method="max" if algorithm_type == "cloud_mask" else "first",
+                priority_value=5 if (algorithm_type == "water_extent" and args.cloud_mask) else None,
             )
+
+            if args.cloud_mask and algorithm_type == "index":
+                apply_cloud_union(
+                    merged_path,
+                    [cloud_mask_sidecar_path(p) for p in paths_sorted],
+                )
+
+            elif algorithm_type == "composite":
+                finalize_composite_rgba(
+                    merged_path,
+                    (
+                        [cloud_mask_sidecar_path(p) for p in paths_sorted]
+                        if args.cloud_mask
+                        else None
+                    ),
+                )
 
             print(f"Merged product created: {merged_path}")
 
@@ -657,6 +674,29 @@ def main():
 
     else:
         files_to_cog = [path for _, _, path in local_paths]
+
+        if algorithm_type == "composite":
+            for path in files_to_cog:
+                finalize_composite_rgba(
+                    path,
+                    (
+                        [cloud_mask_sidecar_path(path)]
+                        if args.cloud_mask
+                        else None
+                    ),
+                )
+
+    # Per-tile cloud-mask sidecars are only needed for the merge / RGBA
+    # steps above.
+    shutil.rmtree(
+        os.path.join(args.output, "_cloud_masks"),
+        ignore_errors=True,
+    )
+
+    # Cloud-mask product: attach the gray / transparent colour table.
+    if algorithm_type == "cloud_mask":
+        for path in files_to_cog:
+            finalize_cloud_mask(path)
 
     # -----------------------------------------------------------------
     # Convert to COG(s)

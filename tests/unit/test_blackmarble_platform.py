@@ -1,12 +1,13 @@
 """Assertions for dps/blackmarble/platform.sh (the VIIRS platform table).
 
-One Black Marble engine serves two registered algorithms -- Suomi-NPP (VNP46A2) and
-NOAA-20 (VJ146A2) -- and EVERYTHING that differs between them lives in this bash table:
+One Black Marble algorithm serves two VIIRS products -- NOAA-20 (VJ146A2, the default) and
+Suomi-NPP (VNP46A2), chosen per job by the `viirs_product` input -- and EVERYTHING that
+differs between them lives in this bash table:
 the product/folder token, the product short name, the mission-start date floor and the
 SOURCE string baked into the COG.
 
 Every one of those is a silent-wrong-answer bug if it drifts. A wrong product token makes
-the NOAA-20 job overwrite the Suomi-NPP product for the same event and date; a wrong date
+a VJ146A2 run overwrite the VNP46A2 product for the same event and date; a wrong date
 floor lets a job through that Earthdata answers with zero granules; a wrong SOURCE
 mislabels the provenance of a published product. In all three cases the job still exits 0.
 
@@ -50,6 +51,33 @@ def value(fn, *args):
 def test_exactly_two_platforms_are_supported():
     """bm_platforms feeds run.sh's validate_in_set, so it is the authoritative list."""
     assert value("bm_platforms").split() == list(PLATFORMS)
+
+
+def test_the_job_input_accepts_exactly_the_two_product_short_names():
+    """bm_viirs_products feeds run.sh's validate_in_set for the `viirs_product` input; it must
+    be exactly the short names the platform table downloads."""
+    assert sorted(value("bm_viirs_products").split()) == sorted(
+        value("bm_platform_short_name", p) for p in PLATFORMS
+    )
+
+
+def test_the_default_product_is_listed_first():
+    """VJ146A2 is the job default (Suomi-NPP delivery ceased 2026-11-01)."""
+    assert value("bm_viirs_products").split()[0] == "VJ146A2"
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_short_name_maps_back_to_its_platform(platform):
+    """bm_platform_for_short_name is how run.sh turns the job input into the platform token
+    every other accessor is keyed by -- it must invert bm_platform_short_name exactly."""
+    assert value("bm_platform_for_short_name", value("bm_platform_short_name", platform)) == platform
+
+
+@pytest.mark.parametrize("bad", ["VNP46A1", "vj146a2", "NOAA-20", "noaa20", ""])
+def test_unknown_product_dies_rather_than_defaulting(bad):
+    result = call("bm_platform_for_short_name", bad, expect_ok=False)
+    assert result.returncode != 0
+    assert "unknown VIIRS product" in result.stderr
 
 
 @pytest.mark.parametrize("platform,expected", [

@@ -5,15 +5,15 @@ WHAT THIS ANSWERS
 -----------------
 Every other test in this repo stubs something. This one stubs nothing that matters: it
 queries CMR, downloads real VJ146A2 and VNP46A2 granules with a real Earthdata token, runs
-the REAL upstream pipeline through the REAL dps/blackmarble{,_noaa}/run.sh, and then
-compares the two platforms' finished COGs against each other.
+the REAL upstream pipeline through the REAL dps/blackmarble/run.sh -- once per
+`viirs_product` -- and then compares the two products' finished COGs against each other.
 
 The claim being verified is the one the whole change rests on: **VJ146A2 is a structural
-twin of VNP46A2, so retargeting the product is sufficient and changes nothing else.** That
+twin of VNP46A2, so switching the product is sufficient and changes nothing else.** That
 claim was sourced from the Black Marble User Guide and CMR metadata during design; here it
 is checked against actual bytes. And the complementary claim: the swap ACTUALLY HAPPENED --
-the NOAA-20 job downloads NOAA-20 data, rather than silently re-running Suomi-NPP under a
-different product name, which is the one failure mode nothing downstream could detect.
+a VJ146A2 job downloads NOAA-20 data, rather than silently re-running Suomi-NPP under a
+different product name (or the reverse, now that upstream defaults to VJ146A2), which is the one failure mode nothing downstream could detect.
 
 RUNNING IT
 ----------
@@ -28,10 +28,10 @@ for VIIRS .h5). CI does not run this: its pytest env has neither, and it has no 
 TWO TIERS, AND THEY NEED DIFFERENT THINGS:
 
   * The **VIIRS-layer** tests (everything not marked `slow`) need only `EARTHDATA_TOKEN`.
-    They cover the entire surface this change touches -- the product swap, the download,
+    They cover the entire VIIRS surface -- the product selection, the download,
     the HDF5 equivalence -- and run anywhere with network access:
         DPS_E2E=1 pytest -m 'not slow' tests/e2e/
-  * The **whole-pipeline** tests (`slow`) run both real `run.sh` scripts, so they also
+  * The **whole-pipeline** tests (`slow`) run the real `run.sh` twice, so they also
     need Landsat and OSM. Landsat comes from the **requester-pays** bucket
     `s3://usgs-landsat`, which upstream reads with obstore -- so they need **ambient AWS
     credentials**. On a machine without them, obstore falls back to the EC2 metadata
@@ -50,9 +50,7 @@ import urllib.request
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SNPP_RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble", "run.sh")
-NOAA_RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble_noaa", "run.sh")
-BM_NOAA_PY = os.path.join(REPO_ROOT, "dps", "blackmarble", "bm_noaa.py")
+RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble", "run.sh")
 
 CMR = "https://cmr.earthdata.nasa.gov/search"
 
@@ -145,7 +143,7 @@ def test_cmr_resolves_exactly_one_vj146a2_collection():
     collections = cmr_get("collections.umm_json", short_name="VJ146A2")
     assert collections["hits"] == 1
     umm = collections["items"][0]["umm"]
-    assert umm["Version"] == "2", "bm_noaa.py pins version 2; CMR disagrees"
+    assert umm["Version"] == "2", "upstream VIIRS_PRODUCTS pins version 2; CMR disagrees"
     assert collections["items"][0]["meta"]["concept-id"] == "C3370789118-LAADS"
 
 
@@ -157,7 +155,7 @@ def test_vj146a2_temporal_start_is_the_date_floor_run_sh_enforces():
 
 
 def test_both_products_are_the_same_version():
-    """Why bm_noaa.py can pin version "2" for both and swap only the short name."""
+    """Why one pipeline serves both products: same version, only the short name differs."""
     versions = {
         short_name: cmr_get("collections.umm_json", short_name=short_name)
         ["items"][0]["umm"]["Version"]
@@ -231,21 +229,13 @@ def test_the_ntl_layer_has_identical_structure(granule_cache):
 
 
 def test_upstreams_layer_path_resolves_in_a_vj146a2_granule(granule_cache):
-    """bm_noaa.py deliberately does NOT patch NTL_DATASET_PATH. Prove that is correct
+    """Upstream reads ONE NTL_DATASET_PATH for both products. Prove that is correct
     against a real NOAA-20 granule rather than against the product documentation."""
-    import importlib.util
-
     import rasterio
-
-    spec = importlib.util.spec_from_file_location("bm_noaa_e2e", BM_NOAA_PY)
-    bm_noaa = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bm_noaa)
+    from blackmarble.acquire.viirs import NTL_DATASET_PATH
 
     with rasterio.open(str(granule_cache["noaa20"])) as src:
-        matches = [
-            sub for sub in src.subdatasets
-            if bm_noaa.UPSTREAM_NTL_DATASET_PATH in sub
-        ]
+        matches = [sub for sub in src.subdatasets if NTL_DATASET_PATH in sub]
     assert len(matches) == 1, (
         "upstream's NTL_DATASET_PATH does not resolve to exactly one subdataset in a "
         "VJ146A2 granule; the unpatched layer path assumption is wrong"
@@ -299,35 +289,25 @@ def test_the_two_products_carry_different_radiance(granule_cache):
 
 
 # =====================================================================================
-# 4. The patch changes what is actually downloaded
+# 4. The requested product is what is actually downloaded
 # =====================================================================================
 
 
-def test_patched_download_viirs_fetches_vj146a2_granules(tmp_path):
-    """UPSTREAM's real download_viirs, real Earthdata auth, real files on disk.
+def test_download_viirs_fetches_vj146a2_granules_when_asked(tmp_path):
+    """UPSTREAM's real download_viirs(product=...), real Earthdata auth, real files on disk.
 
-    Nothing here is stubbed. If the monkeypatch were a no-op, the filenames landing in
-    tmp_path would start with VNP46A2 while the job around them said NOAA-20 -- the exact
-    silent failure the shim exists to prevent.
+    Nothing here is stubbed. If the product argument were ignored, the filenames landing in
+    tmp_path would carry another product's name while the job around them said NOAA-20 --
+    the silent failure run.sh guards against by always passing --viirs-product.
     """
-    import importlib.util
     from datetime import datetime
-
-    spec = importlib.util.spec_from_file_location("bm_noaa_e2e_dl", BM_NOAA_PY)
-    bm_noaa = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bm_noaa)
 
     import blackmarble.acquire.viirs as viirs
 
-    saved = (viirs.BM_SHORT_NAME, viirs.BM_VERSION)
-    try:
-        bm_noaa.apply_noaa20_patch()
-        os.environ["EARTHDATA_TOKEN"] = token()
-        result = viirs.download_viirs(
-            datetime.strptime(DATE, "%Y-%m-%d"), BBOX_TUPLE, str(tmp_path)
-        )
-    finally:
-        viirs.BM_SHORT_NAME, viirs.BM_VERSION = saved
+    os.environ["EARTHDATA_TOKEN"] = token()
+    result = viirs.download_viirs(
+        datetime.strptime(DATE, "%Y-%m-%d"), BBOX_TUPLE, str(tmp_path), product="VJ146A2"
+    )
 
     downloaded = [path.name for path in tmp_path.glob("*.h5")]
     assert downloaded, "no granules downloaded"
@@ -389,7 +369,7 @@ def job_runs(tmp_path_factory):
     home.mkdir()
 
     results = {}
-    for platform, script in (("noaa20", NOAA_RUN_SH), ("snpp", SNPP_RUN_SH)):
+    for platform, viirs_product in PRODUCTS.items():
         cwd = root / platform
         cwd.mkdir()
         environ = dict(os.environ)
@@ -400,9 +380,10 @@ def job_runs(tmp_path_factory):
         })
         try:
             proc = subprocess.run(
-                ["bash", script,
+                ["bash", RUN_SH,
                  "--activation_event", EVENT, "--bbox", BBOX, "--date", DATE,
-                 "--config", "fast", "--osm_source", "overpass"],
+                 "--config", "fast", "--osm_source", "overpass",
+                 "--viirs_product", viirs_product],
                 cwd=str(cwd), env=environ, capture_output=True, text=True,
                 timeout=JOB_TIMEOUT_S,
             )

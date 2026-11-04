@@ -55,7 +55,6 @@ on:
           - sentinel2
           - sentinel2_odr
           - blackmarble
-          - blackmarble_noaa
           # TEMPORARY diagnostic (dps/probe/). Remove this entry, dps/ogc/probe.yml
           # and dps/probe/ once the Secrets Manager reachability question is answered.
           # Lives ONLY on deploy-algorithm -- it is deliberately not on dev, which is

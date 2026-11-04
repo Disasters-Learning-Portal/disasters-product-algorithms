@@ -125,23 +125,11 @@ RUN mkdir -p /opt/pyspectral /opt/pyspectral_data \
 # proves its console script + pip-resolved deps (typer/earthaccess/osmnx/pystac-client/
 # obstore) all resolved. This is the only build-time gate on that install.
 #
-# `bm_noaa.py --self-check` is the gate on the NOAA-20 variant. That script retargets the
-# pinned upstream package from VNP46A2 to VJ146A2 by setting a MODULE CONSTANT
-# (blackmarble.acquire.viirs.BM_SHORT_NAME) -- upstream has no flag for it. If upstream
-# renames that constant or moves the HDF5 layer path, a naive patch would silently do
-# NOTHING: the job would download Suomi-NPP granules, publish them under a NOAA-20 product
-# name, and exit 0. --self-check applies the patch offline (no token, no network) and
-# fails if the contract moved, so that drift breaks THIS BUILD rather than an activation.
-#
-# `bm_georef.py --self-check` is the same kind of gate on the LANDSAT GEOREFERENCING patch,
-# which applies to BOTH platforms. Upstream renders band tiles at mosaic coordinates into a
-# window-sized array and then pastes them at the window offset, applying that offset twice
-# and putting every product ~3.6 km north-west of truth. A stale patch fails silently in the
-# worst way -- the job publishes a misregistered COG that passes cog_validate, has a correct
-# transform, and lands over the right city, so nothing downstream notices. --self-check
-# validates upstream's shape AND pushes markers at known coordinates through the patched
-# path offline, asserting they land within 200 m (unpatched puts them ~3600 m out, or off
-# the grid entirely).
+# The `grep -- --viirs-product` is the gate on the PIN itself. run.sh passes
+# `--viirs-product` explicitly on every job (upstream's default product must never decide
+# which satellite ran -- see dps/blackmarble/run.sh). That flag only exists from
+# veda-black-marble 114fa7f on, so a pin regressed below it would otherwise fail every
+# Black Marble job at run time with a typer usage error; here it fails the build.
 #
 # The final loop gates the conda-forge GDAL DRIVER PLUGINS. GDAL 3.9+ ships most
 # non-core drivers as separate `libgdal-*` conda packages that a bare `gdal` install
@@ -164,10 +152,7 @@ RUN conda run --name disasters_dps process_capella --help >/dev/null \
         "import sentinel2.sentinel2_odr_functions" \
     && conda run --name disasters_dps python -c "import blackmarble" \
     && conda run --name disasters_dps blackmarble --help >/dev/null \
-    && conda run --name disasters_dps python \
-        /app/disasters-product-algorithms/dps/blackmarble/bm_noaa.py --self-check \
-    && conda run --name disasters_dps python \
-        /app/disasters-product-algorithms/dps/blackmarble/bm_georef.py --self-check \
+    && conda run --name disasters_dps blackmarble --help | grep -q -- --viirs-product \
     && conda run --name disasters_dps python \
         /app/disasters-product-algorithms/tools/pyspectral_selfcheck.py \
     && conda run --name disasters_dps bash -c '\

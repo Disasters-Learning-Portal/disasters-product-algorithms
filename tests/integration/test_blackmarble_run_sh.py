@@ -1,9 +1,9 @@
-"""Executes the real dps/blackmarble{,_noaa}/run.sh end to end, with conda stubbed.
+"""Executes the real dps/blackmarble/run.sh end to end, with conda stubbed.
 
 WHY THIS EXISTS
 ---------------
-run.sh is where the Black Marble job actually lives: it validates the inputs, picks the
-platform, builds the output path, chooses which pipeline entry point to invoke, renames
+run.sh is where the Black Marble job actually lives: it validates the inputs, maps the
+requested VIIRS product to its platform, builds the output path, invokes upstream, renames
 the colored companion, bakes the activation event and hands off to _finalize.sh. None of
 that is covered by unit tests of the pieces, and none of it is covered by CI's
 `<cli> --help` smoke check either -- a broken orchestration only shows up as a failed (or
@@ -13,7 +13,7 @@ The one thing that is stubbed is `conda`, because the real invocations need a MA
 an Earthdata token and a 20-minute download. The stub sits first on PATH and:
 
   * `_get_secret.py`  -> prints a fake token (so the MAAP path is exercised, not skipped)
-  * `blackmarble` / `bm_noaa.py` -> records the argv and writes real (tiny) GeoTIFFs at
+  * `blackmarble`     -> records the argv and writes real (tiny) GeoTIFFs at
     --output-path, exactly where and how upstream would, including the `-colored` companion
   * `bake_event.py`   -> runs FOR REAL under this interpreter, so the event tags on the
     finished products are genuine
@@ -33,8 +33,7 @@ import pytest
 rasterio = pytest.importorskip("rasterio")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SNPP_RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble", "run.sh")
-NOAA_RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble_noaa", "run.sh")
+RUN_SH = os.path.join(REPO_ROOT, "dps", "blackmarble", "run.sh")
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 
@@ -74,24 +73,9 @@ if [[ "${cmd}" == "python" && "${1:-}" == *bake_event.py ]]; then
   exec "${TEST_PYTHON}" "$@"
 fi
 
-# --- the Black Marble pipeline (one of our two shim entry points) ---
-# NEITHER platform calls the bare `blackmarble` console script any more: both go through a
-# shim that monkeypatches upstream first (bm_georef.py for the Landsat georeferencing fix on
-# both platforms, bm_noaa.py which additionally retargets to VJ146A2). The bare name is still
-# matched here so that a regression to it produces a readable assertion failure rather than
-# "stub: unhandled command".
-if [[ "${cmd}" == "blackmarble" \
-      || ( "${cmd}" == "python" && "${1:-}" == *bm_noaa.py ) \
-      || ( "${cmd}" == "python" && "${1:-}" == *bm_georef.py ) ]]; then
-  if [[ "${cmd}" == "python" ]]; then
-    case "${1}" in
-      *bm_noaa.py)   entry="bm_noaa" ;;
-      *bm_georef.py) entry="bm_georef" ;;
-    esac
-    shift
-  else
-    entry="blackmarble"
-  fi
+# --- the Black Marble pipeline: upstream's own console script ---
+if [[ "${cmd}" == "blackmarble" ]]; then
+  entry="blackmarble"
   printf '%s\n' "${entry} $*" >> "${PIPELINE_LOG}"
 
   if [[ "${PIPELINE_PRODUCES_NOTHING:-0}" == "1" ]]; then exit 0; fi
@@ -210,7 +194,7 @@ def run_job(tmp_path):
     pipeline_log = tmp_path / "pipeline.log"
     stub_log = tmp_path / "conda.log"
 
-    def _run(script=NOAA_RUN_SH, env=None, **inputs):
+    def _run(script=RUN_SH, env=None, **inputs):
         args = []
         for name, value in inputs.items():
             # value None => emit the bare presence form (`--wgs84`), which MAAP uses for
@@ -252,49 +236,70 @@ def defaults(**overrides):
     return base
 
 
-# --- which pipeline each algorithm runs --------------------------------------------
+def noaa(**overrides):
+    """Inputs for a NOAA-20 (VJ146A2) job, the product requested explicitly."""
+    return defaults(viirs_product="VJ146A2", **overrides)
 
 
-def test_noaa_job_runs_the_vj146a2_entry_point(run_job):
-    """The whole point of the NOAA algorithm: it must NOT call the bare upstream console
-    script, which would download Suomi-NPP and publish it under a NOAA-20 name."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+def snpp(**overrides):
+    """Inputs for a Suomi-NPP (VNP46A2) job."""
+    return defaults(viirs_product="VNP46A2", **overrides)
+
+
+def viirs_flag(call):
+    """The value run.sh passed upstream as --viirs-product (None if it passed none)."""
+    argv = call.split()
+    return argv[argv.index("--viirs-product") + 1] if "--viirs-product" in argv else None
+
+
+# --- which product each job runs ---------------------------------------------------
+
+
+@pytest.mark.parametrize("product", ["VJ146A2", "VNP46A2"])
+def test_upstream_is_called_with_the_requested_product(run_job, product):
+    """run.sh calls upstream's `blackmarble` console script directly and ALWAYS passes the
+    product -- upstream's default (VJ146A2) must never decide it, or a Suomi-NPP job would
+    silently download NOAA-20 data and publish it under Suomi-NPP tags."""
+    result = run_job(RUN_SH, **defaults(viirs_product=product))
     assert result.ok, result.output
     assert len(result.pipeline_calls) == 1
-    assert result.pipeline_calls[0].startswith("bm_noaa ")
+    assert result.pipeline_calls[0].split()[0] == "blackmarble"
+    assert viirs_flag(result.pipeline_calls[0]) == product
 
 
-def test_snpp_job_runs_the_georef_entry_point(run_job):
-    """Suomi-NPP must go through bm_georef.py, NOT the bare `blackmarble` console script.
+def test_vj146a2_is_the_default_product(run_job):
+    """viirs_product left at its form default -- MAAP may not re-emit it at all. The run.sh
+    default mirrors algorithm_config.yaml's, and is still passed upstream explicitly."""
+    result = run_job(RUN_SH, **defaults())
+    assert result.ok, result.output
+    assert viirs_flag(result.pipeline_calls[0]) == "VJ146A2"
+    assert result.some_products(product="hdnightlightsnoaa20")
 
-    Upstream misplaces the Landsat mosaic by ~3.6 km north-west; calling the console script
-    directly would skip the patch and publish a misregistered product that still passes
-    cog_validate, still has a correct transform, and still lands over the right city -- so
-    nothing downstream would catch it. See dps/blackmarble/bm_georef.py.
+
+def test_both_products_pass_identical_pipeline_flags(run_job):
+    """Only the product differs; every other CLI flag upstream sees is the same.
+
+    Both runs append to one pipeline log, so each run's call is the LAST line at the time.
     """
-    result = run_job(SNPP_RUN_SH, **defaults())
-    assert result.ok, result.output
-    assert len(result.pipeline_calls) == 1
-    assert result.pipeline_calls[0].startswith("bm_georef "), (
-        f"expected the georef shim, got {result.pipeline_calls[0]!r}"
-    )
+    noaa_call = run_job(RUN_SH, **noaa()).pipeline_calls[-1]
+    snpp_call = run_job(RUN_SH, **snpp()).pipeline_calls[-1]
+    assert noaa_call != snpp_call
 
+    def normalize(call):
+        argv = call.replace("hdnightlightsnoaa20", "hdnightlights").replace("VJ146A2", "VNP46A2").split()
+        argv[argv.index("--data-dir") + 1] = "<per-run scratch>"  # a fresh mktemp -d each run
+        return argv
 
-def test_both_jobs_pass_identical_pipeline_flags(run_job):
-    """Only the product differs; every CLI flag upstream sees is the same."""
-    noaa = run_job(NOAA_RUN_SH, **defaults()).pipeline_calls[0].split(" ", 1)[1]
-    snpp = run_job(SNPP_RUN_SH, **defaults()).pipeline_calls[0].split(" ", 1)[1]
-    normalize = lambda call: call.replace("hdnightlightsnoaa20", "hdnightlights")
-    assert normalize(noaa) == normalize(snpp)
+    assert normalize(noaa_call) == normalize(snpp_call)
 
 
 def test_noaa_job_reports_its_platform_in_the_log(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     assert "platform=noaa20 (VJ146A2)" in result.output
 
 
 def test_snpp_job_reports_its_platform_in_the_log(run_job):
-    result = run_job(SNPP_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **snpp())
     assert "platform=snpp (VNP46A2)" in result.output
 
 
@@ -302,7 +307,7 @@ def test_snpp_job_reports_its_platform_in_the_log(run_job):
 
 
 def test_noaa_products_land_in_their_own_product_folder(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     assert result.products(product="hdnightlightsnoaa20") == [
         f"hdnightlightsnoaa20_{SF_CORNERS}_{DATE}_day.tif",
         f"hdnightlightsnoaa20colored_{SF_CORNERS}_{DATE}_day.tif",
@@ -310,7 +315,7 @@ def test_noaa_products_land_in_their_own_product_folder(run_job):
 
 
 def test_snpp_products_keep_their_original_names(run_job):
-    result = run_job(SNPP_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **snpp())
     assert result.products(product="hdnightlights") == [
         f"hdnightlights_{SF_CORNERS}_{DATE}_day.tif",
         f"hdnightlightscolored_{SF_CORNERS}_{DATE}_day.tif",
@@ -320,8 +325,8 @@ def test_snpp_products_keep_their_original_names(run_job):
 def test_the_two_platforms_do_not_overwrite_each_other(run_job, tmp_path):
     """The collision guard, exercised for real: run both jobs into one HOME for one
     activation event and date, and assert four distinct products survive."""
-    run_job(SNPP_RUN_SH, **defaults())
-    result = run_job(NOAA_RUN_SH, **defaults())
+    run_job(RUN_SH, **snpp())
+    result = run_job(RUN_SH, **noaa())
 
     date_dir = os.path.join(result.home, "drcs_outputs", EVENT, DATE.replace("-", ""))
     found = sorted(
@@ -340,21 +345,21 @@ def test_the_two_platforms_do_not_overwrite_each_other(run_job, tmp_path):
 def test_the_colored_companion_is_renamed_off_upstreams_suffix(run_job):
     """Upstream writes `<stem>-colored.tif`, which leaves the date token no longer last.
     run.sh renames it onto the colored product's own stem."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     names = result.some_products(product="hdnightlightsnoaa20")
     assert not any("-colored" in name for name in names)
     assert all(name.endswith(f"_{DATE}_day.tif") for name in names)
 
 
 def test_the_date_directory_matches_the_requested_date(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults(date="2019-03-04"))
+    result = run_job(RUN_SH, **noaa(date="2019-03-04"))
     assert result.ok, result.output
     assert result.some_products(date="2019-03-04", product="hdnightlightsnoaa20")
 
 
 def test_products_are_copied_into_the_dps_output_dir(run_job):
     """_finalize.sh step 1 -- DPS uploads output/, so a product missing there is lost."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     copied = os.path.join(result.cwd, "output", DATE.replace("-", ""),
                           "hdnightlightsnoaa20")
     assert sorted(os.listdir(copied)) == [
@@ -368,7 +373,7 @@ def test_products_are_copied_into_the_dps_output_dir(run_job):
 
 def test_every_product_carries_the_noaa20_provenance_tags(run_job):
     """bake_event.py runs for real in this harness, so these are genuine GeoTIFF tags."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     directory = result.out_dir(product="hdnightlightsnoaa20")
 
     for name in result.some_products(product="hdnightlightsnoaa20"):
@@ -384,7 +389,7 @@ def test_every_product_carries_the_noaa20_provenance_tags(run_job):
 
 
 def test_snpp_products_are_tagged_suomi_npp(run_job):
-    result = run_job(SNPP_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **snpp())
     directory = result.out_dir(product="hdnightlights")
     with rasterio.open(os.path.join(directory, result.some_products()[0])) as src:
         tags = src.tags()
@@ -401,8 +406,8 @@ def test_a_later_run_does_not_re_tag_the_other_platforms_products(run_job):
     would relabel them VJ146A2/NOAA-20: wrong provenance on an already-correct raster,
     written by a green job.
     """
-    run_job(SNPP_RUN_SH, **defaults())
-    result = run_job(NOAA_RUN_SH, **defaults())   # same HOME, same event, same date
+    run_job(RUN_SH, **snpp())
+    result = run_job(RUN_SH, **noaa())   # same HOME, same event, same date
 
     expected = {"hdnightlights": ("VNP46A2", "Suomi-NPP"),
                 "hdnightlightsnoaa20": ("VJ146A2", "NOAA-20")}
@@ -429,6 +434,11 @@ def test_a_later_run_does_not_re_tag_the_other_platforms_products(run_job):
     (defaults(date="2023-13-01"), "expected YYYY-MM-DD"),
     (defaults(config="turbo"), "config 'turbo' is invalid"),
     (defaults(osm_source="osmnx"), "osm_source 'osmnx' is invalid"),
+    # upstream itself would accept these (it upper-cases), but the job form documents the
+    # exact codes, and an unknown product must never reach a download
+    (defaults(viirs_product="VNP46A1"), "viirs_product 'VNP46A1' is invalid"),
+    (defaults(viirs_product="vj146a2"), "viirs_product 'vj146a2' is invalid"),
+    (defaults(viirs_product="NOAA-20"), "viirs_product 'NOAA-20' is invalid"),
 ])
 def test_bad_input_fails_before_anything_runs(run_job, inputs, expected):
     """Fail fast means BEFORE conda: no secret lookup, no download, no partial output.
@@ -436,7 +446,7 @@ def test_bad_input_fails_before_anything_runs(run_job, inputs, expected):
     Asserting the stub was never invoked is what makes this a real check -- an error
     message alone would still pass if validation had moved after the download.
     """
-    result = run_job(NOAA_RUN_SH, **inputs)
+    result = run_job(RUN_SH, **inputs)
     assert not result.ok
     assert expected in result.output
     assert result.conda_calls == []
@@ -445,25 +455,25 @@ def test_bad_input_fails_before_anything_runs(run_job, inputs, expected):
 
 def test_noaa_job_rejects_a_date_before_the_vj146a2_mission_start(run_job):
     """VJ146A2 begins 2018-01-19; earlier dates return zero granules from Earthdata."""
-    result = run_job(NOAA_RUN_SH, **defaults(date="2017-06-15"))
+    result = run_job(RUN_SH, **noaa(date="2017-06-15"))
     assert not result.ok
     assert "before 2018-01-19" in result.output
     assert result.conda_calls == []
 
 
 def test_noaa_job_accepts_the_first_day_vj146a2_exists(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults(date="2018-01-19"))
+    result = run_job(RUN_SH, **noaa(date="2018-01-19"))
     assert result.ok, result.output
 
 
 def test_snpp_job_allows_dates_the_noaa_job_rejects(run_job):
     """The two floors are genuinely different gates, not one shared constant."""
-    result = run_job(SNPP_RUN_SH, **defaults(date="2015-06-15"))
+    result = run_job(RUN_SH, **snpp(date="2015-06-15"))
     assert result.ok, result.output
 
 
 def test_snpp_job_rejects_a_date_before_its_own_mission_start(run_job):
-    result = run_job(SNPP_RUN_SH, **defaults(date="2011-06-15"))
+    result = run_job(RUN_SH, **snpp(date="2011-06-15"))
     assert not result.ok
     assert "before 2012-01-19" in result.output
 
@@ -474,22 +484,21 @@ def test_snpp_job_rejects_a_date_before_its_own_mission_start(run_job):
 def test_snpp_job_warns_past_the_sunset_and_names_the_alternative(run_job):
     """disasters-portal#365: Suomi-NPP delivery ceases 2026-11-01. The archive stays
     readable, so this WARNS and still runs -- it must not fail a historical activation."""
-    result = run_job(SNPP_RUN_SH, **defaults(date="2026-12-01"))
+    result = run_job(RUN_SH, **snpp(date="2026-12-01"))
     assert result.ok, result.output
     assert "2026-11-01" in result.output
-    assert "disasters-blackmarble-noaa-process" in result.output
-    assert "VJ146A2" in result.output
+    assert "viirs_product=VJ146A2" in result.output
 
 
 def test_snpp_job_does_not_warn_before_the_sunset(run_job):
-    result = run_job(SNPP_RUN_SH, **defaults(date="2026-10-31"))
+    result = run_job(RUN_SH, **snpp(date="2026-10-31"))
     assert result.ok, result.output
-    assert "disasters-blackmarble-noaa-process" not in result.output
+    assert "viirs_product=VJ146A2" not in result.output
 
 
 def test_noaa_job_never_warns_about_the_sunset(run_job):
     """NOAA-20 is unaffected by the Suomi-NPP outage; warning here would be noise."""
-    result = run_job(NOAA_RUN_SH, **defaults(date="2026-12-01"))
+    result = run_job(RUN_SH, **noaa(date="2026-12-01"))
     assert result.ok, result.output
     assert "ceases" not in result.output
 
@@ -498,19 +507,19 @@ def test_noaa_job_never_warns_about_the_sunset(run_job):
 
 
 def test_wgs84_is_off_by_default(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     assert "--wgs84" not in result.pipeline_calls[0]
 
 
 def test_wgs84_value_form_is_forwarded(run_job):
     """MAAP may send a boolean as `--flag true`..."""
-    result = run_job(NOAA_RUN_SH, **defaults(wgs84="true"))
+    result = run_job(RUN_SH, **noaa(wgs84="true"))
     assert result.ok, result.output
     assert "--wgs84" in result.pipeline_calls[0]
 
 
 def test_wgs84_value_false_is_not_forwarded(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults(wgs84="false"))
+    result = run_job(RUN_SH, **noaa(wgs84="false"))
     assert result.ok, result.output
     assert "--wgs84" not in result.pipeline_calls[0]
 
@@ -518,7 +527,7 @@ def test_wgs84_value_false_is_not_forwarded(run_job):
 def test_bare_wgs84_flag_is_accepted(run_job):
     """...or as a bare `--flag`. The value-form parser must not swallow the NEXT argument
     when the value is absent -- doing so would silently drop whatever followed it."""
-    result = run_job(NOAA_RUN_SH, wgs84=None, **defaults())
+    result = run_job(RUN_SH, wgs84=None, **noaa())
     assert result.ok, result.output
     assert "--wgs84" in result.pipeline_calls[0]
     assert f"--date {DATE}" in result.pipeline_calls[0]
@@ -526,13 +535,13 @@ def test_bare_wgs84_flag_is_accepted(run_job):
 
 @pytest.mark.parametrize("preset", ["fast", "default", "high_quality"])
 def test_config_preset_is_forwarded(run_job, preset):
-    result = run_job(NOAA_RUN_SH, **defaults(config=preset))
+    result = run_job(RUN_SH, **noaa(config=preset))
     assert f"--config {preset}" in result.pipeline_calls[0]
 
 
 def test_unrecognized_arguments_are_ignored_with_a_warning(run_job):
     """MAAP has been known to emit extra flags; a job must not die on one."""
-    result = run_job(NOAA_RUN_SH, **defaults(some_future_input="x"))
+    result = run_job(RUN_SH, **noaa(some_future_input="x"))
     assert result.ok, result.output
     assert "ignoring unrecognized arg" in result.output
 
@@ -541,7 +550,7 @@ def test_unrecognized_arguments_are_ignored_with_a_warning(run_job):
 
 
 def test_the_token_is_fetched_from_maap_secrets_by_name(run_job):
-    result = run_job(NOAA_RUN_SH, **defaults(earthdata_secret_name="MY_EDL_TOKEN"))
+    result = run_job(RUN_SH, **noaa(earthdata_secret_name="MY_EDL_TOKEN"))
     assert result.ok, result.output
     assert any("_get_secret.py MY_EDL_TOKEN" in call for call in result.conda_calls)
 
@@ -549,7 +558,7 @@ def test_the_token_is_fetched_from_maap_secrets_by_name(run_job):
 def test_the_token_never_appears_in_the_job_log(run_job):
     """The reason the token is a MAAP secret and not a job input. A DPS job log is
     readable by anyone who can see the job."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     assert result.ok, result.output
     assert FAKE_TOKEN not in result.output
 
@@ -557,8 +566,8 @@ def test_the_token_never_appears_in_the_job_log(run_job):
 def test_an_ambient_token_skips_the_maap_lookup(run_job):
     """The escape hatch that makes tests/e2e (and a laptop run) possible. Inert in DPS,
     where nothing sets the variable."""
-    result = run_job(NOAA_RUN_SH, env={"EARTHDATA_TOKEN": "ambient-token"},
-                     **defaults())
+    result = run_job(RUN_SH, env={"EARTHDATA_TOKEN": "ambient-token"},
+                     **noaa())
     assert result.ok, result.output
     assert not any("_get_secret.py" in call for call in result.conda_calls)
     assert "MAAP secret lookup skipped" in result.output
@@ -570,19 +579,19 @@ def test_an_ambient_token_skips_the_maap_lookup(run_job):
 
 def test_a_pipeline_that_writes_nothing_fails_the_job(run_job):
     """Never a green job with no product. Upstream exits 0 on some empty cases."""
-    result = run_job(NOAA_RUN_SH, env={"PIPELINE_PRODUCES_NOTHING": "1"}, **defaults())
+    result = run_job(RUN_SH, env={"PIPELINE_PRODUCES_NOTHING": "1"}, **noaa())
     assert not result.ok
     assert "produced no COG" in result.output
     assert SF_BBOX in result.output and DATE in result.output
 
 
 def test_a_failing_pipeline_fails_the_job(run_job):
-    result = run_job(NOAA_RUN_SH, env={"PIPELINE_FAILS": "1"}, **defaults())
+    result = run_job(RUN_SH, env={"PIPELINE_FAILS": "1"}, **noaa())
     assert not result.ok
 
 
 def test_no_products_are_published_when_the_pipeline_fails(run_job):
-    result = run_job(NOAA_RUN_SH, env={"PIPELINE_FAILS": "1"}, **defaults())
+    result = run_job(RUN_SH, env={"PIPELINE_FAILS": "1"}, **noaa())
     assert result.products(product="hdnightlightsnoaa20") == []
 
 
@@ -592,16 +601,17 @@ def test_no_products_are_published_when_the_pipeline_fails(run_job):
 def test_the_download_scratch_dir_is_removed(run_job):
     """Raw .h5/.tif downloads are large; leaving them fills the worker's disk. They live
     OUTSIDE OUT_HOME so only finished COGs reach _finalize.sh."""
-    result = run_job(NOAA_RUN_SH, **defaults())
+    result = run_job(RUN_SH, **noaa())
     call = result.pipeline_calls[0].split()
     data_dir = call[call.index("--data-dir") + 1]
     assert not os.path.exists(data_dir)
     assert os.path.commonpath([data_dir, result.home]) != result.home
 
 
-def test_the_platform_env_var_is_not_a_job_input(run_job):
-    """Passing --BM_PLATFORM must not be able to turn the NOAA job into a Suomi-NPP one."""
-    result = run_job(NOAA_RUN_SH, **defaults(BM_PLATFORM="snpp"))
+def test_an_ambient_bm_platform_cannot_override_the_requested_product(run_job):
+    """BM_PLATFORM used to be the env var that picked the satellite. It is now derived from
+    viirs_product inside run.sh, so a stray value in the environment must not leak in."""
+    result = run_job(RUN_SH, env={"BM_PLATFORM": "snpp"}, **noaa())
     assert result.ok, result.output
-    assert result.pipeline_calls[0].startswith("bm_noaa ")
+    assert viirs_flag(result.pipeline_calls[0]) == "VJ146A2"
     assert result.some_products(product="hdnightlightsnoaa20")

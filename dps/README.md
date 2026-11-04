@@ -9,7 +9,8 @@ shared plumbing.
 **[`docs/DPS.md`](../docs/DPS.md) is the full reference** for the non-obvious details
 (the OGC/CWL schema quirks, the boolean default-mirroring rule, the locked S3
 destination, MAAP Settings). This README is the working guide: what the pattern is
-and how to add to it.
+and how to add to it. **[`docs/DPS_WORKFLOW.md`](../docs/DPS_WORKFLOW.md)** walks the whole
+author -> deploy -> run loop as diagrams with the command for every step.
 
 ## The model
 
@@ -58,16 +59,17 @@ dates. Discovery lives ONLY here — the per-sensor `process_<sensor>` CLIs no l
 carry a `--list_dates` flag. It has **no `_finalize.sh` step** (no COG; only an
 `available_<sensor>_dates.csv` artifact). See `docs/DPS.md` "Scene-date discovery".
 
-A second deviates in a different way: **`blackmarble/`** (registered as `black-marble`)
+A second deviates in a different way: **`blackmarble/`** (registered as `disasters-blackmarble-process`)
 wraps the **VEDA Black Marble** nighttime-lights pipeline, which is **not code in this
 repo**. It is maintained upstream by NASA-IMPACT at
 `github.com/NASA-IMPACT/veda-black-marble` and is **pip-installed into the DPS worker
 env** by a `git+https://…` entry in `dps/environment.yml` (pinned to a commit SHA until
 upstream tags a release). Everything under `dps/blackmarble/` is a thin wrapper that
 follows the normal run.sh contract and the shared `_finalize.sh` output flow, but it
-(a) is **bbox + date** driven (downloads VIIRS VNP46A2 from Earthdata, Landsat from a
+(a) is **bbox + date** driven (downloads VIIRS nighttime lights from Earthdata -- NOAA-20
+VJ146A2 by default, Suomi-NPP VNP46A2 via the `viirs_product` input -- Landsat from a
 STAC catalog, and OSM roads — no vendor-bucket file input), (b) calls upstream's own
-**`blackmarble` console script** unmodified, and (c) writes its **own** COG (not via
+**`blackmarble` console script** unmodified, always passing `--viirs-product` explicitly, and (c) writes its **own** COG (not via
 `shared_utils.convert_to_cog`). Its NASA Earthdata token comes from a **MAAP secret** at
 run time (default name `EARTHDATA_TOKEN`, via `dps/_get_secret.py`), never a job input.
 

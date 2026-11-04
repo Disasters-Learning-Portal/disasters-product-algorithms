@@ -4,8 +4,8 @@ algorithm_name: disasters-blackmarble-process
 algorithm_version: dev
 algorithm_description: >-
   VEDA Black Marble nighttime-lights pipeline. For a WGS84 bbox + date it downloads
-  VIIRS VNP46A2 nighttime lights (NASA Earthdata), Landsat scenes (STAC), and OSM
-  road networks, then fuses them into an urban-focused Cloud Optimized GeoTIFF
+  VIIRS nighttime lights (NASA Earthdata; NOAA-20 VJ146A2 by default, or Suomi-NPP
+  VNP46A2 via the viirs_product input), Landsat scenes (STAC), and OSM road networks, then fuses them into an urban-focused Cloud Optimized GeoTIFF
   (inferno-colormap RGB). The NASA Earthdata token is read from a MAAP secret at run
   time (default name EARTHDATA_TOKEN) -- it is NOT a job input, so it never appears
   in the job parameters or log. Products publish to nasa-disasters-staging.
@@ -26,7 +26,7 @@ outdir_max: 20
 author: NASA Disasters
 contributor: NASA Disasters
 license: Apache-2.0
-release_notes: DPS integration for VEDA Black Marble nighttime-lights COG generation (vendored pipeline; Earthdata token via MAAP secrets).
+release_notes: Upstream veda-black-marble 114fa7f (Landsat georeferencing fixed upstream; no shims). New viirs_product input (VJ146A2 NOAA-20 default | VNP46A2 Suomi-NPP) replaces the separate disasters-blackmarble-noaa-process algorithm. Earthdata token via MAAP secrets.
 citation: NASA Disasters Program
 keywords: black-marble, viirs, nighttime-lights, landsat, osm, cog, disasters, veda
 # Inputs: flat list, each {name, label, doc, type, default}. Booleans arrive as a
@@ -50,6 +50,11 @@ inputs:
     doc: "Target date YYYY-MM-DD. Needs VIIRS + Landsat coverage near this date. Pre-filled with a known-good test date."
     type: string
     default: "2023-06-15"
+  - name: viirs_product
+    label: VIIRS product
+    doc: "VIIRS nighttime-lights product. VJ146A2 = NOAA-20 (default; data from 2018-01-19). VNP46A2 = Suomi-NPP (data from 2012-01-19; product delivery ceased 2026-11-01, archive still served) -- use it for activations before 2018-01-19. Products land in hdnightlightsnoaa20/ (VJ146A2) or hdnightlights/ (VNP46A2)."
+    type: string
+    default: "VJ146A2"
   - name: config
     label: Quality preset
     doc: "Processing preset: fast (quick smoke, minimal enhancements) | default | high_quality. Default fast."

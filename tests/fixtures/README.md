@@ -32,7 +32,7 @@ untiled, so it genuinely fails validation with
 | File | Profile | What it pins |
 |---|---|---|
 | `gaia_atlanta_sample.tif` | 256², 1x float32, nodata -9999 | GAIA Web-Mercator crop; `summarize_raster` + `bake_event_metadata` stats |
-| `blackmarble_sf_misregistered_crop.tif` | 3x uint8, unnamed local Albers | Frozen evidence of the upstream Landsat georeferencing defect (`dps/blackmarble/bm_georef.py`) |
+| `blackmarble_sf_misregistered_crop.tif` | 3x uint8, unnamed local Albers | Frozen evidence of the upstream Landsat georeferencing defect (fixed upstream in veda-black-marble `114fa7f`; `.clinerules.md` rule 46) |
 | `umbra_guam_sar_db_crop.tif` | 256², 1x float32, EPSG:4326, **no nodata**, **rotated** | SAR dB where 0 dB is real data. Source carries genuine geotransform rotation **and a negative x-scale** — a north-up assumption breaks on it |
 | `iceye_guam_sar_db_crop.tif` | 256², 1x float32, EPSG:4326, **no nodata** | float32 SAR with no nodata tag → the dtype auto-detect path |
 | `satellogic_truecolor_nodata0_crop.tif` | 256², 3x uint8, EPSG:32655, nodata 0 | `is_bare_8bit_imagery` says "no nodata" while the source tag says `0` — pins which wins |

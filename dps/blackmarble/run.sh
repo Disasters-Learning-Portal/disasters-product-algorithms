@@ -7,18 +7,16 @@ set -euo pipefail
 # lights (Earthdata), Landsat scenes (STAC), and OSM roads, then fuses them into
 # an urban-focused Cloud Optimized GeoTIFF.
 #
-# TWO PLATFORMS, ONE ENGINE. This script serves both registered algorithms,
-# selected by the BM_PLATFORM environment variable (NOT a job input -- the choice
-# is a property of which algorithm you submitted, not something to get wrong at
-# submit time):
+# TWO VIIRS PRODUCTS, ONE ALGORITHM (disasters-blackmarble-process), chosen per job by
+# the `viirs_product` input:
 #
-#   BM_PLATFORM=snpp    (default) Suomi-NPP VNP46A2 -- disasters-blackmarble-process
-#   BM_PLATFORM=noaa20            NOAA-20   VJ146A2 -- disasters-blackmarble-noaa-process
-#                                 entered through dps/blackmarble_noaa/run.sh
+#   VJ146A2  (default) NOAA-20   -- data from 2018-01-19
+#   VNP46A2            Suomi-NPP -- data from 2012-01-19; delivery ceased 2026-11-01
+#                      (disasters-portal#365), archive still served
 #
-# Suomi-NPP data product delivery ceases 2026-11-01 (disasters-portal#365), which is
-# why the NOAA-20 twin exists. Everything that differs between the two lives in the
-# sourced platform.sh table; the pipeline itself is identical.
+# Everything that differs between the two (product folder, date floor, SOURCE tag) lives
+# in the sourced platform.sh table; the pipeline itself is identical. Until issue #186
+# the NOAA-20 product was a second registered algorithm wrapping this script.
 #
 # The pipeline is NOT part of this repo. It is the upstream, NASA-IMPACT-maintained
 # package `blackmarble` (github.com/NASA-IMPACT/veda-black-marble), pip-installed into
@@ -42,9 +40,8 @@ set -euo pipefail
 # Output flow handled by dps/_finalize.sh: ~/drcs_outputs -> output/ -> S3
 # (nasa-disasters-staging, via MAAP workspace credentials) -> delete COG.
 
-# basedir resolves through the exec in dps/blackmarble_noaa/run.sh (that wrapper execs
-# THIS path, so $0 is this file either way) -- so ../_validate.sh, ../_finalize.sh and
-# the sibling platform.sh/naming.sh all resolve for both algorithms.
+# basedir: ../_validate.sh, ../_finalize.sh and the sibling platform.sh/naming.sh resolve
+# relative to this file.
 basedir=$(dirname "$(readlink -f "$0")")
 mkdir -p output
 
@@ -55,9 +52,6 @@ source "${basedir}/../_validate.sh"
 # Sourced before validation because the date floor comes from it.
 source "${basedir}/platform.sh"
 
-BM_PLATFORM="${BM_PLATFORM:-snpp}"
-validate_in_set BM_PLATFORM "${BM_PLATFORM}" "$(bm_platforms)"
-
 # --- defaults (boolean defaults MIRROR algorithm_config.yaml so an input left at
 # its form default round-trips correctly whether or not MAAP re-emits the flag;
 # --flag or --flag true|false overrides) ---
@@ -66,6 +60,9 @@ validate_in_set BM_PLATFORM "${BM_PLATFORM}" "$(bm_platforms)"
 ACTIVATION_EVENT="202601_KyleWx_US"
 BBOX="-122.55,37.69,-122.32,37.81"
 DATE="2023-06-15"
+# VIIRS product short name; MIRRORS the algorithm_config.yaml default. NOAA-20 because
+# Suomi-NPP delivery ceased 2026-11-01.
+VIIRS_PRODUCT="VJ146A2"
 CONFIG="fast"
 OSM_SOURCE="overpass"
 WGS84="false"
@@ -95,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --activation_event)       ACTIVATION_EVENT="$2"; shift 2;;
     --bbox)                   BBOX="$2"; shift 2;;
     --date)                   DATE="$2"; shift 2;;
+    --viirs_product)          VIIRS_PRODUCT="$2"; shift 2;;
     --config)                 CONFIG="$2"; shift 2;;
     --osm_source)             OSM_SOURCE="$2"; shift 2;;
     --earthdata_secret_name)  EARTHDATA_SECRET_NAME="$2"; shift 2;;
@@ -107,11 +105,14 @@ done
 BBOX="${BBOX//[\"\']/}"
 CONFIG="${CONFIG//[\"\']/}"
 OSM_SOURCE="${OSM_SOURCE//[\"\']/}"
+VIIRS_PRODUCT="${VIIRS_PRODUCT//[\"\']/}"
 
 # --- input validation (fail fast with a clear message; nothing has run yet) ---
 validate_activation_event "${ACTIVATION_EVENT}"
 validate_bbox "${BBOX}"
 validate_regex date "${DATE}" '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$' 'YYYY-MM-DD'
+validate_in_set viirs_product "${VIIRS_PRODUCT}" "$(bm_viirs_products)"
+BM_PLATFORM="$(bm_platform_for_short_name "${VIIRS_PRODUCT}")"
 # A date before the product's mission start returns ZERO granules from Earthdata, which
 # only surfaces much later (and after a successful login) as an obscure failure.
 validate_date_not_before date "${DATE}" "$(bm_platform_min_date "${BM_PLATFORM}")"
@@ -120,11 +121,11 @@ validate_in_set osm_source "${OSM_SOURCE}" "overpass layercake"
 
 # Suomi-NPP delivery sunset (disasters-portal#365). WARN, never fail: the archive stays
 # readable, so a historical activation is perfectly valid -- it is FORWARD processing that
-# stops. Only a date past the sunset is worth flagging, and only for the Suomi-NPP job.
+# stops. Only a date past the sunset is worth flagging, and only for the Suomi-NPP product.
 if [[ "${BM_PLATFORM}" == "snpp" && "${DATE}" > "${BM_SNPP_SUNSET_DATE}" ]]; then
   echo "WARN: date ${DATE} is after ${BM_SNPP_SUNSET_DATE}, when Suomi-NPP product delivery ceases." >&2
-  echo "WARN: $(bm_platform_short_name snpp) may have no coverage for this date. Submit the NOAA-20 algorithm" >&2
-  echo "WARN: (disasters-blackmarble-noaa-process, $(bm_platform_short_name noaa20)) instead; it is unaffected." >&2
+  echo "WARN: $(bm_platform_short_name snpp) may have no coverage for this date. Resubmit with" >&2
+  echo "WARN: viirs_product=$(bm_platform_short_name noaa20) (NOAA-20) instead; it is unaffected." >&2
 fi
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
@@ -142,8 +143,8 @@ mkdir -p "${OUT_HOME}"
 # The filename convention itself (and why it is shaped that way) lives in the sourced
 # naming.sh, so the test suite can assert it -- same split as dps/_validate.sh.
 #
-# The product token is PER PLATFORM (hdnightlights vs hdnightlightsnoaa20) so that running
-# both algorithms for the same activation event + date produces two products side by side
+# The product token is PER VIIRS PRODUCT (hdnightlights vs hdnightlightsnoaa20) so that
+# running both products for the same activation event + date produces two side by side
 # instead of one silently overwriting the other.
 PRODUCT="$(bm_platform_product "${BM_PLATFORM}")"
 PRODUCT_COLORED="${PRODUCT}colored"
@@ -209,24 +210,14 @@ bm_args=(
 )
 [[ "${WGS84}" == "true" ]] && bm_args+=( --wgs84 )
 
-# WHICH ENTRY POINT: NEITHER platform runs upstream's `blackmarble` console script directly
-# any more -- both go through a shim that monkeypatches upstream first, then invokes that
-# SAME upstream CLI unmodified.
-#
-#   bm_georef.py  BOTH platforms. Fixes the Landsat mosaic georeferencing: upstream renders
-#                 band tiles at MOSAIC coordinates into a WINDOW-sized array and then pastes
-#                 them at the window offset, applying that offset twice, which puts every
-#                 product ~3.6 km north-west of truth. See the module docstring.
-#   bm_noaa.py    NOAA-20 only. Sets the VIIRS product to VJ146A2 -- upstream hardcodes
-#                 VNP46A2 and exposes no flag for it. It applies the georef patch too, so
-#                 the two shims compose rather than one shadowing the other.
-#
-# The flags in bm_args are identical either way; only the product being downloaded differs.
-if [[ "${BM_PLATFORM}" == "noaa20" ]]; then
-  conda run --live-stream --name disasters_dps python "${basedir}/bm_noaa.py" "${bm_args[@]}"
-else
-  conda run --live-stream --name disasters_dps python "${basedir}/bm_georef.py" "${bm_args[@]}"
-fi
+# The VIIRS product is ALWAYS passed explicitly, for both platforms. Upstream's default
+# (VJ146A2 since veda-black-marble 114fa7f) must never decide it: if it did, a Suomi-NPP
+# run would download NOAA-20 granules, publish them under hdnightlights/ with Suomi-NPP
+# provenance tags, and exit 0 -- a wrong product that nothing downstream can detect.
+# (Upstream 114fa7f also fixed the ~3.6 km Landsat misregistration, so the two monkeypatch
+# shims that used to sit here are gone -- issue #186, .clinerules.md rules 44 + 46.)
+bm_args+=( --viirs-product "${VIIRS_PRODUCT}" )
+conda run --live-stream --name disasters_dps blackmarble "${bm_args[@]}"
 
 # Fail fast if the pipeline produced no COG (rather than silently "succeeding").
 shopt -s nullglob

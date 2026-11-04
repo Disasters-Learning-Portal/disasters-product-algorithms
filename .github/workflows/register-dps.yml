@@ -55,7 +55,6 @@ on:
           - sentinel2
           - sentinel2_odr
           - blackmarble
-          - blackmarble_noaa
         default: capella
       register_to_maap:
         # Rendered as a checkbox. Default OFF so a run NEVER touches MAAP unless

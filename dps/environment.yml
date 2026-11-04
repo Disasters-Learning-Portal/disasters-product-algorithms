@@ -31,7 +31,7 @@ dependencies:
   # match whatever `gdal`/`libgdal-core` conda resolves (plugin ABI is pinned to
   # the core GDAL build, so do NOT hard-pin a version here).
   - libgdal-jp2openjpeg
-  # Same plugin-split story for Black Marble: VIIRS VNP46A2 granules ship as HDF5
+  # Same plugin-split story for Black Marble: VIIRS VNP46A2 / VJ146A2 granules ship as HDF5
   # (.h5), and the HDF5 driver is ALSO a separate plugin package. Without it,
   # upstream blackmarble's convert_to_tiff() dies on the first granule with
   # "not recognized as being in a supported file format. It could have been
@@ -122,4 +122,4 @@ dependencies:
     # PyPI/conda) -- a one-line change.
     # A VCS URL is required, NOT a bare `blackmarble` name: that name on PyPI belongs to
     # an unrelated World Bank package.
-    - git+https://github.com/NASA-IMPACT/veda-black-marble@20e7d782a6c826d19db73e35d501a17a25609e56
+    - git+https://github.com/NASA-IMPACT/veda-black-marble@114fa7ffd3fc85bda4d591ef3147aac1cf28d7d8

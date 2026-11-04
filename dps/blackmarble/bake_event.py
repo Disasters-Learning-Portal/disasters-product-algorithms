@@ -50,10 +50,10 @@ The `crs` GeoTIFF tag is overwritten too. rio-cogeo copies the source's tags and
 applies `additional_cog_metadata` on top, so without that the product would advertise
 upstream's stale `crs=+proj=aea +lon_0=...` string while the raster is actually Web Mercator.
 
-NOTE the separate defect this does NOT fix: upstream misplaces the Landsat mosaic by
-~3.6 km to the north-west. That is corrected at the source by dps/blackmarble/bm_georef.py,
-before the COG is ever written. Reprojecting a misregistered raster would only have
-relocated the error.
+NOTE the separate defect this never fixed: upstream misplaced the Landsat mosaic by
+~3.6 km to the north-west. That is fixed at the source, upstream, since veda-black-marble
+114fa7f (the pin in dps/environment.yml) -- before the COG is ever written. Reprojecting
+a misregistered raster would only have relocated the error.
 """
 
 import argparse

@@ -23,7 +23,26 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "pyspectral_selfcheck.py"
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "tools" / "pyspectral_selfcheck.py"
+
+
+@pytest.mark.parametrize("dockerfile", ["image/Dockerfile", "dps/Dockerfile"])
+def test_build_context_ships_the_script(dockerfile):
+    """Each Dockerfile RUNS the script, so its build context must include it.
+
+    BuildKit reads ``<dockerfile>.dockerignore`` INSTEAD of the root
+    ``.dockerignore`` when one exists. ``dps/Dockerfile.dockerignore`` is an
+    allowlist that never re-included ``tools/``, so from 31d19dd every DPS image
+    build -- i.e. every algorithm registration -- died with "can't open file
+    .../tools/pyspectral_selfcheck.py".
+    """
+    assert "tools/pyspectral_selfcheck.py" in (REPO / dockerfile).read_text()
+    own = REPO / f"{dockerfile}.dockerignore"
+    ignore = own if own.exists() else REPO / ".dockerignore"
+    lines = [ln.strip() for ln in ignore.read_text().splitlines()]
+    assert "!tools/pyspectral_selfcheck.py" in lines, (
+        f"{ignore.relative_to(REPO)} must un-ignore tools/pyspectral_selfcheck.py")
 
 
 def _block_network_source():

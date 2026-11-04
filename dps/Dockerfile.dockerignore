@@ -37,6 +37,12 @@
 # 4) Keep the dep source-of-truth (referenced by docs/tooling; cheap to ship).
 !dev-conda-deps.txt
 
+# 4b) The pyspectral offline gate. dps/Dockerfile's smoke check RUNS this file at
+#     build time, so without it every DPS image build fails with "can't open file
+#     .../tools/pyspectral_selfcheck.py" -- for every algorithm, not just S2.
+#     Mirrors the same exception in the repo-root .dockerignore (hub image).
+!tools/pyspectral_selfcheck.py
+
 # 5) Re-exclude noise that lives INSIDE the re-included trees above, so it never
 #    rides along into the image (stale versions / churn / cache-busting).
 #    These `**` patterns re-ignore matches even under `!src/` and `!dps/`.
@@ -53,6 +59,6 @@
 # NOTE ON WHAT STAYS DROPPED (never un-ignored, so excluded):
 #   .git/  .github/  .claude/  .cline/  .cursor/  .clinerules.md
 #   .pre-commit-config.yaml  .playwright-mcp/  .gitignore  .gitattributes
-#   notebooks/  docs/  tests/  tools/  bin/  image/  dist/  build/
+#   notebooks/  docs/  tests/  tools/ (except 4b)  bin/  image/  dist/  build/
 #   .venv/ venv/ env/  .idea/ .vscode/
 # None of these are needed to build the package or run the DPS CLIs.

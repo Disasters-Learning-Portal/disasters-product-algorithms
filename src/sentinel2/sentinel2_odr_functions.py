@@ -16,7 +16,6 @@ import json
 import logging
 import math
 import os
-import re
 import shutil
 import tempfile
 import zipfile
@@ -29,7 +28,7 @@ import requests
 from botocore import UNSIGNED
 from botocore.client import Config
 from pystac_client import Client
-from rasterio.enums import Resampling
+from rasterio.enums import ColorInterp, Resampling
 from rasterio.merge import merge
 from rasterio.session import AWSSession
 from rasterio.warp import calculate_default_transform, reproject
@@ -65,6 +64,12 @@ def _session(unsigned=False):
 # for a real activation footprint, and hitting it prints a warning
 # rather than failing, so a legitimate large job is not blocked.
 MAX_SEARCH_ITEMS = 200
+
+# Newest national CDL published by USDA NASS (the 2025 CDL, released Feb
+# 2026). Bump each February when the next year's CDL comes out. Used both
+# where the scene year is chosen and inside the CDL downloader, which
+# re-clamps its argument -- changing only one of them has no effect.
+LATEST_CDL_YEAR = 2025
 
 # ---------------------------------------------------------------------
 # Algorithm configuration
@@ -473,25 +478,15 @@ def _build_output_filename(
 
         Plain:              SAT_LEVEL_product_TILE_TIMESTAMP.tif
         Masked:              SAT_LEVEL_product_TILE_masked_TIMESTAMP.tif
-        Merged:              SAT_LEVEL_product_ORBIT_merged_DATE_day.tif
-        Merged and masked:   SAT_LEVEL_product_ORBIT_merged_masked_DATE_day.tif
-
-    A merged mosaic follows the repo convention (.clinerules.md rule 27):
-    DATE only, then `_day` -- it spans several tile sensing times, so no
-    single time is true of it (the old name carried the first tile's time,
-    chosen by item-id order). DATE is the pass's own sensing-start date
-    from the datatake id, the same date ESA puts in its product name, so a
-    pass straddling 00:00 UTC still gets one date. ORBIT is ESA's relative
-    orbit (`R112`, from `s2:product_uri`): with the time gone, it is what
-    keeps two passes of one satellite on one day (high latitudes) from
-    writing the same file.
+        Merged:              SAT_LEVEL_product_merged_TIMESTAMP.tif
+        Merged and masked:   SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
 
     Parameters
     ----------
     item : pystac.Item
         The STAC item supplying SAT/LEVEL/timestamp. When merged=True,
-        pass any item of the acquisition being merged -- the orbit and
-        date are properties of the pass, not of the tile.
+        pass the first item (by sort order) among the tiles being
+        merged.
 
     algorithm_name : str
         Algorithm/product name as used in the algorithm catalog, e.g.
@@ -522,142 +517,19 @@ def _build_output_filename(
     """
     sat, level, tile = _get_sat_level_tile(item)
     product = _product_token(algorithm_name)
-
-    variant_token = f"_{variant}" if variant else ""
-    masked_token = "_masked" if masked else ""
-
-    if merged:
-        orbit = _orbit_token(item)
-        orbit_token = f"_{orbit}" if orbit else ""
-        return (
-            f"{sat}_{level}_{product}{variant_token}{orbit_token}"
-            f"_merged{masked_token}_{_acquisition_date(item)}_day.tif"
-        )
-
     timestamp = item.datetime.replace(microsecond=0).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
+    variant_token = f"_{variant}" if variant else ""
+    tile_token = "" if merged else f"_{tile}"
+    merged_token = "_merged" if merged else ""
+    masked_token = "_masked" if masked else ""
+
     return (
-        f"{sat}_{level}_{product}{variant_token}_{tile}"
-        f"{masked_token}_{timestamp}.tif"
+        f"{sat}_{level}_{product}{variant_token}{tile_token}"
+        f"{merged_token}{masked_token}_{timestamp}.tif"
     )
-
-
-def _orbit_token(item):
-    """
-    ESA relative orbit of the item's pass, e.g. "R112".
-
-    Read from `s2:product_uri` (the ESA product name, `..._N0511_R112_T...`),
-    else `sat:relative_orbit`. Falls back to the ABSOLUTE orbit embedded in
-    `s2:datatake_id` ("A002799") -- still unique per pass -- and finally to
-    nothing, with a warning.
-    """
-    match = re.search(r"_R(\d{3})_", item.properties.get("s2:product_uri", ""))
-    if match:
-        return f"R{match.group(1)}"
-    relative = item.properties.get("sat:relative_orbit")
-    if relative is not None:
-        return f"R{int(relative):03d}"
-    match = re.search(r"_(\d{6})_N\d{2}\.\d{2}$", item.properties.get("s2:datatake_id", ""))
-    if match:
-        return f"A{match.group(1)}"
-    print(f"WARNING: no orbit metadata on {item.id}; merged name has no orbit token.")
-    return ""
-
-
-def _acquisition_date(item):
-    """
-    YYYY-MM-DD of the pass: the sensing-start date in `s2:datatake_id`
-    ("GS2C_20250319T171041_..."), else the item's own UTC date.
-    """
-    match = re.match(r"GS2[A-Z]_(\d{4})(\d{2})(\d{2})T", item.properties.get("s2:datatake_id", ""))
-    if match:
-        return "-".join(match.groups())
-    return item.datetime.strftime("%Y-%m-%d")
-
-
-def acquisition_key(item):
-    """
-    Identify the satellite pass (datatake) a STAC item belongs to.
-
-    `--merge` mosaics one ACQUISITION, never several: tiles from different
-    passes differ in date, illumination and atmosphere, and a first-wins
-    mosaic across them silently stitches pre-event pixels into a post-event
-    product. A datatake is the natural unit -- one pass of one satellite --
-    and is safer than the UTC calendar date, which can split a single pass:
-    Sentinel-2 crosses ~10:30 local solar time, i.e. ~00:00 UTC near 157 E
-    (eastern Australia: real passes at 23:54 and 00:04 UTC).
-
-    `s2:datatake_id` (e.g. "GS2A_20210715T165901_031669_N05.00") ends in the
-    processing baseline. That suffix is DROPPED: Earth Search lists the same
-    acquisition at more than one baseline (sentinel-2-l1c `_0` at N03.01 and
-    `_1` at N05.00, identical datetime), and those copies must land in the
-    same group -- as separate groups they would be written to the same
-    merged filename and overwrite each other.
-
-    Falls back to (platform, UTC date) when the property is absent.
-    """
-    datatake = item.properties.get("s2:datatake_id")
-    if datatake:
-        return re.sub(r"_N\d{2}\.\d{2}$", "", datatake)
-    print(
-        f"WARNING: {item.id} has no s2:datatake_id; grouping it by "
-        f"platform + UTC date for --merge."
-    )
-    return (
-        f"{item.properties.get('platform', '')}_"
-        f"{item.datetime.strftime('%Y%m%d')}"
-    )
-
-
-def processing_baseline(item):
-    """
-    The item's processing baseline as a float (05.11 -> 5.11), or 0.0 when
-    unknown -- read from `s2:processing_baseline`, else from the
-    `_Nxx.xx` suffix of `s2:datatake_id`.
-    """
-    value = item.properties.get("s2:processing_baseline")
-    if value is None:
-        match = re.search(
-            r"_N(\d{2}\.\d{2})$",
-            item.properties.get("s2:datatake_id", ""),
-        )
-        value = match.group(1) if match else None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def drop_superseded_baselines(items):
-    """
-    Keep only the newest processing baseline of each (acquisition, tile).
-
-    Earth Search lists some acquisitions more than once -- sentinel-2-l1c
-    carries `_0` (e.g. N03.01) and `_1` (N05.00) copies of the same tile
-    with an identical datetime. Both copies produce the SAME per-tile output
-    filename, so processing both lets whichever runs last overwrite the
-    other (search order, not science, decides). The later baseline is the
-    reprocessing with the newer calibration, so it is the one kept. The
-    radiometric offset is still read per item (rule 52), so either copy
-    converts correctly; this only removes the duplicate.
-    """
-    best = {}
-    for item in items:
-        key = (acquisition_key(item), _get_sat_level_tile(item)[2])
-        if key not in best or (
-            processing_baseline(item) > processing_baseline(best[key])
-        ):
-            best[key] = item
-    kept_ids = {id(item) for item in best.values()}
-    for item in items:
-        if id(item) not in kept_ids:
-            print(
-                f"Skipping {item.id}: superseded by a newer processing "
-                f"baseline of the same acquisition and tile."
-            )
-    return [item for item in items if id(item) in kept_ids]
 
 
 def _nstd_variant_token(nstd):
@@ -1011,7 +883,7 @@ def _download_cdl_for_water_extent(
     # CDL year
     # ------------------------------------------------------------
 
-    year = min(int(year), 2024)
+    year = min(int(year), LATEST_CDL_YEAR)
 
     if year < 2008:
         raise ValueError(
@@ -1608,17 +1480,224 @@ def _download_worldcover_for_water_extent(
     return output_path
 
 
-# The land-cover crosswalks live in shared_utils.landcover -- one table for
-# every pipeline (.clinerules.md rule 65). Aliased under their historical
-# private names.
-from shared_utils.landcover import (  # noqa: E402
-    CDL_WATER_SAMPLE_CODES as _CDL_WATER_SAMPLE_CODES,
-    WORLDCOVER_WATER_SAMPLE_CODES as _WORLDCOVER_WATER_SAMPLE_CODES,
-    reclass_cdl_array as _reclass_cdl_array,
-    reclass_worldcover_array as _reclass_worldcover_array,
-    pooled_water_statistics,
-    select_water_sample,
-)
+# CDL codes allowed to seed the permanent-water NIR statistics.
+# 111 = NLCD "Open Water" (<25% vegetation or soil cover) -- the
+# cleanest available endmember. Deliberately excludes 92 Aquaculture
+# and the legacy 83, both of which are labelled water in the product
+# but are poor reflectance references.
+_CDL_WATER_SAMPLE_CODES = frozenset({111})
+
+# WorldCover codes allowed to seed the permanent-water NIR statistics.
+# 80 = "Permanent water bodies" is the only water class in the legend.
+_WORLDCOVER_WATER_SAMPLE_CODES = frozenset({80})
+
+
+def _reclass_cdl_array(
+    cdl_array,
+    nir_nodata_mask,
+):
+    """
+    Reclassify the USDA CDL into the water-extent buckets.
+
+    Buckets:
+        1 = cropland/grassland
+        2 = developed
+        3 = other non-developed land cover
+        4 = permanent water
+        999 = no data / excluded
+
+    Returns
+    -------
+    translated : numpy.ndarray (uint16)
+        The bucket per pixel.
+    sample_mask : numpy.ndarray (bool)
+        Pixels eligible to seed the permanent-water NIR statistics.
+        A strict subset of bucket 4 -- see _CDL_WATER_SAMPLE_CODES.
+    """
+
+    codes_dict = {
+        1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
+        6: 1, 10: 1, 11: 1, 12: 1,
+        13: 1, 14: 1, 21: 1, 22: 1,
+        23: 1, 24: 1, 25: 1, 26: 1,
+        27: 1, 28: 1, 29: 1, 30: 1,
+        31: 1, 32: 1, 33: 1, 34: 1,
+        35: 1, 36: 1, 37: 1, 38: 1,
+        39: 1, 41: 1, 42: 1, 43: 1,
+        44: 1, 45: 1, 46: 1, 47: 1,
+        48: 1, 49: 1, 50: 1, 51: 1,
+        52: 1, 53: 1, 54: 1, 55: 1,
+        56: 1, 57: 1, 58: 1, 59: 1,
+        60: 1, 61: 1, 66: 1, 67: 1,
+        68: 1, 69: 1, 70: 1, 71: 1,
+        72: 1, 74: 1, 75: 1, 76: 1,
+        77: 1, 204: 1, 205: 1,
+        206: 1, 207: 1, 208: 1,
+        209: 1, 210: 1, 211: 1,
+        212: 1, 213: 1, 214: 1,
+        215: 1, 216: 1, 217: 1,
+        218: 1, 219: 1, 220: 1,
+        221: 1, 222: 1, 223: 1,
+        224: 1, 225: 1, 226: 1,
+        227: 1, 228: 1, 229: 1,
+        230: 1, 231: 1, 232: 1,
+        233: 1, 234: 1, 235: 1,
+        236: 1, 237: 1, 238: 1,
+        239: 1, 240: 1, 241: 1,
+        242: 1, 243: 1, 244: 1,
+        245: 1, 246: 1, 247: 1,
+        248: 1, 249: 1, 250: 1,
+        254: 1, 176: 1,
+
+        # --- 1: cropland / grassland (non-crop members) ---
+        # 62 Pasture/Grass is a pre-2008 legacy code, retired in 2013
+        # and collapsed into 176.
+        62: 1,
+
+        # --- 2: developed ---
+        # 82 is the pre-2008 legacy "Developed" before it was split
+        # into the 121-124 intensity classes.
+        82: 2,
+        121: 2, 122: 2, 123: 2, 124: 2,
+
+        # --- 3: other non-developed land cover ---
+        # Named "other vegetation" historically, but it is really a
+        # catch-all for not-crop / not-developed / not-water. Barren
+        # (65, 131) and Nonag/Undefined (88) are NOT vegetation; they
+        # live here so that sand bars, beaches, playas and gravel --
+        # highly flood-relevant terrain, 131 alone is ~78,000 km2 of
+        # CONUS -- remain eligible to be mapped as flooded rather than
+        # silently excluded.
+        #
+        # Wetlands (87, 190, 195) belong here, NOT in permanent water.
+        # They are vegetation canopy over periodically saturated
+        # ground: bright in NIR, so they would contaminate the water
+        # sample, and only intermittently inundated, so calling them
+        # permanent water would blind the product to flooding in
+        # exactly the places flooding is most expected.
+        63: 3, 64: 3, 65: 3, 87: 3, 88: 3,
+        131: 3, 141: 3, 142: 3,
+        143: 3, 152: 3, 190: 3,
+        195: 3,
+
+        # --- 4: permanent water ---
+        # 83 Water is the pre-2008 legacy code; 92 Aquaculture and
+        # 111 Open Water are current.
+        83: 4, 92: 4, 111: 4,
+
+        # --- 999: no data / excluded ---
+        # 112 is Perennial Ice/Snow (NLCD class 12), NOT water. It was
+        # mapped to permanent water, which is the single most damaging
+        # entry in this table: snow reflects ~0.6-0.9 at B08's 842 nm
+        # against ~0.01-0.05 for open water, so including it inflates
+        # both the mean and the standard deviation of the water NIR
+        # sample, and the threshold is mean + nstd*std. Simulated at 5%
+        # contamination the threshold moves 1550 -> 3391 DN and false
+        # water goes from 0.3% to 25% of land. Snow only darkens in
+        # SWIR (~1600 nm), which is what NDSI exploits -- not at 842 nm.
+        # It is present in every CONUS CDL year (0.5-1.6M pixels).
+        112: 999,
+        0: 999,
+        81: 999,
+    }
+
+    translated = np.full(
+        cdl_array.shape,
+        999,
+        dtype=np.uint16,
+    )
+
+    for source_code, target_code in codes_dict.items():
+
+        translated[
+            cdl_array == source_code
+        ] = target_code
+
+    translated[
+        nir_nodata_mask
+    ] = 999
+
+    # Seed the NIR statistics from NLCD "Open Water" only. Bucket 4
+    # also holds 92 Aquaculture, which is genuinely water and belongs
+    # in the product label, but aquaculture ponds are turbid, algal and
+    # periodically drained -- all of which raise NIR and widen the
+    # threshold. 111 is the only class NLCD defines as open water with
+    # under 25% vegetation or soil cover.
+    sample_mask = (
+        np.isin(cdl_array, list(_CDL_WATER_SAMPLE_CODES))
+        & ~nir_nodata_mask
+    )
+
+    return translated, sample_mask
+
+
+def _reclass_worldcover_array(
+    worldcover_array,
+    nir_nodata_mask,
+):
+    """
+    Reclassify ESA WorldCover (v100/2020, v200/2021 -- the legend is
+    byte-identical between them) into the water-extent buckets.
+
+    Buckets:
+        1 = cropland/grassland
+        2 = developed
+        3 = other non-developed land cover
+        4 = permanent water
+        999 = no data / excluded
+
+    Returns
+    -------
+    translated, sample_mask : see _reclass_cdl_array.
+    """
+
+    codes_dict = {
+        0: 999,    # No data
+        10: 3,     # Tree cover
+        20: 3,     # Shrubland
+        30: 1,     # Grassland
+        40: 1,     # Cropland
+        50: 2,     # Built-up
+        # 60 is "Bare / sparse vegetation", defined as never exceeding
+        # 10% vegetated cover. It sits in bucket 3 for coverage, not
+        # because it is vegetation -- see the bucket-3 note in
+        # _reclass_cdl_array.
+        60: 3,
+        # 70 Snow and ice is EXCLUDED, for the same NIR-brightness
+        # reason CDL 112 is. Note this does not cost us frozen lakes:
+        # water frozen for less than 9 months stays class 80.
+        70: 999,
+        80: 4,     # Permanent water bodies
+        # 90 Herbaceous wetland / 95 Mangroves are vegetation over
+        # water -- bright in NIR, and only intermittently inundated.
+        # Not permanent water. Same reasoning as CDL 190/195.
+        90: 3,
+        95: 3,
+        100: 3,    # Moss and lichen
+    }
+
+    translated = np.full(
+        worldcover_array.shape,
+        999,
+        dtype=np.uint16,
+    )
+
+    for source_code, target_code in codes_dict.items():
+
+        translated[
+            worldcover_array == source_code
+        ] = target_code
+
+    translated[
+        nir_nodata_mask
+    ] = 999
+
+    sample_mask = (
+        np.isin(worldcover_array, list(_WORLDCOVER_WATER_SAMPLE_CODES))
+        & ~nir_nodata_mask
+    )
+
+    return translated, sample_mask
 
 # ---------------------------------------------------------------------
 # Water Extent
@@ -1631,8 +1710,6 @@ def generate_water_extent(
     output_dir="./s3_temp",
     cloud_mask=False,
     nstd=None,
-    water_stats=None,
-    sample_only=False,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1691,17 +1768,6 @@ def generate_water_extent(
     nstd : float or None
         Standard-deviation multiplier for the NIR water threshold.
         Falls back to the algorithm config's `nstd`, then to 1.0.
-
-    water_stats : (float, float) or None
-        (mean, std) of the water-sample NIR POOLED over every tile of this
-        item's acquisition (shared_utils.landcover.pooled_water_statistics).
-        When given, the threshold is mean + nstd*std from these, so all
-        tiles of one pass classify with one threshold. None computes them
-        from this tile alone.
-
-    sample_only : bool
-        If True, return (permanent_water_nir, sample_nir) -- this tile's
-        contribution to the pooled statistics -- and write nothing.
 
     Returns
     -------
@@ -1907,7 +1973,7 @@ def generate_water_extent(
 
         cdl_year = min(
             year,
-            2024,
+            LATEST_CDL_YEAR,
         )
     
         # Temporary CDL matched to the Sentinel-2 B08 grid.
@@ -2051,87 +2117,134 @@ def generate_water_extent(
         (~nir_nd_mask)
     )
 
-    # sample_only: return this tile's contribution to the acquisition's
-    # POOLED threshold (shared_utils.landcover.pooled_water_statistics)
-    # and stop. No per-tile empty-sample check -- a tile without
-    # reference water is normal; the pooled totals decide.
-    if sample_only:
-        return (
-            nir_array[permanent_water_mask].astype(np.float64),
-            nir_array[water_sample_mask].astype(np.float64),
-        )
+    water_count = np.count_nonzero(
+        permanent_water_mask
+    )
 
-    if water_stats is None:
-        # Falls back to the full bucket below MIN_WATER_SAMPLE px; raises
-        # on an empty sample (shared with the .SAFE and Landsat paths).
-        water_sample_mask = select_water_sample(
-            permanent_water_mask,
-            water_sample_mask,
-        )
-
-    # -------------------------------------------------------------
-    # Calculate dynamic NIR threshold
-    #
-    # IMPORTANT:
-    #
-    # This is the actual logic from the old workflow.
-    # -------------------------------------------------------------
-
-    if water_stats is not None:
-        # Pooled over every tile of this acquisition by the caller, so
-        # all tiles of one pass classify with ONE threshold.
-        mean, std = water_stats
-    else:
-        water_nir = nir_array[
-            water_sample_mask
-        ]
-
-        mean = np.nanmean(
-            water_nir
-        )
-
-        std = np.nanstd(
-            water_nir
-        )
-
-    # -------------------------------------------------------------
-    # nstd: caller wins, then the algorithm configuration, then 1.0.
-    #
-    # Compared with `is None`, not truthiness -- 0.0 is a meaningless
-    # threshold but it must not silently fall through to the default.
-    # (It is rejected by the CLI, which requires a positive value.)
-    # -------------------------------------------------------------
-
-    if nstd is None:
-        nstd = algorithm.get(
-            "nstd",
-            1.0,
-        )
-
-    nstd = float(nstd)
-
-    nir_thresh = (
-        mean
-        + (
-            nstd
-            * std
-        )
+    sample_count = np.count_nonzero(
+        water_sample_mask
     )
 
     print()
-    print("Water NIR statistics:")
     print(
-        f"  mean: {mean}"
+        f"Permanent-water reference pixels: "
+        f"{water_count:,}"
     )
     print(
-        f"  std: {std}"
+        f"Threshold sample pixels:          "
+        f"{sample_count:,}"
+    )
+
+    # Fall back to the full permanent-water bucket if the strict sample
+    # is too small to give a stable mean/std -- a scene whose only
+    # water is aquaculture is better served by a slightly biased
+    # threshold than by no product at all.
+    _MIN_SAMPLE = 100
+
+    if sample_count < _MIN_SAMPLE and water_count >= _MIN_SAMPLE:
+        print(
+            f"  Sample below {_MIN_SAMPLE} px; falling back to the "
+            f"full permanent-water bucket for the threshold."
+        )
+        water_sample_mask = permanent_water_mask
+        sample_count = water_count
+
+    if sample_count == 0:
+
+        raise RuntimeError(
+            "No valid permanent-water pixels were found "
+            "after applying the land-cover and cloud masks. "
+            "Cannot calculate the NIR water threshold."
+        )
+
+    
+    # -------------------------------------------------------------
+    # Calculate robust dynamic NIR threshold using median + MAD
+    #
+    # The previous mean + nstd * std approach is sensitive to
+    # contaminated permanent-water samples and their upper tail.
+    #
+    # New approach:
+    #
+    #   water_median = median(water NIR)
+    #   MAD = median(abs(water NIR - water_median))
+    #   robust_std = 1.4826 * MAD
+    #   nir_thresh = water_median + nstd * robust_std
+    #
+    # The factor 1.4826 makes MAD comparable to standard deviation
+    # for normally distributed data.
+    #
+    # This preserves the interpretation of nstd while making the
+    # threshold substantially more resistant to outliers.
+    # -------------------------------------------------------------
+
+    water_nir = nir_array[water_sample_mask].astype(np.float64)
+
+    # Exclude non-finite values defensively.
+    water_nir = water_nir[np.isfinite(water_nir)]
+
+    if water_nir.size == 0:
+        raise RuntimeError(
+            "No finite NIR values remain in the permanent-water "
+            "sample. Cannot calculate the water threshold."
+        )
+
+    # -------------------------------------------------------------
+    # nstd: caller wins, then algorithm configuration, then 1.0
+    # -------------------------------------------------------------
+
+    if nstd is None:
+        nstd = algorithm.get("nstd", 1.0)
+
+    nstd = float(nstd)
+
+    if not np.isfinite(nstd) or nstd < 0:
+        raise ValueError(
+            f"nstd must be a finite, non-negative number; got {nstd}."
+        )
+
+    # -------------------------------------------------------------
+    # Robust statistics
+    # -------------------------------------------------------------
+
+    water_median = np.nanmedian(water_nir)
+
+    mad = np.nanmedian(
+        np.abs(water_nir - water_median)
+    )
+
+    robust_std = 1.4826 * mad
+
+    nir_thresh = water_median + nstd * robust_std
+
+    # -------------------------------------------------------------
+    # Diagnostics
+    # -------------------------------------------------------------
+
+    percentiles = np.nanpercentile(
+        water_nir,
+        [5, 25, 50, 75, 95]
+    )
+
+    print()
+    print("Robust water NIR statistics:")
+    print(f"  sample size: {water_nir.size:,}")
+    print(f"  median: {water_median:.2f}")
+    print(f"  MAD: {mad:.2f}")
+    print(f"  scaled MAD (robust std): {robust_std:.2f}")
+    print(f"  nstd: {nstd}")
+    print(f"  NIR threshold: {nir_thresh:.2f}")
+    print(
+        "  NIR percentiles (5/25/50/75/95): "
+        f"{percentiles}"
     )
     print(
-        f"  nstd: {nstd}"
+        f"  scene NIR median (valid, non-cloud): "
+        f"{np.nanmedian(nir_array[
+            (~nir_nd_mask) & (~cloud_mask_array)
+        ]):.2f}"
     )
-    print(
-        f"  NIR threshold: {nir_thresh}"
-    )
+
 
     # -------------------------------------------------------------
     # Create binary water extent
@@ -2745,6 +2858,8 @@ def generate_index(
 
     index[valid] = values[valid]
 
+    mask = None
+
     if cloud_mask:
         print("Applying cloud mask...")
         mask = get_cloud_mask(item, out_shape=index.shape)
@@ -2768,6 +2883,11 @@ def generate_index(
 
     with rio.open(outfile, "w", **profile) as dst:
         dst.write(index, 1)
+
+    # Sidecar so --merge can keep this tile's cloud mask (see
+    # apply_cloud_union).
+    if mask is not None:
+        write_cloud_mask_sidecar(outfile, mask, profile)
 
     print(f"Generation completed: {outfile}")
 
@@ -2946,6 +3066,8 @@ def generate_composite(
 
         bands.append(band)
 
+    mask = None
+
     if cloud_mask:
         print("Applying cloud mask...")
         mask = get_cloud_mask(item, out_shape=bands[0].shape)
@@ -2991,6 +3113,11 @@ def generate_composite(
     with rio.open(outfile, "w", **profile) as dst:
         dst.write(array)
 
+    # Sidecar so --merge can keep this tile's cloud mask (see
+    # apply_cloud_union).
+    if mask is not None:
+        write_cloud_mask_sidecar(outfile, mask, profile)
+
     print(f"Generation completed: {outfile}")
 
     return outfile
@@ -2999,8 +3126,34 @@ def generate_composite(
 # ---------------------------------------------------------------------
 # Merge processing
 # ---------------------------------------------------------------------
+def _first_with_priority_value(priority_value):
+    """
+    Merge method equivalent to rasterio's "first", except that pixels
+    equal to `priority_value` in ANY input survive into the mosaic.
+    Used to keep class 5 (cloud) from every tile in water extent.
+    """
 
-def merge_products(tif_paths, output_path, method="first"):
+    def method(
+        merged_data,
+        new_data,
+        merged_mask,
+        new_mask,
+        index=None,
+        roff=None,
+        coff=None,
+    ):
+        # Stock "first": fill only where the mosaic is still nodata
+        # and the new tile has valid data.
+        fill = merged_mask & ~new_mask
+        np.copyto(merged_data, new_data, where=fill, casting="unsafe")
+
+        # Priority overlay: the new tile's priority pixels always win.
+        keep = ~new_mask & (new_data == priority_value)
+        np.copyto(merged_data, new_data, where=keep, casting="unsafe")
+
+    return method
+
+def merge_products(tif_paths, output_path, method="first", priority_value=None):
 
     if len(tif_paths) == 1:
         shutil.copy(tif_paths[0], output_path)
@@ -3085,6 +3238,9 @@ def merge_products(tif_paths, output_path, method="first"):
             count = ref.count
             dtype = ref.dtypes[0]
 
+        if priority_value is not None:
+            method = _first_with_priority_value(priority_value)
+
         array, transform = merge(
             merge_inputs,
             method=method,
@@ -3120,28 +3276,353 @@ def merge_products(tif_paths, output_path, method="first"):
     return output_path
 
 
-# Water-extent class for cloud / cloud shadow (generate_water_extent).
-WATER_EXTENT_CLOUD_CLASS = 5
+# ---------------------------------------------------------------------
+# Cloud-mask preservation across a merge (indices and composites)
+#
+# For these products a cloud pixel is written as plain nodata, which is
+# indistinguishable from off-swath nodata, so merge(method="first") fills
+# one tile's cloud holes with another tile's valid pixels. To keep every
+# tile's cloud mask, each tile's boolean mask is saved as a sidecar
+# raster, the sidecars are mosaicked with "max" (cloud in ANY tile = 1),
+# and that union is stamped onto the merged product as nodata. True
+# off-swath nodata is untouched, so it is still backfilled by other tiles.
+# Water extent does not need this: its cloud is a real class (5) handled
+# by merge_products(priority_value=5).
+# ---------------------------------------------------------------------
+
+_CLOUD_MASK_DIRNAME = "_cloud_masks"
 
 
-def water_extent_merge_method(merged_data, new_data, merged_mask, new_mask, **kwargs):
+def cloud_mask_sidecar_path(outfile):
+    """Sidecar path for a per-tile product GeoTIFF."""
+    return os.path.join(
+        os.path.dirname(outfile),
+        _CLOUD_MASK_DIRNAME,
+        os.path.basename(outfile),
+    )
+
+
+def write_cloud_mask_sidecar(outfile, mask, profile):
     """
-    rasterio.merge method for water-extent tiles of ONE acquisition:
-    first valid pixel, except that a CLOUD flag from any tile wins.
-
-    Overlapping tiles of one pass are the same observation, but Sen2Cor
-    classifies each tile separately and their SCL disagrees on 0.7-9.7% of
-    overlap pixels (12 real Iowa passes, 2024). The disputed pixels are
-    82% thin cirrus and 13% cloud SHADOW; a shadow published as "clear"
-    has low NIR and reads as flood water. A first-wins merge settled the
-    dispute by item-id order; taking the union of the cloud flags is the
-    conservative, order-independent rule. Nodata (0, masked) still yields
-    to data, exactly as rasterio's copy_first.
+    Save a tile's boolean cloud mask on the same grid as `outfile`.
+    Only the georeferencing is taken from `profile`.
     """
-    fill = merged_mask & ~new_mask
-    np.copyto(merged_data, new_data, where=fill, casting="unsafe")
-    cloud = ~new_mask & (new_data == WATER_EXTENT_CLOUD_CLASS)
-    np.copyto(merged_data, new_data, where=cloud, casting="unsafe")
+    path = cloud_mask_sidecar_path(outfile)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    sidecar_profile = {
+        key: profile[key] for key in ("crs", "transform", "width", "height")
+    }
+    sidecar_profile.update(
+        driver="GTiff", count=1, dtype="uint8", compress="ZSTD"
+    )
+
+    with rio.open(path, "w", **sidecar_profile) as dst:
+        dst.write(np.asarray(mask, dtype=np.uint8), 1)
+
+    return path
+
+
+def apply_cloud_union(merged_path, mask_paths):
+    """
+    Set every pixel that is cloud in ANY input tile to the mosaic's
+    nodata value. Call after merge_products() with the same tiles'
+    sidecar paths.
+    """
+    union_path = merged_path + ".cloudunion.tmp.tif"
+
+    try:
+        merge_products(mask_paths, union_path, method="max")
+
+        with rio.open(union_path) as m:
+            cloud = m.read(1) == 1
+
+        with rio.open(merged_path, "r+") as dst:
+
+            if dst.nodata is None:
+                raise ValueError(
+                    "Merged product has no nodata value to stamp the "
+                    "cloud mask with."
+                )
+
+            if (dst.height, dst.width) != cloud.shape:
+                raise RuntimeError(
+                    f"Cloud-mask mosaic {cloud.shape} does not match the "
+                    f"merged product ({dst.height}, {dst.width})."
+                )
+
+            for band_index in range(1, dst.count + 1):
+                band = dst.read(band_index)
+                band[cloud] = dst.nodata
+                dst.write(band, band_index)
+
+    finally:
+        if os.path.exists(union_path):
+            os.remove(union_path)
+
+    return merged_path
+
+
+# ---------------------------------------------------------------------
+# Cloud-mask product
+#
+# The cloud / cloud-shadow / thin-cirrus mask on its own, from the L2A
+# Scene Classification Layer, at the SCL's native 20 m. Strictly binary:
+#
+#   1 = cloud, cloud shadow or thin cirrus (SCL 3, 8, 9, 10 -- the same
+#       classes get_cloud_mask uses)
+#   0 = everything else, which is also the file's nodata value
+#
+# Because 0 is nodata, clear sky and the off-swath fill are BOTH
+# transparent in any viewer, and only cloud is drawn. (A GeoTIFF colour
+# table cannot carry transparency, so nodata is what makes the "else"
+# transparent; the two cannot be told apart in this product.)
+# finalize_cloud_mask() attaches the gray colour for class 1.
+# ---------------------------------------------------------------------
+
+CLOUD_MASK_NODATA = 0
+
+# Gray (R=G=B) the cloud class renders in. Used for both the cloud-mask
+# colour table and the cloud pixels in RGBA composites.
+CLOUD_GRAY = 128
+
+
+def generate_cloud_mask(
+    item,
+    output_dir="./s3_temp",
+    cloud_classes=(3, 8, 9, 10),
+):
+    """
+    Generate the binary cloud-mask product for one Sentinel-2 L2A scene.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 L2A STAC item. Raises if it has no 'scl' asset.
+
+    output_dir : str
+        Local directory to write the output GeoTIFF.
+
+    cloud_classes : iterable of int
+        SCL classes counted as cloud. Defaults match get_cloud_mask.
+
+    Returns
+    -------
+    str
+        Path to the generated GeoTIFF (uint8: 1 cloud, 0 otherwise and
+        nodata).
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if "scl" not in item.assets:
+        raise KeyError(
+            f"Asset 'scl' not found in STAC item '{item.id}'. "
+            "The cloud-mask product requires the Sentinel-2 L2A Scene "
+            "Classification Layer, which does not exist for L1C products."
+        )
+
+    href, _, _, _, _ = get_asset_metadata(item.assets["scl"])
+
+    print(f"Reading SCL asset: {href}")
+
+    with rio.Env(_session()):
+        with rio.open(href) as src:
+            scl = src.read(1)
+            src_profile = src.profile
+
+    mask = np.zeros(scl.shape, dtype=np.uint8)
+
+    mask[np.isin(scl, cloud_classes)] = 1
+
+    profile = {
+        key: src_profile[key] for key in ("crs", "transform", "width", "height")
+    }
+
+    profile.update(
+        driver="GTiff",
+        count=1,
+        dtype="uint8",
+        nodata=CLOUD_MASK_NODATA,
+        compress="ZSTD",
+        tiled=True,
+        blockxsize=512,
+        blockysize=512,
+    )
+
+    outfile = os.path.join(
+        output_dir,
+        _build_output_filename(item, "cloud_mask"),
+    )
+
+    print()
+    print("Cloud mask classes:")
+    print(f"  1: Cloud:               {np.count_nonzero(mask == 1):,} pixels")
+    print(f"  0: Not cloud / no data: {np.count_nonzero(mask == 0):,} pixels")
+
+    print(f"Writing GeoTIFF: {outfile}")
+
+    with rio.open(outfile, "w", **profile) as dst:
+        dst.write(mask, 1)
+
+    print(f"Generation completed: {outfile}")
+
+    return outfile
+
+
+def finalize_cloud_mask(path, gray=CLOUD_GRAY):
+    """
+    Attach the display colour table to a cloud-mask GeoTIFF (per-tile or
+    merged): cloud (1) is gray. Everything else is value 0, which is the
+    file's nodata and therefore transparent. Rewrites the file in place.
+    Needed after the merge, which does not carry a colour table through.
+    """
+
+    with rio.open(path) as src:
+        data = src.read(1)
+        profile = src.profile.copy()
+
+    colormap = {i: (0, 0, 0, 0) for i in range(256)}
+    colormap[1] = (gray, gray, gray, 255)
+
+    tmp_path = path + ".colormap.tmp.tif"
+
+    try:
+        with rio.open(tmp_path, "w", **profile) as dst:
+            dst.write(data, 1)
+            dst.write_colormap(1, colormap)
+
+        os.replace(tmp_path, path)
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return path
+
+
+# ---------------------------------------------------------------------
+# RGBA composites: gray clouds, transparent no data
+#
+# generate_composite writes cloud and off-swath pixels both as 0, i.e.
+# black, and the COG carries no nodata tag. This converts a finished
+# composite (per-tile or merged) to 4-band RGBA instead:
+#
+#   cloud            -> gray RGB, opaque
+#   other no data    -> transparent (alpha 0)
+#   everything else  -> unchanged, opaque
+#
+# It runs AFTER the merge because "first" merging cannot be trusted with
+# an alpha band: alpha is always valid inside a tile's footprint, so a
+# tile's transparent edge would block later tiles from filling it.
+# ---------------------------------------------------------------------
+
+def finalize_composite_rgba(path, mask_paths=None, gray=CLOUD_GRAY):
+    """
+    Convert a 3-band uint8 composite to RGBA in place.
+
+    Parameters
+    ----------
+    path : str
+        The composite GeoTIFF (3 bands, 0 = cloud/no data).
+
+    mask_paths : list of str or None
+        Cloud-mask sidecars (see write_cloud_mask_sidecar) for the
+        tile(s) in `path`. Cloud in ANY of them is painted gray. None
+        when no cloud mask was applied: no-data is still made
+        transparent, nothing is painted gray.
+
+    gray : int
+        Gray level for cloud pixels.
+
+    Notes
+    -----
+    A pixel is no-data when all three bands are 0 and it is not cloud.
+    """
+
+    cloud = None
+    union_path = None
+
+    try:
+
+        if mask_paths:
+
+            if len(mask_paths) == 1:
+                cloud_source = mask_paths[0]
+            else:
+                union_path = path + ".cloudunion.tmp.tif"
+                merge_products(list(mask_paths), union_path, method="max")
+                cloud_source = union_path
+
+            with rio.open(cloud_source) as m:
+                cloud = m.read(1) == 1
+
+        with rio.open(path) as src:
+            rgb = src.read()
+            src_profile = src.profile
+
+        if rgb.shape[0] != 3:
+            raise ValueError(
+                f"{path} has {rgb.shape[0]} bands; RGBA conversion "
+                f"expects a 3-band composite."
+            )
+
+        if cloud is not None and cloud.shape != rgb.shape[1:]:
+            raise RuntimeError(
+                f"Cloud mask {cloud.shape} does not match the composite "
+                f"{rgb.shape[1:]}."
+            )
+
+        no_data = (rgb == 0).all(axis=0)
+
+        if cloud is not None:
+            no_data &= ~cloud
+
+        alpha = np.where(no_data, 0, 255).astype(np.uint8)
+
+        if cloud is not None:
+            rgb[:, cloud] = gray
+            alpha[cloud] = 255
+
+        profile = {
+            key: src_profile[key]
+            for key in ("crs", "transform", "width", "height")
+        }
+
+        profile.update(
+            driver="GTiff",
+            count=4,
+            dtype="uint8",
+            compress="ZSTD",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+        )
+
+        tmp_path = path + ".rgba.tmp.tif"
+
+        try:
+            with rio.open(tmp_path, "w", **profile) as dst:
+                dst.write(rgb, [1, 2, 3])
+                dst.write(alpha, 4)
+                dst.colorinterp = (
+                    ColorInterp.red,
+                    ColorInterp.green,
+                    ColorInterp.blue,
+                    ColorInterp.alpha,
+                )
+
+            os.replace(tmp_path, path)
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    finally:
+        if union_path is not None and os.path.exists(union_path):
+            os.remove(union_path)
+
+    return path
 
 
 # The high-level process_index / process_composite / process_items

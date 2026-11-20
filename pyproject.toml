@@ -52,6 +52,7 @@ test = [
 
 [project.scripts]
 process_landsat89 = "landsat.cli:process_landsat89_cli"
+process_landsat_odr = "landsat.cli:process_landsat_odr_cli"
 process_sentinel2 = "sentinel2.cli:process_sentinel2_cli"
 process_sentinel2_odr = "sentinel2.cli:process_sentinel2_odr_cli"
 download_sentinel2 = "sentinel2.cli:download_sentinel2_cli"

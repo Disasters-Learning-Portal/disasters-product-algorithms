@@ -1,0 +1,71 @@
+{
+  "composite": [
+    {
+      "true_color": {
+        "assets": ["red", "green", "blue"],
+        "resample": false,
+        "gsd": 30
+      },
+      "color_infrared": {
+        "assets": ["nir08", "red", "green"],
+        "resample": false,
+        "gsd": 30
+      },
+      "swir": {
+        "assets": ["swir22", "nir08", "red"],
+        "resample": false,
+        "gsd": 30
+      },
+      "natural_color": {
+        "assets": ["swir16", "nir08", "red"],
+        "resample": false,
+        "gsd": 30
+      }
+    }
+  ],
+  "index": [
+    {
+      "ndvi": {
+        "assets": ["nir08", "red"],
+        "resample": false,
+        "gsd": 30,
+        "min": 0,
+        "max": 1,
+        "color": "YlGn"
+      },
+      "ndwi": {
+        "assets": ["green", "nir08"],
+        "resample": false,
+        "gsd": 30,
+        "min": -1,
+        "max": 1,
+        "color": "GnBu"
+      },
+      "mndwi": {
+        "assets": ["green", "swir16"],
+        "resample": false,
+        "gsd": 30,
+        "min": -1,
+        "max": 1,
+        "color": "GnBu"
+      },
+      "nbr": {
+        "assets": ["nir08", "swir22"],
+        "resample": false,
+        "gsd": 30,
+        "min": 0,
+        "max": 1,
+        "color": "YlGn"
+      },
+      "evi": {
+        "assets": ["nir08", "red", "blue"],
+        "formula": "evi",
+        "resample": false,
+        "gsd": 30,
+        "min": -1,
+        "max": 1,
+        "color": "YlGn"
+      }
+    }
+  ]
+}

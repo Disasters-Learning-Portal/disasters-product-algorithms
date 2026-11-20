@@ -33,6 +33,9 @@ import os
 import shutil
 
 from sentinel2.sentinel2_odr_functions import (
+    search_sentinel2,
+    get_algorithm,
+    generate_index,
     generate_composite,
     generate_water_extent,
     merge_products,

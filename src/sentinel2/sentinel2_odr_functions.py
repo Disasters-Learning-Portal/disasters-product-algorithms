@@ -2096,17 +2096,6 @@ def generate_water_extent(
     # threshold substantially more resistant to outliers.
     # -------------------------------------------------------------
 
-    water_nir = nir_array[water_sample_mask].astype(np.float64)
-
-    # Exclude non-finite values defensively.
-    water_nir = water_nir[np.isfinite(water_nir)]
-
-    if water_nir.size == 0:
-        raise RuntimeError(
-            "No finite NIR values remain in the permanent-water "
-            "sample. Cannot calculate the water threshold."
-        )
-
     # nstd: caller wins, then algorithm configuration, then 1.0
     if nstd is None:
         nstd = algorithm.get("nstd", 1.0)
@@ -2118,6 +2107,11 @@ def generate_water_extent(
             f"nstd must be a finite, non-negative number; got {nstd}."
         )
 
+    # This tile's own water sample. Only REQUIRED when there are no pooled
+    # stats: with water_stats, a tile without reference water is normal.
+    water_nir = nir_array[water_sample_mask].astype(np.float64)
+    water_nir = water_nir[np.isfinite(water_nir)]
+
     if water_stats is not None:
         # Pooled over every tile of this acquisition by the caller, so
         # all tiles of one pass classify with ONE threshold.
@@ -2125,6 +2119,11 @@ def generate_water_extent(
         nir_thresh = mean + nstd * std
         threshold_note = f"pooled mean {mean:.2f} + {nstd} * std {std:.2f}"
     else:
+        if water_nir.size == 0:
+            raise RuntimeError(
+                "No finite NIR values remain in the permanent-water "
+                "sample. Cannot calculate the water threshold."
+            )
         water_median = np.nanmedian(water_nir)
         mad = np.nanmedian(np.abs(water_nir - water_median))
         robust_std = 1.4826 * mad
@@ -2137,19 +2136,21 @@ def generate_water_extent(
     # Diagnostics
     # -------------------------------------------------------------
 
-    percentiles = np.nanpercentile(water_nir, [5, 25, 50, 75, 95])
-
     scene_nir = nir_array[(~nir_nd_mask) & (~cloud_mask_array)]
-    scene_nir_median = np.nanmedian(scene_nir)
 
     print()
     print("Water NIR statistics:")
-    print(f"  sample size: {water_nir.size:,}")
+    print(f"  sample size (this tile): {water_nir.size:,}")
     print(f"  threshold method: {threshold_note}")
     print(f"  nstd: {nstd}")
     print(f"  NIR threshold: {nir_thresh:.2f}")
-    print(f"  NIR percentiles (5/25/50/75/95): {percentiles}")
-    print(f"  scene NIR median (valid, non-cloud): {scene_nir_median:.2f}")
+    if water_nir.size:
+        percentiles = np.nanpercentile(water_nir, [5, 25, 50, 75, 95])
+        print(f"  NIR percentiles (5/25/50/75/95): {percentiles}")
+    else:
+        print("  NIR percentiles: n/a (no reference water in this tile)")
+    if scene_nir.size:
+        print(f"  scene NIR median (valid, non-cloud): {np.nanmedian(scene_nir):.2f}")
 
 
     # -------------------------------------------------------------

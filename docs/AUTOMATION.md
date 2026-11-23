@@ -356,6 +356,15 @@ Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
   - For every `process_*.py` and `download_*.py` in the sensor dir, expect
     a matching console script in `[project.scripts]` with target shape
     `<sensor>.cli:<verb>_cli`.
+- **Per-sensor notebooks**:
+  - A current workflow notebook at the top of `notebooks/`: `<sensor>_workflow.ipynb`,
+    or, when that one has been retired to `notebooks/legacy/`, a successor named
+    `<sensor>_<variant>_workflow.ipynb` (for example `landsat_odr_workflow.ipynb`). A
+    sensor left with only a retired notebook fails.
+  - The import-based twin `notebooks/testing-notebooks/<sensor>_workflow.ipynb`.
+  - No notebook present both at the top level and under `legacy/`.
+  - Cell 0 of every notebook the sensor owns (current, retired, testing) names that
+    sensor and no other.
 - **Output**: stderr-listed failures with remediation suggestions; stdout
   "OK" with sensor count on success.
 - **Exit codes**: 0 OK, 1 failure.

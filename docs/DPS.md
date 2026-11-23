@@ -821,6 +821,32 @@ STAC job's water extent carries an `NSTD_<value>` token. Compare *content* —
 water-extent class histograms and total water area, per-pixel index difference
 statistics, and the embedded `ACTIVATION_EVENT` / `PROCESSOR` tags.
 
+**Changed 2026-11-23 (PR #190 and its follow-up).** Three things an operator of the STAC
+job will notice, and one that needs action:
+
+- **New product `cloud_mask`** — the L2A cloud / cloud-shadow / thin-cirrus mask as a COG
+  of its own (`1` cloud, `0` everything else and nodata). `level=2` only; `run.sh`
+  rejects it on `level=1` before any work starts. `run.sh` validates product tokens
+  against a hand-copied list (the CWL schema has no enum), and a test now pins that list
+  to the CLI's `--product` choices, so the next product added to the CLI cannot be
+  forgotten here.
+- **`we_nstd` is forwarded to the water-extent call only.** It used to be appended to
+  every product's command, and the CLI rejects it on any other product unless it is the
+  default — so `products="ndvi we"` with `we_nstd="1 1.5"` died on `ndvi`.
+- **Index values over clear water changed.** Normalized differences now clamp their
+  inputs to `[0, 1]`, as the `.SAFE` job does, so clear water reads NDWI = 1 instead of
+  nodata (issue #176). For the Phase 4 comparison this removes the largest expected
+  difference between the two jobs' index products.
+- **Re-register to pick these up.** The `products` help text changed, which changes the
+  CWL: re-registering over the same name and version answers 409 and keeps the old
+  schema. Delete the process by its numeric `processID` first, or dispatch a new
+  `algorithm_version` (see "Deleting (undeploying) an algorithm" below).
+
+Not changed, and still open in issue #192: this job publishes to
+`dps_output/<EVENT>/`, not `ProgramData/Sentinel-2/<Product>/`; and there is no DPS
+algorithm for the Landsat STAC pipeline (`process_landsat_odr`) — `dps/landsat/` still
+runs `process_landsat89`.
+
 ## Deleting (undeploying) an algorithm
 
 **The Register Algorithm GUI can register but not delete.** Undeploying is a

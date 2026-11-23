@@ -237,7 +237,9 @@ disasters-product-algorithms/
 ├── capella/              # Capella SAR processing
 ├── raster_tools/         # Sensor-agnostic raster utilities
 ├── shared_utils/         # Shared library (COG conversion, S3, validation, metadata)
-├── notebooks/            # Operator-facing Jupyter templates (CLI-subprocess style)
+├── notebooks/            # Current operator workflows, one per sensor (CLI-subprocess style)
+│   ├── legacy/             # Retired workflows, still runnable (see notebooks/legacy/README.md)
+│   ├── tools/              # Sensor-agnostic operator tools (transfers, templates, smoke test)
 │   └── testing-notebooks/  # Import-based variants for local dev
 ├── image/                # Docker image build context (Dockerfile + env)
 │   ├── Dockerfile        # FROM MAAP 2i2c/pangeo:<tag> → conda env → algorithms

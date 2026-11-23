@@ -9,7 +9,7 @@ This script handles:
     - Algorithm selection
     - Index generation
     - Composite generation
-    - Tile merging (optional)
+    - Scene merging, one mosaic per satellite pass (optional)
     - COG creation
 
 It writes COGs to a local directory only. Publishing to S3 is the
@@ -35,11 +35,12 @@ from landsat.landsat_odr_functions import (
     generate_composite,
     generate_index,
     get_algorithm,
+    group_by_acquisition,
     merge_products,
     search_landsat,
     finalize_composite_rgba,
-    finalize_cloud_mask,
     CLOUD_GRAY,
+    DEFAULT_ALGORITHM_FILE,
     LANDSAT_COLLECTION,
     LANDSAT_STAC_API,
 )
@@ -61,13 +62,6 @@ COMPRESSION_LEVEL = 9
 
 # Keep the native Landsat projection (UTM).
 DST_CRS = None
-
-# The algorithm catalog ships inside this package, so resolve it
-# relative to this file.
-DEFAULT_ALGORITHM_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "algorithms-landsat.json",
-)
 
 # No data setting
 INDEX_NODATA = -9999
@@ -113,7 +107,6 @@ def main():
             "mndwi",
             "nbr",
             "evi",
-            "we",
             "true_color",
             "natural_color",
             "color_infrared",
@@ -178,8 +171,10 @@ def main():
         "--merge",
         action="store_true",
         help=(
-            "Mosaic all matched Landsat scenes into a single output "
-            "product instead of writing one file per scene."
+            "Mosaic the scenes of each satellite pass into one product "
+            "per pass, instead of writing one file per scene. A date "
+            "range covering several passes gives several mosaics -- "
+            "passes are never mixed."
         ),
     )
 
@@ -274,7 +269,7 @@ def main():
     # Determine product type
     # -----------------------------------------------------------------
 
-    elif args.product in INDEX_PRODUCTS:
+    if args.product in INDEX_PRODUCTS:
         algorithm_type = "index"
         nodata = INDEX_NODATA
 
@@ -365,6 +360,80 @@ def main():
     )
 
     # -----------------------------------------------------------------
+    # Generate, merge, convert
+    # -----------------------------------------------------------------
+
+    # GeoTIFFs written under a product name that are not finished COGs
+    # yet. If the run fails they are deleted: whatever is left in --output
+    # under a product name must be a tagged COG, because the caller (a
+    # notebook upload cell, a DPS finalize step) publishes by filename and
+    # cannot tell a half-made intermediate from a product.
+    unfinished = set()
+
+    try:
+        cog_paths = _produce_cogs(
+            args,
+            items,
+            algorithm,
+            algorithm_type,
+            nodata,
+            metadata,
+            unfinished,
+        )
+
+    except BaseException:
+        for path in sorted(unfinished):
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"Removed unfinished output: {path}")
+        raise
+
+    finally:
+        # Per-scene cloud-mask sidecars are only needed during the run.
+        shutil.rmtree(
+            os.path.join(args.output, "_cloud_masks"),
+            ignore_errors=True,
+        )
+
+    # -----------------------------------------------------------------
+    # Summary
+    # -----------------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("Landsat processing complete")
+    print("=" * 70)
+
+    print(
+        f"Created {len(cog_paths)} COG(s)."
+    )
+
+    for cog_path in cog_paths:
+        print(f"  {cog_path}")
+
+    print()
+
+
+def _produce_cogs(
+    args,
+    items,
+    algorithm,
+    algorithm_type,
+    nodata,
+    metadata,
+    unfinished,
+):
+    """
+    Generate one product GeoTIFF per scene, mosaic per pass if requested,
+    and convert the results to COGs. Returns the COG paths.
+
+    `unfinished` is the caller's set of files written under a product name
+    that are not COGs yet: paths are added as they are written and removed
+    as they are converted (or merged away), so that after a failure it
+    holds exactly what has to be deleted.
+    """
+
+    # -----------------------------------------------------------------
     # Generate product GeoTIFF(s), one per scene
     # -----------------------------------------------------------------
 
@@ -382,6 +451,17 @@ def main():
             f"{item.id}"
         )
         print("=" * 70)
+
+        # The name the generator is about to write. Registered BEFORE the
+        # call so a scene that dies half-written is cleaned up too.
+        unfinished.add(
+            os.path.join(
+                args.output,
+                _build_output_filename(
+                    item, args.product, masked=args.cloud_mask
+                ),
+            )
+        )
 
         if algorithm_type == "index":
 
@@ -437,7 +517,11 @@ def main():
 
     if args.merge:
 
-        # Group by variant so each parameterisation mosaics separately.
+        # One mosaic per (variant, pass). Grouping by PASS keeps every
+        # date in the requested range as its own product: the merge is
+        # first-wins, so mixing passes would stitch pre-event pixels into
+        # a post-event mosaic wherever scenes overlap. Grouping by variant
+        # keeps different parameterisations of one product apart.
         variants = {}
 
         for variant, item, path in local_paths:
@@ -447,95 +531,90 @@ def main():
 
         for variant, group in variants.items():
 
-            print()
-            print("=" * 70)
-            print(
-                f"Merging {len(group)} scene(s)"
-                + (f" [{variant}]" if variant else "")
-            )
-            print("=" * 70)
+            path_of = {item.id: path for item, path in group}
 
-            # Sort by item id for a deterministic merge order and a
-            # deterministic choice of "first" item for the merged
-            # filename. Landsat ids start with SAT then PATHROW, so
-            # "first" means lowest satellite id, then lowest path/row --
-            # arbitrary with respect to image quality.
-            items_sorted, paths_sorted = zip(
-                *sorted(group, key=lambda pair: pair[0].id)
-            )
+            for scenes in group_by_acquisition([item for item, _ in group]):
 
-            merged_name = _build_output_filename(
-                items_sorted[0],
-                args.product,
-                masked=args.cloud_mask,
-                merged=True,
-                variant=variant,
-            )
-            merged_path = os.path.join(args.output, merged_name)
+                paths = [path_of[scene.id] for scene in scenes]
 
-            # Keep every scene's cloud mask in the mosaic.
-            #
-            # Indices and composites store cloud as plain nodata, which
-            # looks like off-swath nodata, so plain "first" would let
-            # another scene's valid pixels fill the hole. For those, the
-            # per-scene cloud masks are unioned after the merge instead.
-            merge_products(
-                list(paths_sorted),
-                merged_path,
-                priority_value=None,
-            )
+                # scenes[0] is the earliest scene of the pass, so the
+                # merged name carries the pass's own date and path.
+                merged_name = _build_output_filename(
+                    scenes[0],
+                    args.product,
+                    masked=args.cloud_mask,
+                    merged=True,
+                    variant=variant,
+                )
+                merged_path = os.path.join(args.output, merged_name)
+                unfinished.add(merged_path)
 
-            if args.cloud_mask:
-                apply_cloud_union(
+                print()
+                print("=" * 70)
+                print(
+                    f"Merging {len(scenes)} scene(s) of one pass into "
+                    f"{merged_name}"
+                    + (f" [{variant}]" if variant else "")
+                )
+                print("=" * 70)
+
+                # Within one pass, overlapping scenes are the same
+                # observation, so first-wins loses nothing.
+                merge_products(
+                    paths,
                     merged_path,
-                    [cloud_mask_sidecar_path(p) for p in paths_sorted],
+                    priority_value=None,
                 )
 
-            print(f"Merged product created: {merged_path}")
+                sidecars = (
+                    [cloud_mask_sidecar_path(p) for p in paths]
+                    if args.cloud_mask
+                    else None
+                )
 
-            # Remove the pre-merge per-scene GeoTIFFs now that the
-            # mosaic exists; only the merged file proceeds to COG
-            # conversion.
-            for path in paths_sorted:
-                if path != merged_path and os.path.exists(path):
-                    os.remove(path)
+                # Keep every scene's cloud mask in the mosaic. An index
+                # stores cloud as plain nodata, which looks like off-swath
+                # nodata, so "first" lets a neighbouring scene's valid
+                # pixels fill the hole; the per-scene masks are unioned
+                # back in. A composite gets the same union painted gray.
+                if algorithm_type == "index":
+                    if sidecars:
+                        apply_cloud_union(merged_path, sidecars)
+                else:
+                    finalize_composite_rgba(
+                        merged_path,
+                        mask_paths=sidecars,
+                        gray=CLOUD_GRAY,
+                    )
 
-            files_to_cog.append(merged_path)
+                print(f"Merged product created: {merged_path}")
+
+                # Remove the pre-merge per-scene GeoTIFFs now that the
+                # mosaic exists; only the merged file proceeds to COG
+                # conversion.
+                for path in paths:
+                    if path != merged_path and os.path.exists(path):
+                        os.remove(path)
+                    unfinished.discard(path)
+
+                files_to_cog.append(merged_path)
 
     else:
         files_to_cog = [path for _, _, path in local_paths]
 
-    # ---------------------------------------------------------------------
-    # Finalize cloud display and transparency before COG conversion
-    # ---------------------------------------------------------------------
-    
-    if algorithm_type == "composite":
-        for outfile in files_to_cog:
-            mask_paths = None
-    
-            if args.cloud_mask:
-                if args.merge:
-                    # The merged cloud union was already applied above.
-                    # Use the merged cloud-mask sidecars if available.
-                    mask_paths = [
-                        cloud_mask_sidecar_path(p)
-                        for _, _, p in local_paths
-                    ]
-                else:
-                    mask_paths = [cloud_mask_sidecar_path(outfile)]
-    
-            finalize_composite_rgba(
-                outfile,
-                mask_paths=mask_paths,
-                gray=CLOUD_GRAY,
-            )
-    
-    # Per-scene cloud-mask sidecars are no longer needed.
-    shutil.rmtree(
-        os.path.join(args.output, "_cloud_masks"),
-        ignore_errors=True,
-    )
-    
+        # Gray clouds and a transparent no-data edge, per scene.
+        if algorithm_type == "composite":
+            for outfile in files_to_cog:
+                finalize_composite_rgba(
+                    outfile,
+                    mask_paths=(
+                        [cloud_mask_sidecar_path(outfile)]
+                        if args.cloud_mask
+                        else None
+                    ),
+                    gray=CLOUD_GRAY,
+                )
+
     # ---------------------------------------------------------------------
     # Convert to COG(s)
     # ---------------------------------------------------------------------
@@ -564,37 +643,11 @@ def main():
 
         cog_paths.append(cog_path)
 
-        # ---------------------------------------------------------
-        # Cleanup intermediate GeoTIFF
-        # ---------------------------------------------------------
+        # convert_to_cog converts in place (cog_path == outfile), so the
+        # file under this name is now the finished product.
+        unfinished.discard(outfile)
 
-        if (
-            os.path.exists(outfile)
-            and outfile != cog_path
-        ):
-            os.remove(outfile)
-
-            print(
-                f"Removed source GeoTIFF: {outfile}"
-            )
-
-    # -----------------------------------------------------------------
-    # Summary
-    # -----------------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("Landsat processing complete")
-    print("=" * 70)
-
-    print(
-        f"Created {len(cog_paths)} COG(s)."
-    )
-
-    for cog_path in cog_paths:
-        print(f"  {cog_path}")
-
-    print()
+    return cog_paths
 
 
 if __name__ == "__main__":

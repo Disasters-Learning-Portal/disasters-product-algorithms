@@ -66,6 +66,20 @@ SENSOR_CLIS = [
         "landsat.cli:process_landsat89_cli",
         id="landsat",
     ),
+    # The STAC ("ODR") CLIs. Their console scripts import and call main(), so
+    # going through the shim also proves the entry point resolves.
+    pytest.param(
+        "process_landsat_odr",
+        "shim",
+        "landsat.cli:process_landsat_odr_cli",
+        id="landsat_odr",
+    ),
+    pytest.param(
+        "process_sentinel2_odr",
+        "shim",
+        "sentinel2.cli:process_sentinel2_odr_cli",
+        id="sentinel2_odr",
+    ),
 ]
 
 

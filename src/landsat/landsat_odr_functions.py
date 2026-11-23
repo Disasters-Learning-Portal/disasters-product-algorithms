@@ -42,7 +42,19 @@ import tempfile
 # Constants
 # ---------------------------------------------------------------------
 LANDSAT_STAC_API = "https://earth-search.aws.element84.com/v1"
+# The algorithm catalog ships inside this package (it is declared as
+# package data in pyproject.toml), so resolve it relative to this file --
+# never relative to the caller's working directory.
+DEFAULT_ALGORITHM_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "algorithms-landsat.json",
+)
 LANDSAT_COLLECTION = "landsat-c2-l2"
+# The collection also holds Landsat 4, 5 and 7. This is the Landsat 8/9
+# pipeline: the band catalog, the QA bits and the product names are OLI's,
+# and a Landsat 7 scene after 2003 is striped with SLC-off gaps. Without the
+# filter any search window before 2024 quietly processes those scenes too.
+LANDSAT_PLATFORMS = ("landsat-8", "landsat-9")
 MAX_SEARCH_ITEMS = 200
 _PRODUCT_FILENAME_TOKENS = {"we": "waterExtent"}
 _EVI_G = 2.5
@@ -72,7 +84,7 @@ def _session(unsigned=False):
     return _aws_session_cache[key]
 
 def load_algorithms(
-    algorithm_file="algorithms-landsat.json",
+    algorithm_file=DEFAULT_ALGORITHM_FILE,
 ):
     """
     Load Sentinel-2 algorithm definitions from JSON.
@@ -96,7 +108,7 @@ def load_algorithms(
 def get_algorithm(
     algorithm_type,
     algorithm_name,
-    algorithm_file="algorithms-landsat.json",
+    algorithm_file=DEFAULT_ALGORITHM_FILE,
 ):
     """
     Retrieve a specific algorithm from the Sentinel-2 algorithm catalog.
@@ -286,9 +298,33 @@ def resample_array(
 
     return band, profile
 
+def _clamp_reflectance(band):
+    """
+    Clamp surface reflectance to the USGS valid range [0, 1]; NaN stays NaN.
+
+    LaSRC routinely returns slightly NEGATIVE reflectance over dark targets
+    -- NIR and SWIR over clear water, blue in shadow. USGS declares the
+    Collection 2 valid range as DN 7273-43636, i.e. about 0-1, so those
+    values are retrieval noise around a true value near zero. Left alone,
+    a negative NIR pushes NDWI above 1, and such a pixel was then written
+    as nodata: a hole over the clearest water, in the product used to map
+    floods. Clamping projects the noise onto the physical floor, so clear
+    water reads NDWI = 1, its correct limit.
+
+    Same convention as landsat89_functions.normalized_difference / genEvi
+    (.clinerules.md rule 64), so the two Landsat pipelines agree pixel for
+    pixel.
+    """
+    return np.clip(np.asarray(band, dtype=np.float32), 0.0, 1.0)
+
+
 def calculate_normalized_difference(bands):
     """
     Normalized difference of two bands: (b1 - b2) / (b1 + b2).
+
+    Inputs are clamped to [0, 1] first (see _clamp_reflectance), so the
+    result always lies in [-1, 1] and the only invalid pixels are source
+    nodata (NaN) and 0/0.
 
     Parameters
     ----------
@@ -303,7 +339,7 @@ def calculate_normalized_difference(bands):
         True where the result is meaningful.
     """
 
-    band1, band2 = (np.asarray(b, dtype=np.float32) for b in bands)
+    band1, band2 = (_clamp_reflectance(b) for b in bands)
 
     denominator = band1 + band2
 
@@ -356,7 +392,9 @@ def calculate_evi(bands):
     it just moves it.
     """
 
-    nir, red, blue = (np.asarray(b, dtype=np.float32) for b in bands)
+    # Clamped like the normalized differences (see _clamp_reflectance), as
+    # landsat89_functions.genEvi does.
+    nir, red, blue = (_clamp_reflectance(b) for b in bands)
 
     denominator = nir + _EVI_C1 * red - _EVI_C2 * blue + _EVI_L
 
@@ -512,7 +550,14 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
         with rio.open(path) as src:
             crs_list.append(src.crs)
 
-    crs_dom = max(set(crs_list), key=crs_list.count)
+    # Most common CRS; a tie goes to the first in WKT order. Taking max()
+    # over a bare set let the winner depend on the hash seed, so an area
+    # straddling a UTM zone boundary with equal scene counts per zone came
+    # out in a different projection from one run to the next.
+    crs_dom = max(
+        sorted(set(crs_list), key=lambda crs: crs.to_wkt()),
+        key=crs_list.count,
+    )
 
     merge_inputs = list(tif_paths)
     tmp_dir = None
@@ -521,7 +566,7 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
         # Reproject inputs that don't match the dominant CRS
         if any(crs != crs_dom for crs in crs_list):
 
-            tmp_dir = tempfile.mkdtemp(prefix="s2_merge_reproj_")
+            tmp_dir = tempfile.mkdtemp(prefix="landsat_merge_reproj_")
 
             for idx, tif in enumerate(tif_paths):
 
@@ -818,7 +863,10 @@ def search_landsat(
 
     catalog = connect_to_stac(stac_api_url)
 
-    query = {"eo:cloud_cover": {"lt": cloud_cover}}
+    query = {
+        "eo:cloud_cover": {"lt": cloud_cover},
+        "platform": {"in": list(LANDSAT_PLATFORMS)},
+    }
 
     print("Searching Landsat STAC catalog...")
     print(f"  Collection: {collection_id}")
@@ -871,7 +919,10 @@ def search_landsat_with_catalog(
 
     catalog = connect_to_stac(stac_api_url)
 
-    query = {"eo:cloud_cover": {"lt": cloud_cover}}
+    query = {
+        "eo:cloud_cover": {"lt": cloud_cover},
+        "platform": {"in": list(LANDSAT_PLATFORMS)},
+    }
 
     search = catalog.search(
         collections=[collection_id],
@@ -941,31 +992,114 @@ def _build_output_filename(
 
         Plain:              SAT_LEVEL_product_PATHROW_TIMESTAMP.tif
         Masked:             SAT_LEVEL_product_PATHROW_masked_TIMESTAMP.tif
-        Merged:             SAT_LEVEL_product_merged_TIMESTAMP.tif
-        Merged and masked:  SAT_LEVEL_product_merged_masked_TIMESTAMP.tif
+        Merged:             SAT_LEVEL_product_PATH_merged_DATE_day.tif
+        Merged and masked:  SAT_LEVEL_product_PATH_merged_masked_DATE_day.tif
+
+    e.g. "LC09_L2SP_ndvi_022035_2025-09-06T16:30:42Z.tif" (one scene) and
+    "LC09_L2SP_ndvi_P022_merged_2025-09-06_day.tif" (one pass, mosaicked).
+
+    A merged mosaic follows the repo convention (.clinerules.md rule 27):
+    DATE only, then `_day` -- it spans several scene times, so no single
+    time is true of it. PATH is the WRS-2 path (`P022`). With the time
+    gone it is what keeps two passes on one day -- Landsat 8 and 9, or
+    two paths at high latitude -- from writing the same file; the row is
+    dropped because a mosaic spans several.
 
     `variant` (e.g. "NSTD_1_5") goes directly after the product so
     several parameterisations of one product on one scene cannot
-    overwrite each other. When merged=True the path/row token is
-    dropped, since a mosaic spans several scenes; pass the first item
-    (by sort order) in that case.
+    overwrite each other. When merged=True pass the EARLIEST scene of the
+    pass (group_by_acquisition returns them in sensing order): its date is
+    the pass's date, even when the pass runs past 00:00 UTC.
     """
 
     sat, level, tile = _get_sat_level_tile(item)
     product = _product_token(algorithm_name)
+
+    variant_token = f"_{variant}" if variant else ""
+    masked_token = "_masked" if masked else ""
+
+    if merged:
+        return (
+            f"{sat}_{level}_{product}{variant_token}_P{tile[:3]}"
+            f"_merged{masked_token}_{item.datetime.strftime('%Y-%m-%d')}"
+            f"_day.tif"
+        )
+
     timestamp = item.datetime.replace(microsecond=0).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    variant_token = f"_{variant}" if variant else ""
-    tile_token = "" if merged else f"_{tile}"
-    merged_token = "_merged" if merged else ""
-    masked_token = "_masked" if masked else ""
-
     return (
-        f"{sat}_{level}_{product}{variant_token}{tile_token}"
-        f"{merged_token}{masked_token}_{timestamp}.tif"
+        f"{sat}_{level}_{product}{variant_token}_{tile}"
+        f"{masked_token}_{timestamp}.tif"
     )
+
+
+# ---------------------------------------------------------------------
+# Acquisitions (satellite passes)
+# ---------------------------------------------------------------------
+
+# The scenes of one Landsat pass are consecutive WRS-2 rows about 24 s
+# apart, and a satellite does not return to the same path for 16 days.
+# Any gap between a few minutes and a few days therefore separates "the
+# same pass" from "the next one"; 20 minutes is ~50 rows of track, far
+# longer than any area of interest.
+PASS_GAP_SECONDS = 20 * 60
+
+
+def group_by_acquisition(items, max_gap_seconds=PASS_GAP_SECONDS):
+    """
+    Split STAC items into satellite passes.
+
+    `--merge` mosaics one PASS, never several: scenes from different
+    passes differ in date, illumination and atmosphere, and a first-wins
+    mosaic across them silently stitches pre-event pixels into a
+    post-event product. A four-day window over one area of interest
+    routinely holds two or three passes (Landsat 8 and 9 are eight days
+    apart, and neighbouring paths overlap).
+
+    A pass is one satellite on one WRS-2 path within one stretch of
+    orbit. Scenes are grouped by (satellite, path) and then split
+    wherever consecutive sensing times are more than `max_gap_seconds`
+    apart. The UTC calendar date is deliberately NOT part of the key: a
+    daytime pass crosses 00:00 UTC near 152 E (eastern Australia), and a
+    date key would cut that single pass into two mosaics. Landsat STAC
+    items carry no datatake id to use instead, which is what the
+    Sentinel-2 pipeline keys on.
+
+    Returns
+    -------
+    list of list of pystac.Item
+        One inner list per pass, scenes in sensing order; passes ordered
+        by their first scene. Every input item appears exactly once.
+    """
+
+    tracks = {}
+
+    for item in items:
+        sat, _, tile = _get_sat_level_tile(item)
+        tracks.setdefault((sat, tile[:3]), []).append(item)
+
+    passes = []
+
+    for track in sorted(tracks):
+
+        scenes = sorted(tracks[track], key=lambda it: (it.datetime, it.id))
+        current = [scenes[0]]
+
+        for scene in scenes[1:]:
+
+            gap = (scene.datetime - current[-1].datetime).total_seconds()
+
+            if gap > max_gap_seconds:
+                passes.append(current)
+                current = [scene]
+            else:
+                current.append(scene)
+
+        passes.append(current)
+
+    return sorted(passes, key=lambda group: (group[0].datetime, group[0].id))
 
 # ---------------------------------------------------------------------
 # Raster reading
@@ -1043,10 +1177,16 @@ def read_algorithm_band(
 
     href, scale, offset, gsd, src_nodata = get_asset_metadata(asset)
 
-    if scale is None:
-        scale = 1.0
-    if offset is None:
-        offset = 0.0
+    # Never guess the radiometry. Defaulting to scale 1 / offset 0 turns
+    # raw DN into "reflectance": the index still comes out finite and
+    # plausible (healthy-vegetation NDVI 0.46 instead of 0.84) with nothing
+    # to say it is wrong.
+    if apply_scale and (scale is None or offset is None):
+        raise ValueError(
+            f"STAC asset {href} has no raster:bands scale/offset "
+            f"(scale={scale}, offset={offset}); cannot convert DN to "
+            f"reflectance."
+        )
     if gsd is None:
         gsd = item_gsd
     if gsd is None:
@@ -1176,7 +1316,7 @@ def generate_index(
     item,
     algorithm,
     algorithm_name,
-    output_dir="./s3_temp",
+    output_dir="/tmp/s3_temp",
     nodata=-9999,
     cloud_mask=False,
 ):
@@ -1311,7 +1451,7 @@ def generate_composite(
     item,
     algorithm,
     algorithm_name,
-    output_dir="./s3_temp",
+    output_dir="/tmp/s3_temp",
     cloud_mask=False,
 ):
     """
@@ -1387,19 +1527,23 @@ def generate_composite(
         high=COMPOSITE_LOG_HIGH,
     )
 
-    # apply_log_scale returns NaN for nodata. Resolve it BEFORE the
-    # uint8 cast: NaN -> integer is undefined in numpy.
-    array = np.nan_to_num(
-        array,
-        nan=0.0,
-        posinf=255.0,
-        neginf=0.0,
+    # 0 is reserved for "no data" (source fill and masked cloud, both DN 0
+    # here): the merge and the alpha band key on it. A VALID pixel darker
+    # than COMPOSITE_LOG_LOW also stretches to 0, so valid pixels are
+    # floored at 1 -- otherwise deep shadow came out transparent, and in a
+    # mosaic a single dark band was "filled" from the neighbouring scene.
+    # The legacy composites keep valid pixels in [1, 255] for the same
+    # reason.
+    #
+    # apply_log_scale returns NaN for DN <= 0. Resolve it BEFORE the uint8
+    # cast: NaN -> integer is undefined in numpy.
+    array = np.where(
+        rgb > 0,
+        np.clip(np.nan_to_num(array, nan=0.0, posinf=255.0, neginf=0.0), 1, 255),
+        0,
     )
 
-    array = np.asarray(
-        np.clip(array, 0, 255),
-        dtype=np.uint8,
-    )
+    array = np.asarray(array, dtype=np.uint8)
 
     profile = _output_profile(
         profile,

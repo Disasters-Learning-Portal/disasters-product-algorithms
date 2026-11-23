@@ -326,15 +326,15 @@ single `--product` per invocation.
 # ==============================================================================
 import subprocess
 
-# Snapshot OUTPUT_DIR BEFORE this run, so the review and upload cells below can
-# scope themselves to what THIS run produced. Globbing the whole output dir
-# would sweep up leftovers from a previous activation and publish them under
-# the current event's prefix.
+# NEW_COGS is what the review and upload cells below work on: the files THIS
+# run produced, and only those from a product that FINISHED. Globbing the whole
+# output dir instead would sweep up leftovers from a previous activation and
+# publish them under the current event's prefix.
 #
-# The snapshot records each file's modification time, not just its name: the
-# CLI writes deterministic names, so re-running this cell REWRITES the same
-# files. Comparing names alone called a re-run "0 COGs produced", and the
-# review and upload cells then had nothing to work on.
+# OUTPUT_DIR is snapshotted around each product's CLI call. The snapshot holds
+# each file's modification time, not just its name: the CLI writes
+# deterministic names, so re-running this cell REWRITES the same files, and a
+# comparison of names alone called a re-run "0 COGs produced".
 import glob
 
 
@@ -346,8 +346,7 @@ def _output_snapshot():
     }
 
 
-_before = _output_snapshot()
-
+NEW_COGS = []
 failures = []
 
 for product, enabled in PRODUCTS.items():
@@ -383,6 +382,8 @@ for product, enabled in PRODUCTS.items():
 
     print(f"Command: {' '.join(process_cmd)}\\n")
 
+    _before = _output_snapshot()
+
     process = subprocess.Popen(
         process_cmd,
         stdout=subprocess.PIPE,
@@ -395,16 +396,25 @@ for product, enabled in PRODUCTS.items():
 
     return_code = process.wait()
 
+    # New files, and files this call rewrote.
+    _written = [
+        f for f, mtime in _output_snapshot().items() if _before.get(f) != mtime
+    ]
+
     if return_code == 0:
+        NEW_COGS += _written
         print(f"\\n[ok] {product} completed")
     else:
+        # A product that died part-way leaves GeoTIFFs under product names
+        # that are not COGs and carry no activation tags. They stay out of
+        # NEW_COGS, so nothing below can review or publish them as finished.
         failures.append((product, return_code))
-        print(f"\\n[FAILED] {product} exited {return_code}")
+        print(
+            f"\\n[FAILED] {product} exited {return_code}; "
+            f"{len(_written)} unfinished file(s) left out of NEW_COGS"
+        )
 
-# Products written by THIS run: new files, and files this run rewrote.
-NEW_COGS = sorted(
-    f for f, mtime in _output_snapshot().items() if _before.get(f) != mtime
-)
+NEW_COGS = sorted(set(NEW_COGS))
 
 print()
 print("=" * 70)
@@ -412,9 +422,8 @@ print(f"{len(NEW_COGS)} COG(s) produced by this run:")
 for f in NEW_COGS:
     print(f"  {os.path.basename(f)}")
 
-# Stop here, so "Run All" cannot carry on into the upload. A product that died
-# part-way leaves GeoTIFFs under product names that are not COGs and carry no
-# activation tags; the upload cell would publish them as if they were finished.
+# Stop here, so "Run All" cannot carry on into the upload with part of what was
+# asked for missing.
 if failures:
     raise RuntimeError(
         f"{len(failures)} product(s) FAILED: {failures}. Review the output "

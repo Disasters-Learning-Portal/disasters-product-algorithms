@@ -355,11 +355,39 @@ class TestProcessCell:
 
         import subprocess
 
-        ns, _ = self._namespace(config_src, tmp_path, monkeypatch)
+        ns, out = self._namespace(config_src, tmp_path, monkeypatch)
         monkeypatch.setattr(subprocess, "Popen", _Failing)
         with pytest.raises(RuntimeError, match="FAILED"):
             exec(compile(process_src, "process_cell", "exec"), ns)
-        assert "NEW_COGS" in ns, "what did succeed must still be reviewable"
+        assert ns["NEW_COGS"] == []
+        assert list(out.glob("*.tif")), "the failed product's file is on disk..."
+
+    def test_only_finished_products_are_listed(
+        self, config_src, process_src, tmp_path, monkeypatch
+    ):
+        """...and must never reach the upload. The CLI deletes what it had not
+        finished when it fails, but a process killed outright (out of memory on
+        a full-scene composite) cannot. Raising is not enough either: the
+        upload cell can be run by hand afterwards. NEW_COGS, which is all the
+        upload cell reads, holds only what a successful product wrote."""
+        class _NdviFails(_FakePopen):
+            def __init__(self, cmd, **kwargs):
+                super().__init__(cmd, **kwargs)
+                self.product = cmd[cmd.index("--product") + 1]
+
+            def wait(self):
+                return -9 if self.product == "ndvi" else 0
+
+        import subprocess
+
+        products = dict(exec_config(config_src)["PRODUCTS"], true_color=True, ndvi=True, evi=True)
+        ns, _ = self._namespace(config_src, tmp_path, monkeypatch, PRODUCTS=products)
+        monkeypatch.setattr(subprocess, "Popen", _NdviFails)
+        with pytest.raises(RuntimeError, match="ndvi"):
+            exec(compile(process_src, "process_cell", "exec"), ns)
+
+        listed = sorted(os.path.basename(f).split("_")[2] for f in ns["NEW_COGS"])
+        assert listed == ["evi", "true"], listed
 
     def test_view_and_plot_use_new_cogs_not_a_directory_glob(self, cells):
         for marker in ("REVIEW THE COGs", "PREVIEW THE LANDSAT COGs"):

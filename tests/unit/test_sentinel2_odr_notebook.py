@@ -445,20 +445,47 @@ class TestProcessCellScopesToThisRun:
 
     def test_a_failed_product_stops_the_run(self, config_src, process_src, tmp_path, monkeypatch):
         """The cell used to print "FAILED" and carry on, so "Run All" went
-        straight into the upload. A product that dies part-way leaves GeoTIFFs
-        under product names that are not COGs and have no activation tags."""
+        straight into the upload."""
         class _Failing(_FakePopen):
             def wait(self):
                 return 2
 
         import subprocess
 
-        ns, _ = self._namespace(config_src, tmp_path, monkeypatch)
+        ns, out = self._namespace(config_src, tmp_path, monkeypatch)
         monkeypatch.setattr(subprocess, "Popen", _Failing)
         _FakePopen.runs = 1
         with pytest.raises(RuntimeError, match="FAILED"):
             exec(compile(process_src, "process_cell", "exec"), ns)
-        assert "NEW_COGS" in ns, "what the run did write must still be reviewable"
+        assert ns["NEW_COGS"] == []
+        assert list(out.glob("*.tif")), "the failed products' files are on disk..."
+
+    def test_only_finished_products_are_listed(self, config_src, process_src, tmp_path, monkeypatch):
+        """...and must never reach the upload. A product that dies part-way
+        leaves GeoTIFFs under product names that are not COGs and carry no
+        activation tags; raising is not enough, because an operator can run
+        the upload cell by hand afterwards. NEW_COGS, which is all the upload
+        cell reads, holds only what a successful product wrote."""
+        class _NdviFails(_FakePopen):
+            def __init__(self, cmd, **kwargs):
+                super().__init__(cmd, **kwargs)
+                self.product = cmd[cmd.index("--product") + 1]
+
+            def wait(self):
+                return 1 if self.product == "ndvi" else 0
+
+        import subprocess
+
+        products = dict(exec_config(config_src)["PRODUCTS"], true_color=True, ndvi=True, evi=True)
+        ns, _ = self._namespace(config_src, tmp_path, monkeypatch)
+        ns["PRODUCTS"] = products
+        monkeypatch.setattr(subprocess, "Popen", _NdviFails)
+        _FakePopen.runs = 1
+        with pytest.raises(RuntimeError, match="ndvi"):
+            exec(compile(process_src, "process_cell", "exec"), ns)
+
+        listed = sorted(os.path.basename(f).split("_")[2] for f in ns["NEW_COGS"])
+        assert listed == ["evi", "true"], listed
 
 
 class TestUploadCellRuns:

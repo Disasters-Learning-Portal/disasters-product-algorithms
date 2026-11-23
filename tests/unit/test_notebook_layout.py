@@ -1,18 +1,28 @@
 """The notebooks/ split, and the rule that a sensor notebook owns no paths.
 
-Two things are pinned here:
+Three things are pinned here:
 
-1. `notebooks/` holds the per-sensor workflows and nothing else. Everything an
-   operator reaches for around them -- transfers, templates, one-off utilities --
-   lives in `notebooks/tools/`, and the fixtures under
+1. `notebooks/` holds the CURRENT per-sensor workflows and nothing else.
+   Everything an operator reaches for around them -- transfers, templates,
+   one-off utilities -- lives in `notebooks/tools/`, and the fixtures under
    `notebooks/testing-notebooks/` are left alone.
 
-2. A sensor notebook does not name a bucket or a product directory. Both are
+2. A workflow that a newer pipeline has superseded is RETIRED, not deleted and
+   not renamed: it moves to `notebooks/legacy/`, still runnable, behind a banner
+   naming its successor. Deleting it would take away the fallback an operator
+   needs while the new pipeline beds in; giving the new notebook the old name
+   would put a different pipeline, data source and product list behind a name
+   people already trust. Both registries below are hard-coded on purpose --
+   adding, retiring or un-retiring a workflow should take a deliberate edit
+   here.
+
+3. A sensor notebook does not name a bucket or a product directory. Both are
    hard-coded once in `shared_utils.product_paths`; the notebook names its
    sensor and lets the table resolve the rest. Notebooks are not linted or
    executed in CI, so a hard-coded path that drifts from the bucket is invisible
    until an operator publishes to the wrong prefix -- which is what these assert
-   against.
+   against. A retired workflow can still publish to the live bucket, so it is
+   held to exactly the same contract as a current one.
 """
 
 import ast
@@ -27,10 +37,11 @@ REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 NB_DIR = os.path.join(REPO_ROOT, "notebooks")
 TOOLS_DIR = os.path.join(NB_DIR, "tools")
 TESTING_DIR = os.path.join(NB_DIR, "testing-notebooks")
+LEGACY_DIR = os.path.join(NB_DIR, "legacy")
 
+# notebooks/<name> -> sensor key. The CURRENT operator workflows.
 SENSOR_NOTEBOOKS = {
-    "landsat_workflow.ipynb": "landsat",
-    "sentinel2_workflow.ipynb": "sentinel2",
+    "landsat_odr_workflow.ipynb": "landsat",
     "sentinel2_odr_workflow.ipynb": "sentinel2",
     "satellogic_workflow.ipynb": "satellogic",
     "skysat_workflow.ipynb": "skysat",
@@ -38,6 +49,23 @@ SENSOR_NOTEBOOKS = {
     "capella_workflow.ipynb": "capella",
     "iceye_workflow.ipynb": "iceye",
 }
+
+# notebooks/legacy/<name> -> (sensor key, the current workflow that superseded it).
+# RETIRED workflows: an older pipeline for a sensor that now has a newer one.
+LEGACY_NOTEBOOKS = {
+    "landsat_workflow.ipynb": ("landsat", "landsat_odr_workflow.ipynb"),
+    "sentinel2_workflow.ipynb": ("sentinel2", "sentinel2_odr_workflow.ipynb"),
+}
+
+# Every notebook an operator can publish from, keyed by its path under
+# notebooks/. The contract tests below run over all of them: retiring a
+# workflow moves it, it does not excuse it.
+WORKFLOW_NOTEBOOKS = {
+    **SENSOR_NOTEBOOKS,
+    **{f"legacy/{name}": sensor for name, (sensor, _) in LEGACY_NOTEBOOKS.items()},
+}
+
+LEGACY_BANNER = "LEGACY WORKFLOW"
 
 
 def _code(path):
@@ -102,12 +130,36 @@ def _all_source(path):
     return "\n".join("".join(c["source"]) for c in nb["cells"])
 
 
+def _fstring_skeleton(node):
+    """An f-string with each replacement field shown as `{<expression>}`."""
+    return "".join(
+        part.value if isinstance(part, ast.Constant)
+        else "{" + ast.unparse(part.value) + "}"
+        for part in node.values
+    )
+
+
+def _docstrings(tree):
+    """The string statements that really are docstrings."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                found.add(id(body[0]))
+    return found
+
+
 class TestNotebookSplit:
     def test_only_sensor_workflows_sit_at_the_top_level(self):
         top = {f for f in os.listdir(NB_DIR) if f.endswith(".ipynb")}
         assert top == set(SENSOR_NOTEBOOKS), (
-            "notebooks/ is for the per-sensor workflows; anything else belongs "
-            "in notebooks/tools/"
+            "notebooks/ is for the CURRENT per-sensor workflows. A tool belongs "
+            "in notebooks/tools/; a workflow a newer pipeline has superseded "
+            "belongs in notebooks/legacy/ (and in LEGACY_NOTEBOOKS). A new "
+            "workflow needs an entry in SENSOR_NOTEBOOKS."
         )
 
     def test_tools_directory_exists_and_is_populated(self):
@@ -120,8 +172,73 @@ class TestNotebookSplit:
         assert [f for f in os.listdir(TESTING_DIR) if f.endswith(".ipynb")]
 
 
+class TestRetiredWorkflows:
+    """notebooks/legacy/ -- superseded workflows, kept runnable as a fallback."""
+
+    def test_legacy_directory_holds_exactly_the_retired_workflows(self):
+        assert os.path.isdir(LEGACY_DIR)
+        legacy = {f for f in os.listdir(LEGACY_DIR) if f.endswith(".ipynb")}
+        assert legacy == set(LEGACY_NOTEBOOKS), (
+            "notebooks/legacy/ must hold exactly the workflows registered in "
+            "LEGACY_NOTEBOOKS -- retiring (or un-retiring) one is a deliberate edit"
+        )
+
+    def test_a_workflow_is_never_both_current_and_retired(self):
+        # Two copies under one name leave an operator guessing which is live.
+        assert not set(SENSOR_NOTEBOOKS) & set(LEGACY_NOTEBOOKS)
+
+    @pytest.mark.parametrize("nb", sorted(LEGACY_NOTEBOOKS))
+    def test_retired_workflow_names_a_current_successor(self, nb):
+        sensor, successor = LEGACY_NOTEBOOKS[nb]
+        assert successor in SENSOR_NOTEBOOKS, (
+            f"legacy/{nb} is superseded by {successor}, which is not a current "
+            f"workflow -- a sensor must never be left with only a retired notebook"
+        )
+        assert SENSOR_NOTEBOOKS[successor] == sensor, (
+            f"legacy/{nb} ({sensor}) cannot be superseded by a "
+            f"{SENSOR_NOTEBOOKS[successor]} workflow"
+        )
+
+    @pytest.mark.parametrize("nb", sorted(LEGACY_NOTEBOOKS))
+    def test_retired_workflow_says_so_at_the_top(self, nb):
+        """An operator who opens a retired notebook must see that it is one,
+        and where the current workflow lives, before the first code cell."""
+        _, successor = LEGACY_NOTEBOOKS[nb]
+        with open(os.path.join(LEGACY_DIR, nb), encoding="utf-8") as fh:
+            cells = json.load(fh)["cells"]
+        first_code = next(i for i, c in enumerate(cells) if c["cell_type"] == "code")
+        banners = [
+            "".join(c["source"]) for c in cells[:first_code]
+            if c["cell_type"] == "markdown" and LEGACY_BANNER in "".join(c["source"])
+        ]
+        assert banners, f"legacy/{nb} has no '{LEGACY_BANNER}' banner above its first code cell"
+        assert successor in banners[0], (
+            f"legacy/{nb}: the banner must point at its successor, {successor}"
+        )
+
+    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    def test_a_current_workflow_carries_no_legacy_banner(self, nb):
+        assert LEGACY_BANNER not in _all_source(os.path.join(NB_DIR, nb))
+
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
+    def test_relative_src_path_matches_the_notebook_depth(self, nb):
+        """`sys.path.append('../src')` is right one level under the repo root and
+        wrong two levels under it. Moving a notebook into legacy/ without fixing
+        the path leaves a local (non-installed) checkout importing nothing."""
+        depth = nb.count("/") + 1                     # notebooks/ = 1, notebooks/legacy/ = 2
+        expected = "/".join([".."] * depth + ["src"])
+        found = re.findall(
+            r"""sys\.path\.(?:append|insert)\((?:\s*\d+\s*,)?\s*["']((?:\.\./)+src)["']""",
+            _code(os.path.join(NB_DIR, nb)),
+        )
+        assert all(path == expected for path in found), (
+            f"{nb} adds {found} to sys.path; from its directory the package "
+            f"source is at {expected!r}"
+        )
+
+
 class TestSensorNotebooksOwnNoPaths:
-    @pytest.mark.parametrize("nb,sensor", sorted(SENSOR_NOTEBOOKS.items()))
+    @pytest.mark.parametrize("nb,sensor", sorted(WORKFLOW_NOTEBOOKS.items()))
     def test_declares_its_sensor_key(self, nb, sensor):
         src = _code(os.path.join(NB_DIR, nb))
         assert f'PRODUCT_SENSOR = "{sensor}"' in src, (
@@ -129,13 +246,13 @@ class TestSensorNotebooksOwnNoPaths:
             f"its destinations"
         )
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_takes_the_bucket_from_the_shared_table(self, nb):
         src = _code(os.path.join(NB_DIR, nb))
         assert "from shared_utils.product_paths import STAGING_BUCKET" in src
         assert "S3_BUCKET = STAGING_BUCKET" in src
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_names_no_bucket_literal(self, nb):
         # Three sensor notebooks had drifted onto two different buckets.
         src = _code(os.path.join(NB_DIR, nb))
@@ -143,15 +260,20 @@ class TestSensorNotebooksOwnNoPaths:
                     '"nasa-disasters-staging"', "'nasa-disasters-staging'"):
             assert bad not in src, f"{nb} hard-codes the bucket {bad}"
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_stale_prefix_variables(self, nb):
         # S3_PREFIX / S3_DEST_BASE are gone; a leftover reference is a NameError
-        # at run time, and notebooks are not executed in CI to catch it.
+        # at run time, and notebooks are not executed in CI to catch it. Any
+        # S3_*PREFIX is refused, not just that one spelling: landsat_odr shipped
+        # an S3_TEST_PREFIX that decided where every product was published.
         src = _all_source(os.path.join(NB_DIR, nb))
-        for var in ("S3_PREFIX", "S3_DEST_BASE"):
-            assert not re.search(r"\b" + var + r"\b", src), f"{nb} still refers to {var}"
+        stale = sorted(set(re.findall(r"\bS3_\w*PREFIX\b|\bS3_DEST_BASE\b", src)))
+        assert not stale, (
+            f"{nb} still refers to {stale}; the destination prefix comes from "
+            f"shared_utils.product_paths"
+        )
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_literal_product_directory_map(self, nb):
         """A token -> directory dict in a notebook is a second source of truth.
 
@@ -179,7 +301,7 @@ class TestSensorNotebooksOwnNoPaths:
                 f"resolve them through shared_utils.product_paths.product_dir"
             )
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_publishes_through_the_shared_resolver(self, nb):
         src = _code(os.path.join(NB_DIR, nb))
         assert ("prefix_for_product_dir" in src) or ("sensor=PRODUCT_SENSOR" in src), (
@@ -187,7 +309,74 @@ class TestSensorNotebooksOwnNoPaths:
             f"prefix_for_product_dir() or by passing sensor= to upload_dir_ambient()"
         )
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    # What may follow "s3://{S3_BUCKET}/" in a notebook: a key that came out of
+    # the shared table, or the "ProgramData/<Sensor>/<Product>/" placeholder a
+    # notebook prints for the operator.
+    _FROM_THE_TABLE = ("{_key}", "{prefix_for_product_dir(", "ProgramData/")
+
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
+    def test_every_destination_in_the_bucket_comes_from_the_table(self, nb):
+        """A notebook that names the resolver can still upload somewhere else.
+
+        Both ODR notebooks did: `f"s3://{S3_BUCKET}/Sentinel_Test/{filename}"`
+        and `f"s3://{S3_BUCKET}/{S3_TEST_PREFIX}/{filename}"` (default
+        "Landsat_Test"), each next to a correct call that was not the one being
+        made. test_publishes_through_the_shared_resolver passed on both,
+        because the resolver's name was still in the cell.
+        """
+        marker = "s3://{S3_BUCKET}/"
+        for cell in _code_cells(os.path.join(NB_DIR, nb)):
+            try:
+                tree = ast.parse(cell)
+            except SyntaxError:
+                continue  # covered by test_every_code_cell_parses
+            for node in ast.walk(tree):
+                # `_key` is only "from the table" if the table built it.
+                if (isinstance(node, ast.Assign)
+                        and getattr(node.targets[0], "id", None) == "_key"):
+                    built = (_fstring_skeleton(node.value)
+                             if isinstance(node.value, ast.JoinedStr) else ast.unparse(node.value))
+                    assert built.startswith("{prefix_for_product_dir("), (
+                        f"{nb} sets _key = {built!r}; the upload key must start "
+                        f"with prefix_for_product_dir(...)"
+                    )
+                if not isinstance(node, ast.JoinedStr):
+                    continue
+                for tail in _fstring_skeleton(node).split(marker)[1:]:
+                    assert tail.startswith(self._FROM_THE_TABLE), (
+                        f"{nb} builds the destination {marker}{tail!r}; under the "
+                        f"staging bucket only a key resolved through "
+                        f"shared_utils.product_paths is allowed"
+                    )
+
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
+    def test_no_code_is_parked_in_a_string_literal(self, nb):
+        """A statement that is only a string does nothing.
+
+        sentinel2_odr_workflow.ipynb "commented out" its canonical upload call
+        by wrapping it in triple quotes, then printed a message saying the
+        files had gone there. It parses, it names every resolver, and it never
+        runs -- so every other check in this file passed.
+        """
+        for i, cell in enumerate(_code_cells(os.path.join(NB_DIR, nb))):
+            try:
+                tree = ast.parse(cell)
+            except SyntaxError:
+                continue  # covered by test_every_code_cell_parses
+            docstrings = _docstrings(tree)
+            stray = [
+                node.value.value for node in ast.walk(tree)
+                if isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+                and id(node) not in docstrings
+            ]
+            assert not stray, (
+                f"{nb} code cell {i} has a bare string statement: {stray[0][:80]!r}. "
+                f"Delete dead code; a string literal is not a comment."
+            )
+
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_upload_cell_has_no_unbound_names(self, nb):
         """Every name a notebook uses must be bound by the notebook itself.
 
@@ -209,7 +398,7 @@ class TestSensorNotebooksOwnNoPaths:
             f"Import them in the cell that uses them."
         )
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_every_code_cell_parses(self, nb):
         path = os.path.join(NB_DIR, nb)
         with open(path, encoding="utf-8") as fh:
@@ -264,7 +453,7 @@ class TestNotebookUploadsUseAmbientCredentials:
                     names.add(getattr(fn, "id", None) or getattr(fn, "attr", ""))
         return names - {None, ""}
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_notebook_uses_the_maap_credential_path(self, nb):
         used = self._referenced(os.path.join(NB_DIR, nb)) & self.MAAP_ONLY
         assert not used, (
@@ -280,12 +469,13 @@ class TestNotebookUploadsUseAmbientCredentials:
             used = self._referenced(os.path.join(TOOLS_DIR, name)) & self.MAAP_ONLY
             assert not used, f"{name} reaches the MAAP-credential path ({sorted(used)})"
 
-    @pytest.mark.parametrize("nb", ["landsat_workflow.ipynb", "sentinel2_workflow.ipynb"])
+    @pytest.mark.parametrize("nb", sorted(LEGACY_NOTEBOOKS))
     def test_directory_publishers_use_the_ambient_helper(self, nb):
-        """These two publish a whole tree, so they keep staging_upload's keying."""
-        assert "upload_dir_ambient" in self._referenced(os.path.join(NB_DIR, nb))
+        """The two retired workflows publish a whole product tree, so they keep
+        staging_upload's keying."""
+        assert "upload_dir_ambient" in self._referenced(os.path.join(LEGACY_DIR, nb))
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_upload_is_opt_in(self, nb):
         """Publishing to the production bucket is never the default.
 
@@ -300,6 +490,42 @@ class TestNotebookUploadsUseAmbientCredentials:
 
 class TestOdrGeneratorStaysInSync:
     """sentinel2_odr_workflow.ipynb is generated; the generator must match it."""
+
+    def test_the_committed_notebook_is_what_the_generator_writes(self):
+        """Editing the notebook in Jupyter is the natural thing to do, and wrong.
+
+        PR #190 did exactly that: seven cells changed in the notebook and none
+        in the generator, so the next regeneration would have silently undone
+        the new cloud-mask product -- and until then the generator described a
+        notebook that no longer existed. The check below (same wiring) passed
+        throughout; only a cell-for-cell comparison notices.
+
+        Cell type and source are compared, not ids or metadata: Jupyter adds
+        those on save and they change nothing an operator runs.
+        """
+        gen_path = os.path.join(REPO_ROOT, "tools", "_build_s2_odr_notebook.py")
+        spec = importlib.util.spec_from_file_location("_build_s2_odr_notebook", gen_path)
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+
+        def cells_of(nb):
+            return [(c["cell_type"], "".join(c["source"])) for c in nb["cells"]]
+
+        with open(os.path.join(NB_DIR, "sentinel2_odr_workflow.ipynb"), encoding="utf-8") as fh:
+            committed = cells_of(json.load(fh))
+        generated = cells_of(gen.build())
+
+        assert len(committed) == len(generated), (
+            f"the committed notebook has {len(committed)} cells, the generator "
+            f"writes {len(generated)}"
+        )
+        for i, (have, want) in enumerate(zip(committed, generated)):
+            assert have == want, (
+                f"notebooks/sentinel2_odr_workflow.ipynb cell {i} differs from "
+                f"tools/_build_s2_odr_notebook.py. The notebook is generated: "
+                f"make the change in the generator, then run "
+                f"`python tools/_build_s2_odr_notebook.py`."
+            )
 
     def test_generator_carries_the_same_wiring(self):
         gen = os.path.join(REPO_ROOT, "tools", "_build_s2_odr_notebook.py")
@@ -317,11 +543,16 @@ class TestOdrGeneratorStaysInSync:
 VENDOR_NOTEBOOKS = ("capella_workflow.ipynb", "umbra_workflow.ipynb",
                     "skysat_workflow.ipynb", "satellogic_workflow.ipynb",
                     "iceye_workflow.ipynb")
+# landsat_odr keeps its OUTPUT_DIR under /tmp too, and reads no vendor bucket.
+# (sentinel2_odr is deliberately absent: its water-extent reference cache --
+# a 1.6 GB national CDL -- lives under OUTPUT_DIR and must survive a re-run, so
+# it scopes to NEW_COGS by modification time instead of emptying the directory.)
+RESET_NOTEBOOKS = VENDOR_NOTEBOOKS + ("landsat_odr_workflow.ipynb",)
 _CLI_OUTPUT_RE = re.compile(r"""["']--output["']\s*,\s*OUTPUT_DIR""")
 
 
 class TestTmpHygiene:
-    @pytest.mark.parametrize("nb", VENDOR_NOTEBOOKS)
+    @pytest.mark.parametrize("nb", RESET_NOTEBOOKS)
     def test_output_dir_reset_before_the_cli_writes_to_it(self, nb):
         reset_seen = False
         dispatched = False
@@ -338,7 +569,7 @@ class TestTmpHygiene:
                 reset_seen = True
         assert dispatched, f"{nb}: no cell passes --output OUTPUT_DIR to the CLI"
 
-    @pytest.mark.parametrize("nb", sorted(SENSOR_NOTEBOOKS))
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_mkstemp(self, nb):
         # mkstemp minted a new activation_meta_*.json in /tmp on every run of the
         # config cell; a fixed per-sensor name is overwritten instead.

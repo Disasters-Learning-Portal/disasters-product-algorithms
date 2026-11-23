@@ -72,7 +72,7 @@ inputs:
     default: "2"
   - name: products
     label: Products
-    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir. One COG per product per scene."
+    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir cloud_mask. One COG per product per scene. cloud_mask (the cloud / cloud-shadow / thin-cirrus mask as its own product) needs level 2."
     type: string
     default: "true_color ndvi"
   - name: cloud_cover

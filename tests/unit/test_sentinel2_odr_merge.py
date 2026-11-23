@@ -344,3 +344,47 @@ def test_pooled_statistics_rules():
     assert (mean, std) == (2.0, 1.0)
     with pytest.raises(RuntimeError, match="any tile of this acquisition"):
         pooled_water_statistics([(np.array([]), np.array([]))])
+
+
+def test_a_direct_call_classifies_like_the_cli(tmp_path, monkeypatch):
+    """ONE water-threshold formula: mean + nstd * std of the reference water.
+
+    The CLI always passes pooled `water_stats`. A second formula (median +
+    1.4826 * MAD) had been added on the path taken only when `water_stats` is
+    None -- which no CLI, DPS or notebook run takes -- so a direct call drew a
+    different flood map from the CLI for the same tile. Here the land sits at
+    1260 DN: above mean + std (1250, not water) and below median + robust std
+    (1274, water)."""
+    from shared_utils.landcover import pooled_water_statistics
+
+    item = _we_items()[0]
+    profile = {"crs": "EPSG:32633", "transform": from_origin(500000, 5000000, 10, 10),
+               "width": 40, "height": 20, "count": 1, "dtype": "uint16", "driver": "GTiff"}
+    nir = np.full((20, 40), 1260, np.uint16)
+    nir[:, 0:10] = np.where(np.indices((20, 10)).sum(0) % 2, 1150, 1250)
+    worldcover = np.full((20, 40), 40, np.uint8)
+    worldcover[:, 0:10] = 80
+
+    def fake_worldcover(nir_profile, year, output_path):
+        with rio.open(output_path, "w", **{**profile, "dtype": "uint8"}) as dst:
+            dst.write(worldcover, 1)
+
+    monkeypatch.setattr(odr, "get_asset_metadata", lambda a: ("x", 1e-4, -0.1, 10, 0))
+    monkeypatch.setattr(odr, "read_algorithm_band", lambda asset, **kw: (nir.copy(), dict(profile)))
+    monkeypatch.setattr(odr, "_download_worldcover_for_water_extent", fake_worldcover)
+
+    catalog = odr.os.path.join(odr.os.path.dirname(odr.__file__), "algorithms-sentinel2.json")
+    kwargs = dict(item=item, algorithm=odr.get_algorithm("water_extent", "we", catalog),
+                  algorithm_name="we", output_dir=str(tmp_path), cloud_mask=False)
+
+    def classify(**extra):
+        with rio.open(odr.generate_water_extent(nstd=1.0, **kwargs, **extra)) as src:
+            return src.read(1)
+
+    sample = odr.generate_water_extent(sample_only=True, **kwargs)
+    direct = classify()
+    pooled = classify(water_stats=pooled_water_statistics([sample]))
+
+    assert (direct == pooled).all()
+    assert (direct[3:17, 13:37] != 4).all()        # the 1260 DN land is not flooded
+    assert (direct[3:17, 2:8] == 1).all()          # the reference water is water

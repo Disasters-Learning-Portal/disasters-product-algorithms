@@ -1080,12 +1080,16 @@ def _download_cdl_for_water_extent(
                 f"Downloading national {year} 30-m CDL..."
             )
             print(
-                "This is approximately 1.6 GB for the 2024 CDL. It is "
+                "This is 1.6-1.9 GB depending on the year. It is "
                 "cached and reused across every scene in this run."
             )
 
+            # NASS moved the national zips under /sites/default/files/.
+            # The old /Research_and_Science/... path now answers 404 for
+            # every year, which stopped any CONUS water-extent run with a
+            # cold cache before a single tile was classified.
             cdl_url = (
-                "https://www.nass.usda.gov/"
+                "https://www.nass.usda.gov/sites/default/files/"
                 "Research_and_Science/Cropland/Release/datasets/"
                 f"{year}_30m_cdls.zip"
             )
@@ -2077,23 +2081,24 @@ def generate_water_extent(
 
     
     # -------------------------------------------------------------
-    # Calculate robust dynamic NIR threshold using median + MAD
+    # Calculate the dynamic NIR threshold
     #
-    # The previous mean + nstd * std approach is sensitive to
-    # contaminated permanent-water samples and their upper tail.
+    #   nir_thresh = mean(water NIR) + nstd * std(water NIR)
     #
-    # New approach:
+    # ONE formula, whichever way the statistics arrive. The CLI always
+    # passes `water_stats`, pooled over every tile of the pass
+    # (shared_utils.landcover.pooled_water_statistics); a direct caller
+    # that passes none gets the same statistic from this tile's own
+    # sample, so the two routes classify a tile identically.
     #
-    #   water_median = median(water NIR)
-    #   MAD = median(abs(water NIR - water_median))
-    #   robust_std = 1.4826 * MAD
-    #   nir_thresh = water_median + nstd * robust_std
-    #
-    # The factor 1.4826 makes MAD comparable to standard deviation
-    # for normally distributed data.
-    #
-    # This preserves the interpretation of nstd while making the
-    # threshold substantially more resistant to outliers.
+    # A median + MAD threshold was tried in this branch. It is more
+    # robust to a contaminated water sample, but it lived only in the
+    # no-`water_stats` path, which no CLI, DPS or notebook run takes --
+    # so nothing published used it, while a direct call produced a
+    # different flood map from the CLI for the same tile (30 000 of
+    # 80 000 pixels in a synthetic scene). A robust statistic belongs in
+    # pooled_water_statistics, for all three water-extent pipelines at
+    # once, after validation on real scenes.
     # -------------------------------------------------------------
 
     # nstd: caller wins, then algorithm configuration, then 1.0
@@ -2124,13 +2129,10 @@ def generate_water_extent(
                 "No finite NIR values remain in the permanent-water "
                 "sample. Cannot calculate the water threshold."
             )
-        water_median = np.nanmedian(water_nir)
-        mad = np.nanmedian(np.abs(water_nir - water_median))
-        robust_std = 1.4826 * mad
-        nir_thresh = water_median + nstd * robust_std
-        threshold_note = (
-            f"median {water_median:.2f} + {nstd} * robust std {robust_std:.2f}"
-        )
+        mean = np.nanmean(water_nir)
+        std = np.nanstd(water_nir)
+        nir_thresh = mean + nstd * std
+        threshold_note = f"tile mean {mean:.2f} + {nstd} * std {std:.2f}"
 
     # -------------------------------------------------------------
     # Diagnostics
@@ -2531,6 +2533,22 @@ def calculate_normalized_difference(bands):
     """
     Normalized difference of two bands: (b1 - b2) / (b1 + b2).
 
+    Inputs are clamped to the physical reflectance range [0, 1] first
+    (NaN stays NaN). Once ESA's radiometric offset is applied, clear
+    water is often slightly NEGATIVE in the NIR and SWIR -- real sensor
+    noise around a true value near zero, which ESA added the offset to
+    keep rather than truncate. Unclamped, a negative NIR pushes NDWI
+    above 1; such pixels were then dropped as out of range, leaving
+    nodata holes over the clearest water (84% of clear Lake Tahoe on a
+    PB 05.11 scene, issue #176) in the products used to map floods.
+    Clamping projects the noise onto the physical floor, so clear water
+    reads NDWI = 1, its correct limit. The result always lies in
+    [-1, 1]; the only invalid pixels are source nodata and 0/0.
+
+    Same convention as the `.SAFE` path (sentinel2_functions
+    .normalized_difference, .clinerules.md rule 63) and both Landsat
+    pipelines (rule 64).
+
     Parameters
     ----------
     bands : sequence of numpy.ndarray
@@ -2544,7 +2562,9 @@ def calculate_normalized_difference(bands):
         True where the result is meaningful.
     """
 
-    band1, band2 = (np.asarray(b, dtype=np.float32) for b in bands)
+    band1, band2 = (
+        np.clip(np.asarray(b, dtype=np.float32), 0.0, 1.0) for b in bands
+    )
 
     denominator = band1 + band2
 
@@ -2936,6 +2956,7 @@ def generate_composite(
     apply_rayleigh = level == "MSIL1C"
 
     bands = []
+    observed = []
 
     for band_name in algorithm_assets:
 
@@ -2964,6 +2985,11 @@ def generate_composite(
             apply_scale=False,
         )
 
+        # Where the sensor actually observed something: source nodata is
+        # DN 0. Taken from the raw band, BEFORE the Rayleigh subtraction
+        # can push a dark but valid pixel to zero or below.
+        observed.append(band != 0)
+
         if apply_rayleigh:
             correction = get_rayleigh_correction(item, band_name)
             if correction:
@@ -2978,8 +3004,9 @@ def generate_composite(
     if cloud_mask:
         print("Applying cloud mask...")
         mask = get_cloud_mask(item, out_shape=bands[0].shape)
-        for band in bands:
+        for band, seen in zip(bands, observed):
             band[mask] = 0
+            seen[mask] = False
 
     print("Applying logarithmic display scaling...")
 
@@ -3002,9 +3029,25 @@ def generate_composite(
         dtype=np.uint8,
     )
 
+    # 0 is reserved for "no data" (off-swath fill and masked cloud): the
+    # merge and the alpha band key on it. But the stretch also maps every
+    # VALID value at or below its lower threshold to 0, and those pixels
+    # were then published transparent -- on an offset-0 L1C scene that is
+    # all clear water, shadow and dark forest (reflectance <= 0.075).
+    # Observed pixels are floored at 1 so that 0 only ever means fill.
+    for index, seen in enumerate(observed):
+        np.putmask(array[index], seen & (array[index] == 0), 1)
+
     profile = profile.copy()
 
+    # driver="GTiff" explicitly, as generate_index does. Left to the
+    # source profile, an L1C composite (JPEG-2000 assets) was written as
+    # a lossy quality-25 JP2 named .tif: it changed 88% of the valid
+    # pixels, its ringing made off-swath pixels non-zero (opaque specks
+    # along the swath edge once the alpha band is derived), and its
+    # .aux.xml sidecar stayed behind declaring nodata=0.
     profile.update(
+        driver="GTiff",
         count=array.shape[0],
         dtype="uint8",
         nodata=0,
@@ -3075,7 +3118,14 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
         with rio.open(path) as src:
             crs_list.append(src.crs)
 
-    crs_dom = max(set(crs_list), key=crs_list.count)
+    # Most common CRS; a tie goes to the first in WKT order. Taking max()
+    # over a bare set let the winner depend on the hash seed, so tiles
+    # split evenly across a UTM zone boundary came out in a different
+    # projection from one run to the next.
+    crs_dom = max(
+        sorted(set(crs_list), key=lambda crs: crs.to_wkt()),
+        key=crs_list.count,
+    )
 
     merge_inputs = list(tif_paths)
     tmp_dir = None

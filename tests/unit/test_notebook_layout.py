@@ -350,6 +350,46 @@ class TestSensorNotebooksOwnNoPaths:
                     )
 
     @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
+    def test_every_upload_call_spells_out_a_canonical_destination(self, nb):
+        """The check above reads f-strings; a destination assembled any other
+        way (`dest = "s3://" + S3_BUCKET + "/Scratch/" + name`) would slip past
+        it. So the upload call itself must carry the canonical shape: an
+        f-string that starts with the bucket and continues with a key the
+        table built -- or, for the directory uploader, `sensor=PRODUCT_SENSOR`,
+        which makes staging_upload key every file by its product directory."""
+        uploads = 0
+        for cell in _code_cells(os.path.join(NB_DIR, nb)):
+            try:
+                tree = ast.parse(cell)
+            except SyntaxError:
+                continue  # covered by test_every_code_cell_parses
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "upload_file_to_s3":
+                    uploads += 1
+                    assert len(node.args) == 2, f"{nb}: {ast.unparse(node)}"
+                    dest = node.args[1]
+                    shape = _fstring_skeleton(dest) if isinstance(dest, ast.JoinedStr) else None
+                    assert shape is not None and shape.startswith((
+                        "s3://{S3_BUCKET}/{_key}",
+                        "s3://{S3_BUCKET}/{prefix_for_product_dir(",
+                    )), (
+                        f"{nb}: upload_file_to_s3(..., {ast.unparse(dest)}) -- the "
+                        f"destination must be written inline as "
+                        f's3://{{S3_BUCKET}}/<key from prefix_for_product_dir(...)>'
+                    )
+                elif name == "upload_dir_ambient":
+                    uploads += 1
+                    sensor = [ast.unparse(k.value) for k in node.keywords if k.arg == "sensor"]
+                    assert sensor == ["PRODUCT_SENSOR"], (
+                        f"{nb}: upload_dir_ambient must be called with "
+                        f"sensor=PRODUCT_SENSOR, got {sensor}"
+                    )
+        assert uploads == 1, f"{nb}: expected exactly one upload call, found {uploads}"
+
+    @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_code_is_parked_in_a_string_literal(self, nb):
         """A statement that is only a string does nothing.
 

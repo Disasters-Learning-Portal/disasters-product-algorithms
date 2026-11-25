@@ -120,6 +120,8 @@ class TestOwnership:
         ("capella_workflow.ipynb", "capella"),
         ("product_roundtrip_smoketest.ipynb", None),   # not a workflow notebook
         ("umbra_workflow.ipynb", None),                # no such sensor in SENSORS
+        ("landsat8_workflow.ipynb", None),             # a longer name is not a variant
+        ("landsat_notes.ipynb", None),                 # sensor prefix, not a workflow
     ])
     def test_owner_of(self, lint, name, owner):
         assert lint.owner_of(name, SENSORS) == owner

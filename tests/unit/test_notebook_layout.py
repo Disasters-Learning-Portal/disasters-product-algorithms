@@ -140,10 +140,14 @@ def _fstring_skeleton(node):
 
 
 def _docstrings(tree):
-    """The string statements that really are docstrings."""
+    """The string statements that really are docstrings.
+
+    Functions and classes only. A notebook code cell has no docstring: a string
+    that opens a cell is the usual way to switch the whole cell off.
+    """
     found = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             body = node.body
             if (body and isinstance(body[0], ast.Expr)
                     and isinstance(body[0].value, ast.Constant)
@@ -227,10 +231,22 @@ class TestRetiredWorkflows:
         the path leaves a local (non-installed) checkout importing nothing."""
         depth = nb.count("/") + 1                     # notebooks/ = 1, notebooks/legacy/ = 2
         expected = "/".join([".."] * depth + ["src"])
-        found = re.findall(
-            r"""sys\.path\.(?:append|insert)\((?:\s*\d+\s*,)?\s*["']((?:\.\./)+src)["']""",
-            _code(os.path.join(NB_DIR, nb)),
-        )
+        found = []
+        for cell in _code_cells(os.path.join(NB_DIR, nb)):
+            try:
+                tree = ast.parse(cell)
+            except SyntaxError:
+                continue  # covered by test_every_code_cell_parses
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and ast.unparse(node.func) in ("sys.path.append", "sys.path.insert")):
+                    continue
+                # Every spelling of the path: '../src', '../src/',
+                # os.path.abspath('../src'), os.path.join('..', 'src').
+                parts = [c.value for c in ast.walk(node.args[-1])
+                         if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+                if parts and os.path.basename(os.path.normpath("/".join(parts))) == "src":
+                    found.append(os.path.normpath("/".join(parts)))
         assert all(path == expected for path in found), (
             f"{nb} adds {found} to sys.path; from its directory the package "
             f"source is at {expected!r}"
@@ -310,9 +326,12 @@ class TestSensorNotebooksOwnNoPaths:
         )
 
     # What may follow "s3://{S3_BUCKET}/" in a notebook: a key that came out of
-    # the shared table, or the "ProgramData/<Sensor>/<Product>/" placeholder a
-    # notebook prints for the operator.
-    _FROM_THE_TABLE = ("{_key}", "{prefix_for_product_dir(", "ProgramData/")
+    # the shared table, or the placeholder a notebook prints for the operator --
+    # "ProgramData/<Sensor>/<Product>/", or the same with the sensor's directory
+    # spelled out. Any other literal under ProgramData/ is a hard-coded path
+    # ("ProgramData/Capella_Test/{name}" used to pass here).
+    _FROM_THE_TABLE = ("{_key}", "{prefix_for_product_dir(")
+    _PRINTED_PLACEHOLDER = re.compile(r"^ProgramData/(<Sensor>|[A-Za-z0-9-]+)/<Product>/")
 
     @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_every_destination_in_the_bucket_comes_from_the_table(self, nb):
@@ -343,42 +362,63 @@ class TestSensorNotebooksOwnNoPaths:
                 if not isinstance(node, ast.JoinedStr):
                     continue
                 for tail in _fstring_skeleton(node).split(marker)[1:]:
-                    assert tail.startswith(self._FROM_THE_TABLE), (
+                    assert (tail.startswith(self._FROM_THE_TABLE)
+                            or self._PRINTED_PLACEHOLDER.match(tail)), (
                         f"{nb} builds the destination {marker}{tail!r}; under the "
                         f"staging bucket only a key resolved through "
                         f"shared_utils.product_paths is allowed"
                     )
 
+    # The one way a file may be handed to S3 from a workflow notebook.
+    _CANONICAL_UPLOAD = re.compile(
+        r"^s3://\{S3_BUCKET\}/"
+        r"(\{_key\}|\{prefix_for_product_dir\(PRODUCT_SENSOR, \w+\)\}/\{[^{}]+\})$"
+    )
+    # Other spellings of "put this object in a bucket". None of them goes
+    # through the shared table.
+    _OTHER_UPLOADS = {"upload_to_s3", "upload_file", "upload_fileobj", "put_object"}
+
     @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_every_upload_call_spells_out_a_canonical_destination(self, nb):
-        """The check above reads f-strings; a destination assembled any other
-        way (`dest = "s3://" + S3_BUCKET + "/Scratch/" + name`) would slip past
-        it. So the upload call itself must carry the canonical shape: an
-        f-string that starts with the bucket and continues with a key the
-        table built -- or, for the directory uploader, `sensor=PRODUCT_SENSOR`,
-        which makes staging_upload key every file by its product directory."""
+        """The check above reads f-strings that start with the bucket; a
+        destination assembled any other way slips past it -- string
+        concatenation, `.format()`, a prefix variable, another upload function.
+        So the upload call itself must carry the canonical shape, exactly:
+
+            upload_file_to_s3(f, f"s3://{S3_BUCKET}/{_key}")
+            upload_file_to_s3(f, f"s3://{S3_BUCKET}/{prefix_for_product_dir(PRODUCT_SENSOR, x)}/{name}")
+            upload_dir_ambient(..., sensor=PRODUCT_SENSOR)
+
+        with `_key` and `S3_BUCKET` each assigned once, and no other upload
+        call in the notebook.
+        """
         uploads = 0
+        stores = {"_key": 0, "S3_BUCKET": 0}
         for cell in _code_cells(os.path.join(NB_DIR, nb)):
             try:
                 tree = ast.parse(cell)
             except SyntaxError:
                 continue  # covered by test_every_code_cell_parses
             for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) \
+                        and node.id in stores:
+                    stores[node.id] += 1
                 if not isinstance(node, ast.Call):
                     continue
                 name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                assert name not in self._OTHER_UPLOADS, (
+                    f"{nb} calls {name}(); a workflow notebook publishes with "
+                    f"upload_file_to_s3 or upload_dir_ambient only"
+                )
                 if name == "upload_file_to_s3":
                     uploads += 1
-                    assert len(node.args) == 2, f"{nb}: {ast.unparse(node)}"
+                    assert len(node.args) == 2 and not node.keywords, f"{nb}: {ast.unparse(node)}"
                     dest = node.args[1]
-                    shape = _fstring_skeleton(dest) if isinstance(dest, ast.JoinedStr) else None
-                    assert shape is not None and shape.startswith((
-                        "s3://{S3_BUCKET}/{_key}",
-                        "s3://{S3_BUCKET}/{prefix_for_product_dir(",
-                    )), (
+                    shape = _fstring_skeleton(dest) if isinstance(dest, ast.JoinedStr) else ""
+                    assert self._CANONICAL_UPLOAD.match(shape), (
                         f"{nb}: upload_file_to_s3(..., {ast.unparse(dest)}) -- the "
-                        f"destination must be written inline as "
-                        f's3://{{S3_BUCKET}}/<key from prefix_for_product_dir(...)>'
+                        f"destination must be written inline as the bucket followed "
+                        f"by a key from prefix_for_product_dir(PRODUCT_SENSOR, ...)"
                     )
                 elif name == "upload_dir_ambient":
                     uploads += 1
@@ -388,6 +428,8 @@ class TestSensorNotebooksOwnNoPaths:
                         f"sensor=PRODUCT_SENSOR, got {sensor}"
                     )
         assert uploads == 1, f"{nb}: expected exactly one upload call, found {uploads}"
+        assert stores["S3_BUCKET"] == 1, f"{nb}: S3_BUCKET is assigned {stores['S3_BUCKET']} times"
+        assert stores["_key"] <= 1, f"{nb}: _key is assigned {stores['_key']} times"
 
     @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_no_code_is_parked_in_a_string_literal(self, nb):
@@ -509,11 +551,17 @@ class TestNotebookUploadsUseAmbientCredentials:
             used = self._referenced(os.path.join(TOOLS_DIR, name)) & self.MAAP_ONLY
             assert not used, f"{name} reaches the MAAP-credential path ({sorted(used)})"
 
-    @pytest.mark.parametrize("nb", sorted(LEGACY_NOTEBOOKS))
+    # The notebooks whose CLI writes one directory per product, and which
+    # therefore publish the whole tree through staging_upload. Named one by one:
+    # it is a property of those two pipelines, not of being retired -- a vendor
+    # workflow retired later uploads file by file and does not belong here.
+    DIRECTORY_PUBLISHERS = ("legacy/landsat_workflow.ipynb", "legacy/sentinel2_workflow.ipynb")
+
+    @pytest.mark.parametrize("nb", DIRECTORY_PUBLISHERS)
     def test_directory_publishers_use_the_ambient_helper(self, nb):
-        """The two retired workflows publish a whole product tree, so they keep
-        staging_upload's keying."""
-        assert "upload_dir_ambient" in self._referenced(os.path.join(LEGACY_DIR, nb))
+        """These two publish a whole product tree, so they keep staging_upload's
+        keying."""
+        assert "upload_dir_ambient" in self._referenced(os.path.join(NB_DIR, nb))
 
     @pytest.mark.parametrize("nb", sorted(WORKFLOW_NOTEBOOKS))
     def test_upload_is_opt_in(self, nb):
@@ -583,6 +631,8 @@ class TestOdrGeneratorStaysInSync:
 VENDOR_NOTEBOOKS = ("capella_workflow.ipynb", "umbra_workflow.ipynb",
                     "skysat_workflow.ipynb", "satellogic_workflow.ipynb",
                     "iceye_workflow.ipynb")
+# Paths are relative to notebooks/, so a vendor workflow that is retired later
+# becomes "legacy/<name>" here.
 # landsat_odr keeps its OUTPUT_DIR under /tmp too, and reads no vendor bucket.
 # (sentinel2_odr is deliberately absent: its water-extent reference cache --
 # a 1.6 GB national CDL -- lives under OUTPUT_DIR and must survive a re-run, so

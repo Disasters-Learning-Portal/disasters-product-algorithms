@@ -385,11 +385,14 @@ class TestWorkflowNotebookCheck:
         falls back to it, so moving to notebooks/legacy/ must not take it out of
         the check."""
         ns = _exec(_configured(tmp_path), NB_CHECK)
-        legacy = {
+        checked = {
             os.path.basename(path) for path in ns["nb_paths"]
             if os.path.basename(os.path.dirname(path)) == "legacy"
         }
-        assert legacy == {"landsat_workflow.ipynb", "sentinel2_workflow.ipynb"}
+        legacy_dir = os.path.join(REPO_ROOT, "notebooks", "legacy")
+        retired = {f for f in os.listdir(legacy_dir) if f.endswith(".ipynb")}
+        assert retired, "notebooks/legacy/ holds no notebooks"
+        assert checked == retired
 
     def test_a_hardcoded_program_data_path_is_caught(self, tmp_path):
         """The check must actually fire -- a regex this specific is easy to write

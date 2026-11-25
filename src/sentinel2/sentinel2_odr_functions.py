@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 
 import boto3
@@ -71,6 +72,13 @@ MAX_SEARCH_ITEMS = 200
 # where the scene year is chosen and inside the CDL downloader, which
 # re-clamps its argument -- changing only one of them has no effect.
 LATEST_CDL_YEAR = 2025
+
+# The national CDL archive is 1.6-1.9 GB, and the USDA NASS file server
+# answers most requests for the WHOLE of it with HTTP 500 (5 of 6 on
+# 2026-11-25) while requests for a part of it succeed. It is therefore
+# fetched in parts of this size, each part retried on its own.
+CDL_PART_BYTES = 16 * 1024 * 1024
+CDL_PART_ATTEMPTS = 6
 
 # ---------------------------------------------------------------------
 # Algorithm configuration
@@ -996,6 +1004,107 @@ def _match_raster_to_reference(
 
 
 
+def _download_in_parts(url, destination):
+    """
+    Download `url` to `destination` as a series of HTTP range requests.
+
+    A connection error, a timeout, a 5xx answer or a short body is retried
+    for that part alone, after a growing delay, so one bad answer does not
+    restart a download of well over a gigabyte. A 4xx is not retried: a
+    year that is not published will not appear on the next attempt.
+
+    Raises requests.exceptions.RequestException when a part cannot be
+    fetched. `destination` may then hold a partial file; the caller removes
+    it.
+    """
+
+    offset = 0
+    total = None
+
+    with open(destination, "wb") as out:
+
+        while total is None or offset < total:
+
+            last = offset + CDL_PART_BYTES - 1
+
+            if total is not None:
+                last = min(last, total - 1)
+
+            for attempt in range(1, CDL_PART_ATTEMPTS + 1):
+
+                try:
+
+                    with requests.get(
+                        url,
+                        headers={"Range": f"bytes={offset}-{last}"},
+                        stream=True,
+                        timeout=(30, 300),
+                    ) as response:
+
+                        response.raise_for_status()
+
+                        if response.status_code != 206:
+                            raise requests.exceptions.RequestException(
+                                f"expected a partial response (206), got "
+                                f"{response.status_code}"
+                            )
+
+                        # "bytes 0-16777215/1887184211"
+                        size = int(
+                            response.headers["Content-Range"]
+                            .rsplit("/", 1)[1]
+                        )
+
+                        out.seek(offset)
+                        out.truncate()
+
+                        for chunk in response.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+                            out.write(chunk)
+
+                    received = out.tell() - offset
+                    expected = min(last + 1, size) - offset
+
+                    if received != expected:
+                        raise requests.exceptions.RequestException(
+                            f"short response: {received} of {expected} bytes"
+                        )
+
+                    break
+
+                except requests.exceptions.RequestException as exc:
+
+                    status = getattr(
+                        getattr(exc, "response", None), "status_code", None
+                    )
+
+                    if (
+                        attempt == CDL_PART_ATTEMPTS
+                        or (status is not None and 400 <= status < 500)
+                    ):
+                        raise
+
+                    wait = min(2 ** attempt, 30)
+
+                    print(
+                        f"Download of bytes {offset}-{last} failed "
+                        f"(attempt {attempt}/{CDL_PART_ATTEMPTS}: {exc}). "
+                        f"Retrying in {wait} s..."
+                    )
+
+                    time.sleep(wait)
+
+            if total is not None and size != total:
+                raise requests.exceptions.RequestException(
+                    f"{url} changed size during the download "
+                    f"({total} -> {size} bytes)"
+                )
+
+            total = size
+            offset += expected
+
+
 def _download_cdl_for_water_extent(
     nir_profile,
     year,
@@ -1032,11 +1141,11 @@ def _download_cdl_for_water_extent(
     # ------------------------------------------------------------
     # Paths
     #
-    # The national CDL zip (~1.6 GB) and its extracted GeoTIFF are
+    # The national CDL zip (1.6-1.9 GB) and its extracted GeoTIFF are
     # CACHED, not temporary. An activation routinely spans several
     # Sentinel-2 tiles, and every one of them needs the same national
     # raster; deleting it in the `finally` -- as an earlier revision
-    # did -- re-downloaded 1.6 GB per scene. Only the per-scene subset
+    # did -- re-downloaded the archive per scene. Only the per-scene subset
     # is genuinely temporary.
     #
     # The cache lives in reference_dir, which the caller places under
@@ -1105,25 +1214,14 @@ def _download_cdl_for_water_extent(
 
             try:
 
-                with requests.get(
-                    cdl_url,
-                    stream=True,
-                    timeout=(30, 1800),
-                ) as response:
+                _download_in_parts(cdl_url, partial_zip)
 
-                    response.raise_for_status()
-
-                    with open(
-                        partial_zip,
-                        "wb",
-                    ) as f:
-
-                        for chunk in response.iter_content(
-                            chunk_size=1024 * 1024
-                        ):
-
-                            if chunk:
-                                f.write(chunk)
+                # Never cache something that is not the archive: every
+                # later scene would treat it as a cache hit.
+                if not zipfile.is_zipfile(partial_zip):
+                    raise requests.exceptions.RequestException(
+                        "the downloaded file is not a zip archive"
+                    )
 
                 os.replace(partial_zip, zip_path)
 
@@ -1133,12 +1231,15 @@ def _download_cdl_for_water_extent(
 
             except requests.exceptions.RequestException as e:
 
-                if os.path.exists(partial_zip):
-                    os.remove(partial_zip)
-
                 raise RuntimeError(
                     f"Failed to download the {year} CDL: {e}"
                 ) from e
+
+            finally:
+
+                # Gone already after a successful rename.
+                if os.path.exists(partial_zip):
+                    os.remove(partial_zip)
 
         # --------------------------------------------------------
         # Extract national CDL TIFF
@@ -1268,7 +1369,7 @@ def _download_cdl_for_water_extent(
             # the size check below can never fire on its own. Catch it
             # and re-raise with the diagnostic the operator needs --
             # otherwise a non-CONUS scene surfaces as a bare
-            # rasterio.errors.WindowError after a 1.6 GB download.
+            # rasterio.errors.WindowError after a download of gigabytes.
             try:
                 window = window.intersection(
                     full_window
@@ -1292,10 +1393,24 @@ def _download_cdl_for_water_extent(
             # fractional offsets/lengths; src.read and window_transform
             # round them independently, which can disagree by a pixel
             # and shift the reference layer against the NIR grid.
-            window = window.round_offsets(
-                op="floor"
-            ).round_lengths(
-                op="ceil"
+            #
+            # Snap OUTWARD, by hand: rasterio >= 1.4 ignores the `op`
+            # argument of round_offsets/round_lengths and rounds a length
+            # to the nearest pixel, which could leave a sliver of the scene
+            # with no land-cover reference.
+            col_start = max(math.floor(window.col_off), 0)
+            row_start = max(math.floor(window.row_off), 0)
+            col_stop = min(
+                math.ceil(window.col_off + window.width), src.width
+            )
+            row_stop = min(
+                math.ceil(window.row_off + window.height), src.height
+            )
+            window = rio.windows.Window(
+                col_start,
+                row_start,
+                col_stop - col_start,
+                row_stop - row_start,
             )
 
             cdl_array = src.read(
@@ -1360,7 +1475,7 @@ def _download_cdl_for_water_extent(
         #
         # zip_path and national_cdl_path are intentionally KEPT: they
         # are the same for every tile in the activation, and deleting
-        # them here means re-downloading 1.6 GB per scene. They live
+        # them here means re-downloading the archive per scene. They live
         # under the run's output directory and go away with it.
         # --------------------------------------------------------
 
@@ -1643,6 +1758,7 @@ def generate_water_extent(
     nstd=None,
     water_stats=None,
     sample_only=False,
+    reference_dir=None,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1693,6 +1809,10 @@ def generate_water_extent(
 
     output_dir : str
         Local directory to write the output GeoTIFF.
+
+    reference_dir : str, optional
+        Where downloaded land cover is cached. Default:
+        <output_dir>/water_extent_reference.
 
     cloud_mask : bool
         If True, mask cloud/cloud-shadow/thin-cirrus using the L2A
@@ -1899,10 +2019,13 @@ def generate_water_extent(
     # Reference data directory
     # -------------------------------------------------------------
 
-    reference_dir = os.path.join(
-        output_dir,
-        "water_extent_reference",
-    )
+    # Downloaded land cover is cached here and reused between runs; the
+    # command line keeps it outside its per-run scratch directory.
+    if reference_dir is None:
+        reference_dir = os.path.join(
+            output_dir,
+            "water_extent_reference",
+        )
 
     os.makedirs(
         reference_dir,
@@ -3122,8 +3245,9 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
     # over a bare set let the winner depend on the hash seed, so tiles
     # split evenly across a UTM zone boundary came out in a different
     # projection from one run to the next.
+    # (An ungeoreferenced input has no CRS at all; it sorts first.)
     crs_dom = max(
-        sorted(set(crs_list), key=lambda crs: crs.to_wkt()),
+        sorted(set(crs_list), key=lambda crs: crs.to_wkt() if crs else ""),
         key=crs_list.count,
     )
 

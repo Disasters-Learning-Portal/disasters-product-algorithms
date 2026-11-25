@@ -651,7 +651,7 @@ class TestCogHandOff:
     """Every other test here replaces convert_to_cog with a pass-through, so
     nothing else notices what it is called with."""
 
-    def _main(self, tmp_path, monkeypatch, product, *flags):
+    def _main(self, tmp_path, monkeypatch, product, *flags, extra_tags=None):
         import json
 
         calls = []
@@ -672,7 +672,8 @@ class TestCogHandOff:
             return outfile
 
         tags = tmp_path / "meta.json"
-        tags.write_text(json.dumps({"ACTIVATION_EVENT": "202509_Flood_TN", "SOURCE": "USGS"}))
+        tags.write_text(json.dumps({"ACTIVATION_EVENT": "202509_Flood_TN", "SOURCE": "USGS",
+                                    **(extra_tags or {})}))
         monkeypatch.setattr(proc, "search_landsat", lambda **kw: live_items()[:2])
         monkeypatch.setattr(proc, "generate_index", generate_index)
         monkeypatch.setattr(proc, "generate_composite", generate_composite)
@@ -705,4 +706,15 @@ class TestCogHandOff:
             assert call["nodata"] is False
             assert (call["bands"], call["interp"]) == (4, "alpha")
             assert call["metadata"]["SOURCE"] == "USGS"
+
+    @pytest.mark.parametrize("given, expected", [
+        ({}, None),
+        ({"PROCESSOR": "set by the caller"}, "set by the caller"),
+    ])
+    def test_every_cog_with_event_metadata_names_its_processor(
+            self, tmp_path, monkeypatch, given, expected):
+        from shared_utils.version import PROCESSOR_STRING
+
+        calls = self._main(tmp_path, monkeypatch, "ndvi", extra_tags=given)
+        assert [c["metadata"]["PROCESSOR"] for c in calls] == [expected or PROCESSOR_STRING] * 2
 

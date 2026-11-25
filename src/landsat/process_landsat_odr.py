@@ -48,6 +48,7 @@ from landsat.landsat_odr_functions import (
 
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.version import PROCESSOR_STRING
 
 
 # ---------------------------------------------------------------------
@@ -294,6 +295,11 @@ def main():
     metadata = load_metadata_json(
         args.metadata_json
     )
+
+    # A caller may pass only ACTIVATION_EVENT and SOURCE. A value it did
+    # set (the notebooks do) is kept.
+    if metadata is not None:
+        metadata.setdefault("PROCESSOR", PROCESSOR_STRING)
 
     # -----------------------------------------------------------------
     # Print configuration

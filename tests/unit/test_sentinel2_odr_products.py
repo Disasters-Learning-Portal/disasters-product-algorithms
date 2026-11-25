@@ -15,18 +15,22 @@ first time or reproduces a defect found reviewing it:
     code path no CLI, DPS or notebook run takes.
   * The national CDL download URL returns 404 for every year (it moved on the
     NASS site), so a CONUS water-extent run with a cold cache could not start.
+    The new location then refused most requests for the whole file, and the
+    download was a single attempt at the whole file.
 
 Reads are served from local GeoTIFFs; nothing here touches the network.
 """
 
 import datetime as dt
 import os
+import zipfile
 
 import numpy as np
 import pytest
 
 rio = pytest.importorskip("rasterio")
 pytest.importorskip("pystac_client")
+requests = pytest.importorskip("requests")
 from rasterio.session import DummySession  # noqa: E402
 from rasterio.transform import from_origin  # noqa: E402
 
@@ -387,32 +391,188 @@ class TestCloudMaskCli:
 # The national CDL download
 # ---------------------------------------------------------------------------
 
+CDL_URL = ("https://www.nass.usda.gov/sites/default/files/"
+           "Research_and_Science/Cropland/Release/datasets/2025_30m_cdls.zip")
+
+
+class _Response:
+    def __init__(self, status, body=b"", headers=None):
+        self.status_code, self._body, self.headers = status, body, headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+
+    def iter_content(self, chunk_size=1):
+        for start in range(0, len(self._body), 7):       # several chunks per part
+            yield self._body[start:start + 7]
+
+
+class FakeServer:
+    """Answers range requests for `payload`. `faults` maps a 1-based request
+    number (or "all") to what goes wrong with that request."""
+
+    def __init__(self, payload, faults=None):
+        self.payload, self.faults = payload, faults or {}
+        self.ranges, self.urls = [], []
+
+    def get(self, url, headers=None, stream=False, timeout=None):
+        self.urls.append(url)
+        self.ranges.append(headers["Range"])
+        fault = self.faults.get(len(self.ranges), self.faults.get("all"))
+        if fault == "reset":
+            raise requests.exceptions.ConnectionError("reset by peer")
+        if fault == "whole":                              # the range is ignored
+            return _Response(200, self.payload)
+        if isinstance(fault, int):
+            return _Response(fault)
+        first, last = map(int, headers["Range"][len("bytes="):].split("-"))
+        body = self.payload[first:last + 1]
+        if fault == "short":
+            body = body[:-1]
+        total = len(self.payload) + (1 if fault == "resized" else 0)
+        return _Response(206, body, {
+            "Content-Range": f"bytes {first}-{first + len(body) - 1}/{total}"})
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Install a FakeServer, with parts of 10 bytes and no real waiting."""
+    def install(payload, faults=None, part_bytes=10):
+        server = FakeServer(payload, faults)
+        server.waits = []
+        monkeypatch.setattr(odr.requests, "get", server.get)
+        monkeypatch.setattr(odr.time, "sleep", server.waits.append)
+        monkeypatch.setattr(odr, "CDL_PART_BYTES", part_bytes)
+        return server
+    return install
+
+
+PAYLOAD = bytes(range(35))
+PARTS = ["bytes=0-9", "bytes=10-19", "bytes=20-29", "bytes=30-34"]
+
+
+class TestDownloadInParts:
+
+    def test_the_file_arrives_whole(self, tmp_path, serve):
+        server = serve(PAYLOAD)
+        odr._download_in_parts("u", str(tmp_path / "f"))
+        assert (tmp_path / "f").read_bytes() == PAYLOAD
+        assert server.ranges == PARTS and server.waits == []
+
+    def test_a_file_that_is_an_exact_number_of_parts(self, tmp_path, serve):
+        server = serve(PAYLOAD[:30])
+        odr._download_in_parts("u", str(tmp_path / "f"))
+        assert (tmp_path / "f").read_bytes() == PAYLOAD[:30]
+        assert server.ranges == PARTS[:3]
+
+    @pytest.mark.parametrize("fault", [500, 503, "reset", "short", "whole"])
+    def test_only_the_failed_part_is_asked_for_again(self, tmp_path, serve, fault):
+        server = serve(PAYLOAD, {2: fault})
+        odr._download_in_parts("u", str(tmp_path / "f"))
+        assert (tmp_path / "f").read_bytes() == PAYLOAD      # nothing doubled
+        assert server.ranges == [PARTS[0], PARTS[1], PARTS[1], PARTS[2], PARTS[3]]
+        assert server.waits == [2]
+
+    def test_it_gives_up_on_a_part_that_never_arrives(self, tmp_path, serve):
+        server = serve(PAYLOAD, {"all": 500})
+        with pytest.raises(requests.exceptions.RequestException):
+            odr._download_in_parts("u", str(tmp_path / "f"))
+        assert server.ranges == [PARTS[0]] * odr.CDL_PART_ATTEMPTS
+        assert server.waits == [2, 4, 8, 16, 30]
+
+    def test_a_year_that_is_not_published_fails_at_once(self, tmp_path, serve):
+        server = serve(PAYLOAD, {"all": 404})
+        with pytest.raises(requests.exceptions.HTTPError):
+            odr._download_in_parts("u", str(tmp_path / "f"))
+        assert len(server.ranges) == 1 and server.waits == []
+
+    def test_a_file_that_changes_mid_download_is_refused(self, tmp_path, serve):
+        serve(PAYLOAD, {2: "resized"})
+        with pytest.raises(requests.exceptions.RequestException, match="changed size"):
+            odr._download_in_parts("u", str(tmp_path / "f"))
+
+
+def _cdl_zip(tmp_path):
+    """A tiny stand-in for the national archive: one Albers GeoTIFF of class
+    111 around the test tile."""
+    from rasterio.warp import transform_bounds
+
+    left, _, _, top = transform_bounds(
+        "EPSG:32615", "EPSG:5070", 500000, 4699900, 500100, 4700000)
+    tif = tmp_path / "2025_30m_cdls.tif"
+    write_raster(tif, np.full((60, 60), 111), "uint8", crs="EPSG:5070",
+                 transform=from_origin(left - 600, top + 600, 30, 30), nodata=0)
+    archive = tmp_path / "archive.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.write(tif, "2025_30m_cdls.tif")
+        z.writestr("2025_30m_cdls.tif.xml", "<x/>")
+    return archive.read_bytes()
+
+
 class TestCdlDownload:
 
-    def test_it_asks_for_the_file_where_nass_now_serves_it(self, tmp_path, monkeypatch):
+    def _run(self, tmp_path):
+        profile = dict(crs="EPSG:32615", transform=TRANSFORM, width=10, height=10)
+        return odr._download_cdl_for_water_extent(
+            profile, 2025, str(tmp_path / "cdl_subset.tif"), str(tmp_path / "ref"))
+
+    def test_it_asks_for_the_file_where_nass_now_serves_it(self, tmp_path, serve):
         """Checked 2026-11-23 with one-byte range requests:
           /Research_and_Science/Cropland/Release/datasets/2025_30m_cdls.zip      -> 404
           /sites/default/files/Research_and_Science/.../2025_30m_cdls.zip        -> 206
         (1 887 184 211 bytes; 2024 is 1 656 243 429.)"""
-        import requests
-
-        asked = []
-
-        def fake_get(url, **kwargs):
-            asked.append(url)
-            raise requests.exceptions.ConnectionError("no network in tests")
-
-        monkeypatch.setattr(odr.requests, "get", fake_get)
-        profile = dict(crs="EPSG:32615", transform=TRANSFORM, width=10, height=10)
+        server = serve(b"", {"all": "reset"})
         with pytest.raises(RuntimeError, match="Failed to download"):
-            odr._download_cdl_for_water_extent(
-                profile, 2025, str(tmp_path / "cdl_subset.tif"), str(tmp_path / "ref"))
+            self._run(tmp_path)
+        assert set(server.urls) == {CDL_URL}
 
-        assert asked == [
-            "https://www.nass.usda.gov/sites/default/files/"
-            "Research_and_Science/Cropland/Release/datasets/2025_30m_cdls.zip"
-        ]
-        assert not list((tmp_path / "ref").glob("*.partial")) if (tmp_path / "ref").exists() else True
+    def test_it_is_fetched_through_faults_then_cached(self, tmp_path, serve):
+        payload = _cdl_zip(tmp_path)
+        server = serve(payload, {1: 500, 2: 500, 4: "short"}, part_bytes=len(payload) // 3)
+        with rio.open(self._run(tmp_path)) as src:
+            assert src.shape == (10, 10) and (src.read(1) == 111).all()
+        assert (tmp_path / "ref" / "CDL_2025_30m_download.zip").read_bytes() == payload
+        assert not list((tmp_path / "ref").glob("*.partial"))
+
+        # The next scene of the run uses the cache.
+        asked = len(server.ranges)
+        self._run(tmp_path)
+        assert len(server.ranges) == asked
+
+    def test_a_download_that_fails_leaves_nothing_behind(self, tmp_path, serve):
+        serve(PAYLOAD, {3: "reset", 4: 500, 5: 500, 6: 500, 7: 500, 8: 500})
+        with pytest.raises(RuntimeError, match="Failed to download the 2025 CDL"):
+            self._run(tmp_path)
+        assert os.listdir(tmp_path / "ref") == []
+
+    def test_a_body_that_is_not_the_archive_is_not_cached(self, tmp_path, serve):
+        serve(b"<html>maintenance</html>")
+        with pytest.raises(RuntimeError, match="not a zip archive"):
+            self._run(tmp_path)
+        assert os.listdir(tmp_path / "ref") == []
+
+    def test_the_crop_covers_the_whole_scene(self, tmp_path):
+        """The crop window was rounded with `round_lengths(op="ceil")`, but
+        rasterio ignores `op` and rounds to the NEAREST pixel. Here the scene
+        ends 0.44 of a CDL pixel past the rounded window, and its last column
+        and row came back with no land-cover class."""
+        reference_dir = tmp_path / "ref"
+        reference_dir.mkdir()
+        write_raster(reference_dir / "CDL_2025_30m.tif", np.full((20, 20), 111), "uint8",
+                     crs="EPSG:5070", transform=from_origin(0, 3000, 30, 30), nodata=0)
+        profile = dict(crs="EPSG:5070", width=11, height=11,
+                       transform=from_origin(23.1, 3000 - 23.1, 10, 10))
+        out = odr._download_cdl_for_water_extent(
+            profile, 2025, str(tmp_path / "m.tif"), str(reference_dir))
+        with rio.open(out) as src:
+            assert (src.read(1) == 111).all()
 
     def test_the_year_is_capped_at_the_newest_published_cdl(self):
         assert odr.LATEST_CDL_YEAR == 2025

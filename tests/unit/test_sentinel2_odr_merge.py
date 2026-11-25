@@ -388,3 +388,149 @@ def test_a_direct_call_classifies_like_the_cli(tmp_path, monkeypatch):
     assert (direct == pooled).all()
     assert (direct[3:17, 13:37] != 4).all()        # the 1260 DN land is not flooded
     assert (direct[3:17, 2:8] == 1).all()          # the reference water is water
+
+
+# ---------------------------------------------------------------------------
+# What reaches --output
+# ---------------------------------------------------------------------------
+
+def _two_passes():
+    return [FakeItem(f"S2A_15TVG_2021071{day}_0_L2A", when,
+                     f"GS2A_2021071{day}T170000_000{day}_N03.01", "03.01")
+            for day, when in ((0, PRE), (2, POST))]
+
+
+class TestOnlyFinishedCogsReachTheOutput:
+    """`--output` is published by filename: a notebook upload cell or a DPS job
+    cannot tell a half-made GeoTIFF from a finished COG. A run that died left
+    its intermediates there under product names -- not COGs, no activation
+    tags. A run now builds in a scratch subdirectory and moves its COGs out
+    only when all of them exist."""
+
+    def _main(self, tmp_path, monkeypatch, convert=lambda outfile, **kw: outfile,
+              fail_on=None, value=1.0, extra=()):
+        items = _two_passes()
+
+        def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
+            path = f"{output_dir}/{odr._build_output_filename(item, algorithm_name)}"
+            with rio.open(path, "w", driver="GTiff", count=1, dtype="float32", height=4,
+                          width=6, nodata=-9999, crs="EPSG:32615",
+                          transform=from_origin(400000, 4600000, 10, 10)) as d:
+                d.write(np.full((4, 6), value, np.float32), 1)
+            if item.id == fail_on:
+                raise OSError("simulated read failure")   # died after starting to write
+            return path
+
+        monkeypatch.setattr(proc, "search_sentinel2", lambda **kw: items)
+        monkeypatch.setattr(proc, "generate_index", generate)
+        monkeypatch.setattr(proc, "convert_to_cog", convert)
+        monkeypatch.setattr(sys, "argv", [
+            "process_sentinel2_odr", "--product", "ndvi", "--level", "2",
+            "--start-date", "2021-07-01", "--end-date", "2021-07-31",
+            "--bbox", "-93.7", "41.5", "-93.5", "41.7", "--output", str(tmp_path), *extra])
+        proc.main()
+        return items
+
+    def test_a_scene_that_fails_takes_the_earlier_scenes_with_it(self, tmp_path, monkeypatch):
+        with pytest.raises(OSError, match="simulated"):
+            self._main(tmp_path, monkeypatch, fail_on=_two_passes()[1].id)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_failed_conversion_delivers_nothing(self, tmp_path, monkeypatch):
+        done = []
+
+        def convert(outfile, **kw):
+            if done:
+                raise RuntimeError("simulated COG failure")
+            done.append(outfile)
+            return outfile
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            self._main(tmp_path, monkeypatch, convert=convert)
+        assert len(done) == 1 and list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("merge", [(), ("--merge",)])
+    def test_nothing_is_under_a_product_name_while_the_run_is_in_progress(
+            self, tmp_path, monkeypatch, merge):
+        """What a SIGTERM or an OOM kill would leave: no handler runs for those."""
+        seen = []
+
+        def convert(outfile, **kw):
+            seen.append(sorted(p.name for p in tmp_path.glob("*.tif")))
+            return outfile
+
+        self._main(tmp_path, monkeypatch, convert=convert, extra=merge)
+        assert seen == [[], []]
+        assert len(list(tmp_path.glob("*.tif"))) == 2
+
+    def test_a_failed_rerun_leaves_the_earlier_runs_cogs_alone(self, tmp_path, monkeypatch):
+        self._main(tmp_path, monkeypatch)
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        assert len(before) == 2
+        with pytest.raises(OSError):
+            self._main(tmp_path, monkeypatch, fail_on=_two_passes()[0].id, value=7.0)
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    def test_a_successful_run_leaves_only_its_cogs_and_lists_them_where_they_are(
+            self, tmp_path, monkeypatch, capsys):
+        self._main(tmp_path, monkeypatch)
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert len(names) == 2 and all(name.endswith(".tif") for name in names)
+        summary = capsys.readouterr().out.split("Sentinel-2 processing complete")[1]
+        for name in names:
+            assert f"  {tmp_path / name}\n" in summary
+
+
+def test_the_land_cover_cache_stays_in_output_not_in_the_scratch_directory(
+        tmp_path, monkeypatch):
+    """It is gigabytes and shared by every scene and re-run; a per-run scratch
+    directory would download it again each time."""
+    out = _run_we(tmp_path, monkeypatch, _we_items(), merge=False)
+    assert len(out) == 3
+    assert (tmp_path / "water_extent_reference").is_dir()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_dir()) == ["water_extent_reference"]
+
+
+# ---------------------------------------------------------------------------
+# The PROCESSOR tag
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("given, expected", [
+    ({}, "ours"),                                     # the DPS job sends no PROCESSOR
+    ({"PROCESSOR": "set by the caller"}, "set by the caller"),
+])
+def test_every_cog_with_event_metadata_names_its_processor(
+        tmp_path, monkeypatch, given, expected):
+    import json
+
+    from shared_utils.version import PROCESSOR_STRING
+
+    tags = tmp_path / "meta.json"
+    tags.write_text(json.dumps({"ACTIVATION_EVENT": "202107_Flood_IA",
+                                "SOURCE": "Copernicus", **given}))
+    seen = []
+
+    def convert(outfile, **kw):
+        seen.append(kw["metadata"])
+        return outfile
+
+    (tmp_path / "out").mkdir()
+    TestOnlyFinishedCogsReachTheOutput()._main(
+        tmp_path / "out", monkeypatch, convert=convert,
+        extra=("--metadata-json", str(tags)))
+    assert len(seen) == 2
+    for metadata in seen:
+        assert metadata["PROCESSOR"] == (PROCESSOR_STRING if expected == "ours" else expected)
+
+
+def test_no_metadata_stays_no_metadata(tmp_path, monkeypatch):
+    """Without --metadata-json the COG engine must still get None, which picks
+    its plain conversion path."""
+    seen = []
+
+    def convert(outfile, **kw):
+        seen.append(kw["metadata"])
+        return outfile
+
+    TestOnlyFinishedCogsReachTheOutput()._main(tmp_path, monkeypatch, convert=convert)
+    assert seen == [None, None]

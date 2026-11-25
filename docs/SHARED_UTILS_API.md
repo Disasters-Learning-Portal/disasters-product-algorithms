@@ -959,8 +959,8 @@ their `"/tmp/s3_temp"` default (testing notebooks, iceye).
 Empties (or creates) `path` and prints what it removed. **Refuses** anything not
 strictly inside a temp directory (`tempfile.gettempdir()` or `/tmp`, after
 resolving symlinks) -- including the temp root itself -- so an OUTPUT_DIR pointed
-at a real folder is never wiped. The four vendor workflow notebooks call it at
-the top of their processing cell.
+at a real folder is never wiped. The Capella, ICEYE, Umbra, SkySat, Satellogic and
+Landsat STAC workflow notebooks call it at the top of their processing cell.
 
 Pinned by [`tests/unit/test_scratch.py`](../tests/unit/test_scratch.py) and
 [`tests/unit/test_vendor_download_cleanup.py`](../tests/unit/test_vendor_download_cleanup.py).

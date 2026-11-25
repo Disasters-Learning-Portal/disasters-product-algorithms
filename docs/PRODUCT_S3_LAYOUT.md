@@ -72,9 +72,10 @@ directory in the table above; the notebooks map token to product key in `_PRODUC
 | `process_sentinel2_odr --product cloud_mask` | uint8 | `1` cloud, `0` everything else | `0` |
 
 The STAC product is made for display: only cloud is drawn (gray colour table), and
-clear sky cannot be told from off-swath. Nothing in the filename says which encoding a
-file uses apart from the name shape (`_day.tif` with the event prefix for `.SAFE`;
-`S2x_MSIL2A_cloudMask_...` for STAC).
+clear sky cannot be told from off-swath. **Do not rely on the filename to tell the two
+apart**: a per-tile name has the same shape in both pipelines
+(`S2x_MSIL2A_cloudMask_<TILE>_<ISO>.tif`), and merged names differ only by the STAC
+orbit token. Check the dtype (uint16 or uint8) or the nodata value (`999` or `0`).
 
 ## Timestamps
 
@@ -103,7 +104,7 @@ Sentinel-2   [<AOI>_]<SAT>[_<LEVEL>]_<product>[_<HHMMSS>]_<TILE|merged>_<YYYY-MM
   (STAC)     <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<TILE>[_masked]_<ISO>.tif
              <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<ORBIT>_merged[_masked]_<YYYY-MM-DD>_day.tif
              S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif
-             S2C_MSIL2A_ndvi_R112_merged_2025-08-13_day.tif
+             S2C_MSIL2A_ndvi_R069_merged_2025-08-13_day.tif
 
 Satellogic   Satellogic_<SAT>_<product>_<ISO>.tif
              Satellogic_SNXX_truecolor_2026-04-22T00:45:47Z.tif
@@ -124,10 +125,13 @@ for the `_visual` asset. `<scene>` (`ssc2_u0002`, or `ssc2d1_0001` for a
 `basic_analytic` tile) is kept because one collect holds several scenes that share a
 timestamp and would otherwise overwrite each other.
 
-The STAC names never carry the activation event (it is in the GeoTIFF tags and the S3
-prefix). A merged file is one satellite pass, so it is dated, not timed; `P<PATH>` (WRS-2
-path) and `<ORBIT>` (ESA relative orbit, `R112`) keep two passes on the same day from
-writing the same name.
+The STAC names never carry the activation event: it is in the GeoTIFF tags only, and the
+published key has no event level. A merged file is one satellite pass, so it is dated, not
+timed; `P<PATH>` (WRS-2 path) and `<ORBIT>` (ESA relative orbit, `R069`) keep two passes
+on the same day from writing the same name. One Landsat case is left: near the poles a
+path is flown twice on a UTC day, and `process_landsat_odr --merge` refuses such a search
+rather than let one mosaic overwrite the other. A name identifies the pass, not the tiles
+or rows in the mosaic, so two areas of interest on one pass publish to the same key.
 
 SAR names are built by `shared_utils.file_naming.create_sar_output_filename`, which is
 also where the rationale for the shape lives (datetime last, `_`-separated product

@@ -776,7 +776,7 @@ up" — both are live until the migration finishes (issue #144).
 | selection | MGRS `tile` + `download_date` | `bbox` + `start_date`/`end_date` |
 | credentials | `COP_USER` / `COP_PASS` MAAP secrets | **none** — both endpoints are public |
 | needs `p7zip` | yes (`7z x <scene>.SAFE.zip`) | no |
-| event in filename | yes (`-event`) | no — tags + S3 prefix only |
+| event in filename | no — tags only (published to `ProgramData/`) | no — tags + `dps_output/<EVENT>/` prefix |
 | products per run | one CLI call, `-p a b c` | `--product` is **singular**; run.sh loops |
 
 **Why two names.** A rename is not a move: editing `algorithm_name` registers a
@@ -815,11 +815,11 @@ Both must appear in the Submit Jobs **Process** dropdown before the comparison
 runs start.
 
 **Comparing them (Phase 4).** Same `activation_event`, same AOI, same dates, same
-level. Note the outputs are *not* byte-comparable and are not meant to be: the
-`.SAFE` job prefixes the event onto filenames and the STAC job does not, and the
-STAC job's water extent carries an `NSTD_<value>` token. Compare *content* —
+level. Note the outputs are *not* byte-comparable and are not meant to be: merged names
+differ (the STAC job adds the orbit token), and the STAC job's water extent carries an
+`NSTD_<value>` token. Compare *content* —
 water-extent class histograms and total water area, per-pixel index difference
-statistics, and the embedded `ACTIVATION_EVENT` / `PROCESSOR` tags.
+statistics, and the embedded `ACTIVATION_EVENT` tags.
 
 **Changed 2026-11-23 (PR #190 and its follow-up).** Three things an operator of the STAC
 job will notice, and one that needs action:
@@ -832,7 +832,18 @@ job will notice, and one that needs action:
   forgotten here.
 - **`we_nstd` is forwarded to the water-extent call only.** It used to be appended to
   every product's command, and the CLI rejects it on any other product unless it is the
-  default — so `products="ndvi we"` with `we_nstd="1 1.5"` died on `ndvi`.
+  default — so `products="ndvi we"` with `we_nstd="1 1.5"` died on `ndvi`. A value of 0 or
+  less is rejected before any product runs.
+- **Colour composites are 4-band RGBA** (alpha 0 on fill only, no nodata tag). With
+  `mask=true`, masked cloud is opaque gray (128) instead of nodata, and observed pixels are
+  floored at 1 so that 0 means fill alone.
+- **COGs name their `PROCESSOR`.** The CLI adds the tag when the metadata passed to it has
+  none, as `run.sh`'s does not.
+- **Water extent over the contiguous US downloads the national CDL (1.6-1.9 GB)** in 16 MB
+  range requests, each retried: the USDA server answers most requests for the whole file
+  with HTTP 500.
+- **A failed or killed run leaves no products behind.** The CLI builds in a scratch
+  directory and moves its COGs into `--output` only once all of them exist.
 - **Index values over clear water changed.** Normalized differences now clamp their
   inputs to `[0, 1]`, as the `.SAFE` job does, so clear water reads NDWI = 1 instead of
   nodata (issue #176). For the Phase 4 comparison this removes the largest expected

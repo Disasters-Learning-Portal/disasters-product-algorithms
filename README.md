@@ -67,7 +67,39 @@ pip install -e .
 
 ### Command Line Interface
 
-#### Landsat 8/9
+#### Landsat 8/9 and Sentinel-2 from STAC (current pipelines)
+
+No scene download: both search [Earth Search](https://earth-search.aws.element84.com/v1)
+over a bounding box and date range and read the bands from cloud storage. `--product`
+takes **one** product per call. The activation event goes into the GeoTIFF tags
+(`--metadata-json`), not into the filename.
+
+```bash
+# Landsat reads s3://usgs-landsat, a requester-pays bucket, so AWS credentials are needed
+process_landsat_odr --product ndvi --start-date 2026-10-09 --end-date 2026-10-12 \
+    --bbox -87.0 35.4 -86.8 35.6 --cloud-mask --merge \
+    --metadata-json event.json --output /tmp/landsat_odr_output
+
+# Sentinel-2 reads public data, no credentials. --level 2 (surface reflectance) or 1
+process_sentinel2_odr --product true_color --level 2 \
+    --start-date 2025-08-13 --end-date 2025-08-13 --bbox -93.7 41.5 -93.5 41.7 \
+    --merge --output /tmp/s2_stac_output
+```
+
+| CLI | `--product` |
+|---|---|
+| `process_landsat_odr` | `true_color` `natural_color` `color_infrared` `swir` `ndvi` `ndwi` `mndwi` `nbr` `evi` |
+| `process_sentinel2_odr` | the same nine, plus `we` (water extent) and `cloud_mask` |
+
+Both also take `--cloud-cover` (default 50), `--cloud-mask`, `--merge` (one mosaic per
+satellite pass) and `--output`. Outputs keep the source projection. The matching
+notebooks are [`landsat_odr_workflow.ipynb`](notebooks/landsat_odr_workflow.ipynb) and
+[`sentinel2_odr_workflow.ipynb`](notebooks/sentinel2_odr_workflow.ipynb).
+
+The two sections below are the **legacy** pipelines, which work on scene archives held on
+disk. Their notebooks are in [`notebooks/legacy/`](notebooks/legacy/).
+
+#### Landsat 8/9 (legacy)
 
 ```bash
 # Basic usage
@@ -95,7 +127,7 @@ process_landsat89 input [-h] [-p [P ...]] [-we_nstd [WE_NSTD ...]]
 
 **Products:** `all`, `true`, `pan`, `nat`, `colorIR`, `ndvi`, `ndwi`, `mndwi`, `evi`, `nbr`, `we`
 
-#### Sentinel-2
+#### Sentinel-2 (legacy)
 
 ```bash
 # Basic usage
@@ -299,8 +331,9 @@ for contributors who haven't installed the hook.
 
 ### Notebook conventions
 
-All workflow notebooks under `notebooks/` declare a `TARGET_CRS` variable
-near the top of their config cell:
+The Umbra workflow and the two retired Landsat and Sentinel-2 workflows declare a
+`TARGET_CRS` variable near the top of their config cell (the other workflows always write
+the source projection):
 
 ```python
 # Set CRS for COG output

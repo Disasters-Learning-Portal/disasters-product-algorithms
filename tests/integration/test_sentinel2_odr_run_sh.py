@@ -249,6 +249,74 @@ class TestHappyPath:
         assert result.ok, result.output
         assert len(result.invocations()) == 2
 
+    def test_the_cloud_mask_product_can_be_requested(self, run_job):
+        """PR #190 added `--product cloud_mask` to the CLI and left it out of
+        the list this script validates against, so the DPS job rejected it."""
+        result = run_job(**defaults(products="cloud_mask ndvi"))
+        assert result.ok, result.output
+        products = [result.flag(argv, "--product")[0] for argv in result.invocations()]
+        assert products == ["cloud_mask", "ndvi"]
+
+
+# ---------------------------------------------------------------------
+# run.sh's product list is a copy of the CLI's -- keep the copy honest
+# ---------------------------------------------------------------------
+
+def _run_sh_products():
+    import re
+
+    with open(RUN_SH) as fh:
+        match = re.search(
+            r'validate_in_set products "\$\(normalize_token "\$t" lower\)" \\\n\s*"([^"]+)"',
+            fh.read(),
+        )
+    assert match, "could not find the products validate_in_set list in run.sh"
+    return set(match.group(1).split())
+
+
+def _cli_choices(monkeypatch, capsys):
+    """What argparse really accepts for --product, read off --help."""
+    import re
+
+    pytest.importorskip("rasterio")
+    pytest.importorskip("pystac_client")
+    from sentinel2 import process_sentinel2_odr as cli
+
+    monkeypatch.setattr(sys, "argv", ["process_sentinel2_odr", "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    listed = re.search(r"--product \{([^}]+)\}", capsys.readouterr().out).group(1)
+    return cli, set(listed.split(","))
+
+
+def test_run_sh_accepts_exactly_the_products_the_cli_offers(monkeypatch, capsys):
+    """The CWL schema has no enum, so run.sh validates product tokens against
+    a hand-copied list. A product added to the CLI but not to the copy cannot
+    be requested through DPS; one left in the copy after the CLI drops it
+    fails only after the job has started."""
+    _, choices = _cli_choices(monkeypatch, capsys)
+    assert _run_sh_products() == choices
+
+
+def test_every_cli_choice_has_a_product_category(monkeypatch, capsys):
+    """The category sets drive nodata and dispatch; a choice in none of them
+    ends in "Unsupported product" after the job has started."""
+    cli, choices = _cli_choices(monkeypatch, capsys)
+    assert choices == (cli.INDEX_PRODUCTS | cli.COMPOSITE_PRODUCTS
+                       | cli.WATER_EXTENT_PRODUCTS | cli.CLOUD_MASK_PRODUCTS)
+
+
+@pytest.mark.parametrize("config", [
+    os.path.join("dps", "sentinel2_odr", "algorithm_config.yaml"),
+    os.path.join("dps", "ogc", "sentinel2_odr.yml"),
+])
+def test_the_products_help_text_lists_every_product(config):
+    """What an operator reads on the Submit Job form."""
+    with open(os.path.join(REPO_ROOT, config)) as fh:
+        doc = next(line for line in fh if "Space-separated list:" in line)
+    listed = set(doc.split("Space-separated list:")[1].split(".")[0].split())
+    assert listed == _run_sh_products()
+
 
 # ---------------------------------------------------------------------
 # The publish filter
@@ -305,6 +373,20 @@ class TestConditionalFlags:
         result = run_job(**defaults(products="ndvi", mask=None))
         assert result.ok, result.output
         assert "--cloud-mask" in result.invocations()[0]
+
+    def test_we_nstd_reaches_only_the_water_extent_call(self, run_job):
+        """`--we-nstd` was appended to every product's command. The CLI accepts
+        it on a non-water product only at its default, so a flood job asking
+        for products="ndvi we" at we_nstd="1 1.5" died on ndvi and never
+        reached water extent. (The stubbed CLI here accepts anything, so the
+        assertion is on the command run.sh builds.)"""
+        result = run_job(**defaults(products="ndvi we cloud_mask", we_nstd="1 1.5"))
+        assert result.ok, result.output
+        by_product = {result.flag(argv, "--product")[0]: argv for argv in result.invocations()}
+        assert "--we-nstd" not in by_product["ndvi"]
+        assert "--we-nstd" not in by_product["cloud_mask"]
+        i = by_product["we"].index("--we-nstd")
+        assert by_product["we"][i + 1:i + 3] == ["1", "1.5"]
 
     def test_we_nstd_is_forwarded_as_multiple_values(self, run_job):
         result = run_job(**defaults(products="we", we_nstd="1 1.5"))
@@ -382,11 +464,28 @@ class TestValidationFailsFast:
             run_job(**defaults(products="we", we_nstd="high")), "we_nstd"
         )
 
+    @pytest.mark.parametrize("we_nstd", ["0", "-1", "0.0", "1 0"])
+    def test_a_we_nstd_of_zero_or_less_is_rejected_before_any_product_runs(
+            self, run_job, we_nstd):
+        """The CLI refuses it too, but only on the `we` call: every product
+        listed before `we` was processed first and then thrown away."""
+        self._assert_rejected(
+            run_job(**defaults(products="ndvi we", we_nstd=we_nstd)), "greater than 0")
+
+    def test_a_fractional_we_nstd_is_accepted(self, run_job):
+        result = run_job(**defaults(products="we", we_nstd="0.5 1.5"))
+        assert result.ok, result.output
+
     def test_cloud_mask_on_l1c_is_rejected_with_the_reason(self, run_job):
         """L1C has no Scene Classification Layer. The CLI rejects it too, but
         catching it here saves a STAC round-trip and says why."""
         result = run_job(**defaults(level="1", mask="true"))
         self._assert_rejected(result, "Scene Classification Layer")
+
+    def test_the_cloud_mask_product_on_l1c_is_rejected_too(self, run_job):
+        """The product reads the same layer, with the mask toggle off."""
+        result = run_job(**defaults(level="1", products="ndvi cloud_mask"))
+        self._assert_rejected(result, "cloud_mask product requires level=2")
 
 
 # ---------------------------------------------------------------------

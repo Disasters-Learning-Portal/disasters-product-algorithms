@@ -58,12 +58,32 @@ changing one does not change the other.
 Satellogic and SkySat spell their filename tokens differently again — Satellogic uses
 all-lowercase (`truecolor`, `colorir`), SkySat uses PascalCase (`TrueColor`).
 
+The STAC ("ODR") Landsat and Sentinel-2 pipelines write the camelCase form of their CLI
+product name, so their index tokens are lowercase and shortwave IR is `swir`:
+`trueColor`, `naturalColor`, `colorInfrared`, `swir`, `ndvi`, `ndwi`, `mndwi`, `nbr`,
+`evi`, plus `waterExtent` and `cloudMask` for Sentinel-2. Each still publishes to the
+directory in the table above; the notebooks map token to product key in `_PRODUCT_KEYS`.
+
+### Two cloud-mask encodings share `Sentinel-2/CloudMask/`
+
+| Written by | dtype | Values | Nodata |
+|---|---|---|---|
+| `process_sentinel2` (`.SAFE`) | uint16 | `0` clear, `1` cloud | `999` |
+| `process_sentinel2_odr --product cloud_mask` | uint8 | `1` cloud, `0` everything else | `0` |
+
+The STAC product is made for display: only cloud is drawn (gray colour table), and
+clear sky cannot be told from off-swath. **Do not rely on the filename to tell the two
+apart**: a per-tile name has the same shape in both pipelines
+(`S2x_MSIL2A_cloudMask_<TILE>_<ISO>.tif`), and merged names differ only by the STAC
+orbit token. Check the dtype (uint16 or uint8) or the nodata value (`999` or `0`).
+
 ## Timestamps
 
 Two conventions, both intentional:
 
 - **Landsat, Sentinel-2** — date only, with a temporal-resolution suffix:
-  `..._2025-04-14_day.tif`
+  `..._2025-04-14_day.tif`. The STAC pipelines keep that for a merged mosaic (one
+  satellite pass) and write a full ISO-8601 instant for a single scene or tile.
 - **Satellogic, Skysat, Umbra, Capella, Iceye** — full ISO-8601 instant, no suffix:
   `..._2026-04-22T00:45:47Z.tif`
 
@@ -73,10 +93,18 @@ Two conventions, both intentional:
 Landsat      [<AOI>_]<SAT>[_<LEVEL>]_<product>[_<HHMMSS>]_<PATHROW|merged>_<YYYY-MM-DD>_day.tif
              LC08_L1TP_015035_trueColor_2023-07-06_day.tif
              LC09_NDVI_merged_2025-04-08_day.tif
+  (STAC)     <SAT>_<LEVEL>_<product>_<PATHROW>[_masked]_<ISO>.tif
+             <SAT>_<LEVEL>_<product>_P<PATH>_merged[_masked]_<YYYY-MM-DD>_day.tif
+             LC08_L2SP_ndvi_021035_masked_2026-10-12T16:24:22Z.tif
+             LC08_L2SP_trueColor_P021_merged_masked_2026-10-12_day.tif
 
 Sentinel-2   [<AOI>_]<SAT>[_<LEVEL>]_<product>[_<HHMMSS>]_<TILE|merged>_<YYYY-MM-DD>_day.tif
              S2A_MSIL2A_shortwaveInfrared_161221_T16RGT_2024-10-12_day.tif
              BMX_S2B_trueColor_merged_2025-02-17_day.tif
+  (STAC)     <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<TILE>[_masked]_<ISO>.tif
+             <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<ORBIT>_merged[_masked]_<YYYY-MM-DD>_day.tif
+             S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif
+             S2C_MSIL2A_ndvi_R069_merged_2025-08-13_day.tif
 
 Satellogic   Satellogic_<SAT>_<product>_<ISO>.tif
              Satellogic_SNXX_truecolor_2026-04-22T00:45:47Z.tif
@@ -96,6 +124,14 @@ Iceye        ICEYE-X<NN>_sigma0-dB_filtered<N>_<ISO>.tif
 for the `_visual` asset. `<scene>` (`ssc2_u0002`, or `ssc2d1_0001` for a
 `basic_analytic` tile) is kept because one collect holds several scenes that share a
 timestamp and would otherwise overwrite each other.
+
+The STAC names never carry the activation event: it is in the GeoTIFF tags only, and the
+published key has no event level. A merged file is one satellite pass, so it is dated, not
+timed; `P<PATH>` (WRS-2 path) and `<ORBIT>` (ESA relative orbit, `R069`) keep two passes
+on the same day from writing the same name. One Landsat case is left: near the poles a
+path is flown twice on a UTC day, and `process_landsat_odr --merge` refuses such a search
+rather than let one mosaic overwrite the other. A name identifies the pass, not the tiles
+or rows in the mosaic, so two areas of interest on one pass publish to the same key.
 
 SAR names are built by `shared_utils.file_naming.create_sar_output_filename`, which is
 also where the rationale for the shape lives (datetime last, `_`-separated product
@@ -128,6 +164,13 @@ Each `dps/<sensor>/run.sh` sets `PRODUCT_SENSOR` next to its locked S3 destinati
 every product by its canonical destination. Leaving `PRODUCT_SENSOR` unset preserves the
 older behaviour — the `OUT_HOME`-relative key under `STAGING_DEST_BASE/<event>/`.
 
+**Exception, still open (issue #192): `dps/sentinel2_odr/run.sh` sets no
+`PRODUCT_SENSOR`**, so that job publishes to `dps_output/<EVENT>/<file>`, not
+`ProgramData/Sentinel-2/<Product>/`. Setting the variable alone would not move anything:
+the key is taken from the enclosing directory name, and the STAC CLIs write every
+product flat into `--output`. The STAC *notebooks* do publish to `ProgramData/`, by
+mapping the filename's product token to a directory.
+
 A file that is not under a recognized product directory is not dropped: it falls back to
 the relative key and the upload prints a warning naming it.
 
@@ -151,18 +194,28 @@ Current state, recorded for cleanup. These are **not** conventions to follow.
 
 ## Where the notebooks live
 
-`notebooks/` holds the six per-sensor workflows and nothing else:
+`notebooks/` holds the seven current per-sensor workflows and nothing else:
 
 ```
-notebooks/landsat_workflow.ipynb        notebooks/umbra_workflow.ipynb
-notebooks/sentinel2_workflow.ipynb      notebooks/capella_workflow.ipynb
-notebooks/sentinel2_odr_workflow.ipynb  notebooks/satellogic_workflow.ipynb
+notebooks/landsat_odr_workflow.ipynb    notebooks/umbra_workflow.ipynb
+notebooks/sentinel2_odr_workflow.ipynb  notebooks/capella_workflow.ipynb
+notebooks/satellogic_workflow.ipynb     notebooks/iceye_workflow.ipynb
+notebooks/skysat_workflow.ipynb
+```
+
+A workflow that a newer pipeline has superseded is retired to `notebooks/legacy/`
+rather than deleted, and stays runnable as a fallback:
+
+```
+notebooks/legacy/landsat_workflow.ipynb      (process_landsat89; superseded by landsat_odr)
+notebooks/legacy/sentinel2_workflow.ipynb    (process_sentinel2, .SAFE; superseded by sentinel2_odr)
 ```
 
 Everything an operator reaches for around them -- transfers, templates, one-off
 utilities -- moved to `notebooks/tools/`. The fixtures under
 `notebooks/testing-notebooks/` are exempt from all of this and keep their inline
-values.
+values. A retired notebook is NOT exempt: it can still publish, so it is held to the
+same rules as a current one.
 
 A sensor notebook names **no bucket and no product directory**. It declares its
 sensor and lets the table resolve the rest:
@@ -178,11 +231,17 @@ Uploads then key themselves: `upload_dir_ambient(..., sensor=PRODUCT_SENSOR)`
 for the directory uploader, or `prefix_for_product_dir(PRODUCT_SENSOR, <dir>)`
 for the per-file one. Both use **ambient** AWS credentials; the MAAP-credential
 `upload_dir_to_staging` is the DPS path only and 401s on the hub. Pinned by
-`tests/unit/test_notebook_layout.py`.
+`tests/unit/test_notebook_layout.py`, which also checks that whatever follows
+`s3://{S3_BUCKET}/` in a notebook is a key the table produced -- both STAC notebooks
+once named the resolver and uploaded to a `*_Test/` prefix anyway.
+
+The two STAC notebooks use the per-file form. Their CLIs write flat, so there is no
+product directory for the directory uploader to key on; they map the filename token to
+a product key (`_PRODUCT_KEYS`) and resolve the directory with `product_dir()`.
 
 `sentinel2_odr_workflow.ipynb` is generated by
 [`tools/_build_s2_odr_notebook.py`](../tools/_build_s2_odr_notebook.py) -- edit the
-generator and re-run it, never the notebook JSON. Its old `PRODUCT_FOLDERS` map
+generator and re-run it, never the notebook JSON (a test compares the two cell for cell). Its old `PRODUCT_FOLDERS` map
 hard-coded `colorIR`, `SWIR`, `MNDWI` and `waterExtent`, none of which match the
 bucket; it now declares `_PRODUCT_KEYS` (filename token -> product key) and
 resolves every directory through `product_dir()`.

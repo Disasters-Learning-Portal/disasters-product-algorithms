@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 
 import boto3
@@ -29,7 +30,7 @@ import requests
 from botocore import UNSIGNED
 from botocore.client import Config
 from pystac_client import Client
-from rasterio.enums import Resampling
+from rasterio.enums import ColorInterp, Resampling
 from rasterio.merge import merge
 from rasterio.session import AWSSession
 from rasterio.warp import calculate_default_transform, reproject
@@ -65,6 +66,19 @@ def _session(unsigned=False):
 # for a real activation footprint, and hitting it prints a warning
 # rather than failing, so a legitimate large job is not blocked.
 MAX_SEARCH_ITEMS = 200
+
+# Newest national CDL published by USDA NASS (the 2025 CDL, released Feb
+# 2026). Bump each February when the next year's CDL comes out. Used both
+# where the scene year is chosen and inside the CDL downloader, which
+# re-clamps its argument -- changing only one of them has no effect.
+LATEST_CDL_YEAR = 2025
+
+# The national CDL archive is 1.6-1.9 GB, and the USDA NASS file server
+# answers most requests for the WHOLE of it with HTTP 500 (5 of 6 on
+# 2026-11-25) while requests for a part of it succeed. It is therefore
+# fetched in parts of this size, each part retried on its own.
+CDL_PART_BYTES = 16 * 1024 * 1024
+CDL_PART_ATTEMPTS = 6
 
 # ---------------------------------------------------------------------
 # Algorithm configuration
@@ -990,6 +1004,107 @@ def _match_raster_to_reference(
 
 
 
+def _download_in_parts(url, destination):
+    """
+    Download `url` to `destination` as a series of HTTP range requests.
+
+    A connection error, a timeout, a 5xx answer or a short body is retried
+    for that part alone, after a growing delay, so one bad answer does not
+    restart a download of well over a gigabyte. A 4xx is not retried: a
+    year that is not published will not appear on the next attempt.
+
+    Raises requests.exceptions.RequestException when a part cannot be
+    fetched. `destination` may then hold a partial file; the caller removes
+    it.
+    """
+
+    offset = 0
+    total = None
+
+    with open(destination, "wb") as out:
+
+        while total is None or offset < total:
+
+            last = offset + CDL_PART_BYTES - 1
+
+            if total is not None:
+                last = min(last, total - 1)
+
+            for attempt in range(1, CDL_PART_ATTEMPTS + 1):
+
+                try:
+
+                    with requests.get(
+                        url,
+                        headers={"Range": f"bytes={offset}-{last}"},
+                        stream=True,
+                        timeout=(30, 300),
+                    ) as response:
+
+                        response.raise_for_status()
+
+                        if response.status_code != 206:
+                            raise requests.exceptions.RequestException(
+                                f"expected a partial response (206), got "
+                                f"{response.status_code}"
+                            )
+
+                        # "bytes 0-16777215/1887184211"
+                        size = int(
+                            response.headers["Content-Range"]
+                            .rsplit("/", 1)[1]
+                        )
+
+                        out.seek(offset)
+                        out.truncate()
+
+                        for chunk in response.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+                            out.write(chunk)
+
+                    received = out.tell() - offset
+                    expected = min(last + 1, size) - offset
+
+                    if received != expected:
+                        raise requests.exceptions.RequestException(
+                            f"short response: {received} of {expected} bytes"
+                        )
+
+                    break
+
+                except requests.exceptions.RequestException as exc:
+
+                    status = getattr(
+                        getattr(exc, "response", None), "status_code", None
+                    )
+
+                    if (
+                        attempt == CDL_PART_ATTEMPTS
+                        or (status is not None and 400 <= status < 500)
+                    ):
+                        raise
+
+                    wait = min(2 ** attempt, 30)
+
+                    print(
+                        f"Download of bytes {offset}-{last} failed "
+                        f"(attempt {attempt}/{CDL_PART_ATTEMPTS}: {exc}). "
+                        f"Retrying in {wait} s..."
+                    )
+
+                    time.sleep(wait)
+
+            if total is not None and size != total:
+                raise requests.exceptions.RequestException(
+                    f"{url} changed size during the download "
+                    f"({total} -> {size} bytes)"
+                )
+
+            total = size
+            offset += expected
+
+
 def _download_cdl_for_water_extent(
     nir_profile,
     year,
@@ -1011,7 +1126,7 @@ def _download_cdl_for_water_extent(
     # CDL year
     # ------------------------------------------------------------
 
-    year = min(int(year), 2024)
+    year = min(int(year), LATEST_CDL_YEAR)
 
     if year < 2008:
         raise ValueError(
@@ -1026,11 +1141,11 @@ def _download_cdl_for_water_extent(
     # ------------------------------------------------------------
     # Paths
     #
-    # The national CDL zip (~1.6 GB) and its extracted GeoTIFF are
+    # The national CDL zip (1.6-1.9 GB) and its extracted GeoTIFF are
     # CACHED, not temporary. An activation routinely spans several
     # Sentinel-2 tiles, and every one of them needs the same national
     # raster; deleting it in the `finally` -- as an earlier revision
-    # did -- re-downloaded 1.6 GB per scene. Only the per-scene subset
+    # did -- re-downloaded the archive per scene. Only the per-scene subset
     # is genuinely temporary.
     #
     # The cache lives in reference_dir, which the caller places under
@@ -1074,12 +1189,16 @@ def _download_cdl_for_water_extent(
                 f"Downloading national {year} 30-m CDL..."
             )
             print(
-                "This is approximately 1.6 GB for the 2024 CDL. It is "
+                "This is 1.6-1.9 GB depending on the year. It is "
                 "cached and reused across every scene in this run."
             )
 
+            # NASS moved the national zips under /sites/default/files/.
+            # The old /Research_and_Science/... path now answers 404 for
+            # every year, which stopped any CONUS water-extent run with a
+            # cold cache before a single tile was classified.
             cdl_url = (
-                "https://www.nass.usda.gov/"
+                "https://www.nass.usda.gov/sites/default/files/"
                 "Research_and_Science/Cropland/Release/datasets/"
                 f"{year}_30m_cdls.zip"
             )
@@ -1095,25 +1214,14 @@ def _download_cdl_for_water_extent(
 
             try:
 
-                with requests.get(
-                    cdl_url,
-                    stream=True,
-                    timeout=(30, 1800),
-                ) as response:
+                _download_in_parts(cdl_url, partial_zip)
 
-                    response.raise_for_status()
-
-                    with open(
-                        partial_zip,
-                        "wb",
-                    ) as f:
-
-                        for chunk in response.iter_content(
-                            chunk_size=1024 * 1024
-                        ):
-
-                            if chunk:
-                                f.write(chunk)
+                # Never cache something that is not the archive: every
+                # later scene would treat it as a cache hit.
+                if not zipfile.is_zipfile(partial_zip):
+                    raise requests.exceptions.RequestException(
+                        "the downloaded file is not a zip archive"
+                    )
 
                 os.replace(partial_zip, zip_path)
 
@@ -1123,12 +1231,15 @@ def _download_cdl_for_water_extent(
 
             except requests.exceptions.RequestException as e:
 
-                if os.path.exists(partial_zip):
-                    os.remove(partial_zip)
-
                 raise RuntimeError(
                     f"Failed to download the {year} CDL: {e}"
                 ) from e
+
+            finally:
+
+                # Gone already after a successful rename.
+                if os.path.exists(partial_zip):
+                    os.remove(partial_zip)
 
         # --------------------------------------------------------
         # Extract national CDL TIFF
@@ -1258,7 +1369,7 @@ def _download_cdl_for_water_extent(
             # the size check below can never fire on its own. Catch it
             # and re-raise with the diagnostic the operator needs --
             # otherwise a non-CONUS scene surfaces as a bare
-            # rasterio.errors.WindowError after a 1.6 GB download.
+            # rasterio.errors.WindowError after a download of gigabytes.
             try:
                 window = window.intersection(
                     full_window
@@ -1282,10 +1393,24 @@ def _download_cdl_for_water_extent(
             # fractional offsets/lengths; src.read and window_transform
             # round them independently, which can disagree by a pixel
             # and shift the reference layer against the NIR grid.
-            window = window.round_offsets(
-                op="floor"
-            ).round_lengths(
-                op="ceil"
+            #
+            # Snap OUTWARD, by hand: rasterio >= 1.4 ignores the `op`
+            # argument of round_offsets/round_lengths and rounds a length
+            # to the nearest pixel, which could leave a sliver of the scene
+            # with no land-cover reference.
+            col_start = max(math.floor(window.col_off), 0)
+            row_start = max(math.floor(window.row_off), 0)
+            col_stop = min(
+                math.ceil(window.col_off + window.width), src.width
+            )
+            row_stop = min(
+                math.ceil(window.row_off + window.height), src.height
+            )
+            window = rio.windows.Window(
+                col_start,
+                row_start,
+                col_stop - col_start,
+                row_stop - row_start,
             )
 
             cdl_array = src.read(
@@ -1350,7 +1475,7 @@ def _download_cdl_for_water_extent(
         #
         # zip_path and national_cdl_path are intentionally KEPT: they
         # are the same for every tile in the activation, and deleting
-        # them here means re-downloading 1.6 GB per scene. They live
+        # them here means re-downloading the archive per scene. They live
         # under the run's output directory and go away with it.
         # --------------------------------------------------------
 
@@ -1633,6 +1758,7 @@ def generate_water_extent(
     nstd=None,
     water_stats=None,
     sample_only=False,
+    reference_dir=None,
 ):
     """
     Generate the Sentinel-2 Water Extent product using the same
@@ -1683,6 +1809,10 @@ def generate_water_extent(
 
     output_dir : str
         Local directory to write the output GeoTIFF.
+
+    reference_dir : str, optional
+        Where downloaded land cover is cached. Default:
+        <output_dir>/water_extent_reference.
 
     cloud_mask : bool
         If True, mask cloud/cloud-shadow/thin-cirrus using the L2A
@@ -1889,10 +2019,13 @@ def generate_water_extent(
     # Reference data directory
     # -------------------------------------------------------------
 
-    reference_dir = os.path.join(
-        output_dir,
-        "water_extent_reference",
-    )
+    # Downloaded land cover is cached here and reused between runs; the
+    # command line keeps it outside its per-run scratch directory.
+    if reference_dir is None:
+        reference_dir = os.path.join(
+            output_dir,
+            "water_extent_reference",
+        )
 
     os.makedirs(
         reference_dir,
@@ -1907,7 +2040,7 @@ def generate_water_extent(
 
         cdl_year = min(
             year,
-            2024,
+            LATEST_CDL_YEAR,
         )
     
         # Temporary CDL matched to the Sentinel-2 B08 grid.
@@ -2069,69 +2202,81 @@ def generate_water_extent(
             water_sample_mask,
         )
 
+    
     # -------------------------------------------------------------
-    # Calculate dynamic NIR threshold
+    # Calculate the dynamic NIR threshold
     #
-    # IMPORTANT:
+    #   nir_thresh = mean(water NIR) + nstd * std(water NIR)
     #
-    # This is the actual logic from the old workflow.
+    # ONE formula, whichever way the statistics arrive. The CLI always
+    # passes `water_stats`, pooled over every tile of the pass
+    # (shared_utils.landcover.pooled_water_statistics); a direct caller
+    # that passes none gets the same statistic from this tile's own
+    # sample, so the two routes classify a tile identically.
+    #
+    # A median + MAD threshold was tried in this branch. It is more
+    # robust to a contaminated water sample, but it lived only in the
+    # no-`water_stats` path, which no CLI, DPS or notebook run takes --
+    # so nothing published used it, while a direct call produced a
+    # different flood map from the CLI for the same tile (30 000 of
+    # 80 000 pixels in a synthetic scene). A robust statistic belongs in
+    # pooled_water_statistics, for all three water-extent pipelines at
+    # once, after validation on real scenes.
     # -------------------------------------------------------------
+
+    # nstd: caller wins, then algorithm configuration, then 1.0
+    if nstd is None:
+        nstd = algorithm.get("nstd", 1.0)
+
+    nstd = float(nstd)
+
+    if not np.isfinite(nstd) or nstd < 0:
+        raise ValueError(
+            f"nstd must be a finite, non-negative number; got {nstd}."
+        )
+
+    # This tile's own water sample. Only REQUIRED when there are no pooled
+    # stats: with water_stats, a tile without reference water is normal.
+    water_nir = nir_array[water_sample_mask].astype(np.float64)
+    water_nir = water_nir[np.isfinite(water_nir)]
 
     if water_stats is not None:
         # Pooled over every tile of this acquisition by the caller, so
         # all tiles of one pass classify with ONE threshold.
         mean, std = water_stats
+        nir_thresh = mean + nstd * std
+        threshold_note = f"pooled mean {mean:.2f} + {nstd} * std {std:.2f}"
     else:
-        water_nir = nir_array[
-            water_sample_mask
-        ]
-
-        mean = np.nanmean(
-            water_nir
-        )
-
-        std = np.nanstd(
-            water_nir
-        )
+        if water_nir.size == 0:
+            raise RuntimeError(
+                "No finite NIR values remain in the permanent-water "
+                "sample. Cannot calculate the water threshold."
+            )
+        mean = np.nanmean(water_nir)
+        std = np.nanstd(water_nir)
+        nir_thresh = mean + nstd * std
+        threshold_note = f"tile mean {mean:.2f} + {nstd} * std {std:.2f}"
 
     # -------------------------------------------------------------
-    # nstd: caller wins, then the algorithm configuration, then 1.0.
-    #
-    # Compared with `is None`, not truthiness -- 0.0 is a meaningless
-    # threshold but it must not silently fall through to the default.
-    # (It is rejected by the CLI, which requires a positive value.)
+    # Diagnostics
     # -------------------------------------------------------------
 
-    if nstd is None:
-        nstd = algorithm.get(
-            "nstd",
-            1.0,
-        )
-
-    nstd = float(nstd)
-
-    nir_thresh = (
-        mean
-        + (
-            nstd
-            * std
-        )
-    )
+    scene_nir = nir_array[(~nir_nd_mask) & (~cloud_mask_array)]
 
     print()
     print("Water NIR statistics:")
-    print(
-        f"  mean: {mean}"
-    )
-    print(
-        f"  std: {std}"
-    )
-    print(
-        f"  nstd: {nstd}"
-    )
-    print(
-        f"  NIR threshold: {nir_thresh}"
-    )
+    print(f"  sample size (this tile): {water_nir.size:,}")
+    print(f"  threshold method: {threshold_note}")
+    print(f"  nstd: {nstd}")
+    print(f"  NIR threshold: {nir_thresh:.2f}")
+    if water_nir.size:
+        percentiles = np.nanpercentile(water_nir, [5, 25, 50, 75, 95])
+        print(f"  NIR percentiles (5/25/50/75/95): {percentiles}")
+    else:
+        print("  NIR percentiles: n/a (no reference water in this tile)")
+    if scene_nir.size:
+        print(f"  scene NIR median (valid, non-cloud): {np.nanmedian(scene_nir):.2f}")
+
 
     # -------------------------------------------------------------
     # Create binary water extent
@@ -2511,6 +2656,22 @@ def calculate_normalized_difference(bands):
     """
     Normalized difference of two bands: (b1 - b2) / (b1 + b2).
 
+    Inputs are clamped to the physical reflectance range [0, 1] first
+    (NaN stays NaN). Once ESA's radiometric offset is applied, clear
+    water is often slightly NEGATIVE in the NIR and SWIR -- real sensor
+    noise around a true value near zero, which ESA added the offset to
+    keep rather than truncate. Unclamped, a negative NIR pushes NDWI
+    above 1; such pixels were then dropped as out of range, leaving
+    nodata holes over the clearest water (84% of clear Lake Tahoe on a
+    PB 05.11 scene, issue #176) in the products used to map floods.
+    Clamping projects the noise onto the physical floor, so clear water
+    reads NDWI = 1, its correct limit. The result always lies in
+    [-1, 1]; the only invalid pixels are source nodata and 0/0.
+
+    Same convention as the `.SAFE` path (sentinel2_functions
+    .normalized_difference, .clinerules.md rule 63) and both Landsat
+    pipelines (rule 64).
+
     Parameters
     ----------
     bands : sequence of numpy.ndarray
@@ -2524,7 +2685,9 @@ def calculate_normalized_difference(bands):
         True where the result is meaningful.
     """
 
-    band1, band2 = (np.asarray(b, dtype=np.float32) for b in bands)
+    band1, band2 = (
+        np.clip(np.asarray(b, dtype=np.float32), 0.0, 1.0) for b in bands
+    )
 
     denominator = band1 + band2
 
@@ -2745,6 +2908,8 @@ def generate_index(
 
     index[valid] = values[valid]
 
+    mask = None
+
     if cloud_mask:
         print("Applying cloud mask...")
         mask = get_cloud_mask(item, out_shape=index.shape)
@@ -2768,6 +2933,11 @@ def generate_index(
 
     with rio.open(outfile, "w", **profile) as dst:
         dst.write(index, 1)
+
+    # Sidecar so --merge can keep this tile's cloud mask (see
+    # apply_cloud_union).
+    if mask is not None:
+        write_cloud_mask_sidecar(outfile, mask, profile)
 
     print(f"Generation completed: {outfile}")
 
@@ -2909,6 +3079,7 @@ def generate_composite(
     apply_rayleigh = level == "MSIL1C"
 
     bands = []
+    observed = []
 
     for band_name in algorithm_assets:
 
@@ -2937,6 +3108,11 @@ def generate_composite(
             apply_scale=False,
         )
 
+        # Where the sensor actually observed something: source nodata is
+        # DN 0. Taken from the raw band, BEFORE the Rayleigh subtraction
+        # can push a dark but valid pixel to zero or below.
+        observed.append(band != 0)
+
         if apply_rayleigh:
             correction = get_rayleigh_correction(item, band_name)
             if correction:
@@ -2946,11 +3122,14 @@ def generate_composite(
 
         bands.append(band)
 
+    mask = None
+
     if cloud_mask:
         print("Applying cloud mask...")
         mask = get_cloud_mask(item, out_shape=bands[0].shape)
-        for band in bands:
+        for band, seen in zip(bands, observed):
             band[mask] = 0
+            seen[mask] = False
 
     print("Applying logarithmic display scaling...")
 
@@ -2973,9 +3152,25 @@ def generate_composite(
         dtype=np.uint8,
     )
 
+    # 0 is reserved for "no data" (off-swath fill and masked cloud): the
+    # merge and the alpha band key on it. But the stretch also maps every
+    # VALID value at or below its lower threshold to 0, and those pixels
+    # were then published transparent -- on an offset-0 L1C scene that is
+    # all clear water, shadow and dark forest (reflectance <= 0.075).
+    # Observed pixels are floored at 1 so that 0 only ever means fill.
+    for index, seen in enumerate(observed):
+        np.putmask(array[index], seen & (array[index] == 0), 1)
+
     profile = profile.copy()
 
+    # driver="GTiff" explicitly, as generate_index does. Left to the
+    # source profile, an L1C composite (JPEG-2000 assets) was written as
+    # a lossy quality-25 JP2 named .tif: it changed 88% of the valid
+    # pixels, its ringing made off-swath pixels non-zero (opaque specks
+    # along the swath edge once the alpha band is derived), and its
+    # .aux.xml sidecar stayed behind declaring nodata=0.
     profile.update(
+        driver="GTiff",
         count=array.shape[0],
         dtype="uint8",
         nodata=0,
@@ -2991,6 +3186,11 @@ def generate_composite(
     with rio.open(outfile, "w", **profile) as dst:
         dst.write(array)
 
+    # Sidecar so --merge can keep this tile's cloud mask (see
+    # apply_cloud_union).
+    if mask is not None:
+        write_cloud_mask_sidecar(outfile, mask, profile)
+
     print(f"Generation completed: {outfile}")
 
     return outfile
@@ -2999,8 +3199,34 @@ def generate_composite(
 # ---------------------------------------------------------------------
 # Merge processing
 # ---------------------------------------------------------------------
+def _first_with_priority_value(priority_value):
+    """
+    Merge method equivalent to rasterio's "first", except that pixels
+    equal to `priority_value` in ANY input survive into the mosaic.
+    Used to keep class 5 (cloud) from every tile in water extent.
+    """
 
-def merge_products(tif_paths, output_path, method="first"):
+    def method(
+        merged_data,
+        new_data,
+        merged_mask,
+        new_mask,
+        index=None,
+        roff=None,
+        coff=None,
+    ):
+        # Stock "first": fill only where the mosaic is still nodata
+        # and the new tile has valid data.
+        fill = merged_mask & ~new_mask
+        np.copyto(merged_data, new_data, where=fill, casting="unsafe")
+
+        # Priority overlay: the new tile's priority pixels always win.
+        keep = ~new_mask & (new_data == priority_value)
+        np.copyto(merged_data, new_data, where=keep, casting="unsafe")
+
+    return method
+
+def merge_products(tif_paths, output_path, method="first", priority_value=None):
 
     if len(tif_paths) == 1:
         shutil.copy(tif_paths[0], output_path)
@@ -3015,7 +3241,15 @@ def merge_products(tif_paths, output_path, method="first"):
         with rio.open(path) as src:
             crs_list.append(src.crs)
 
-    crs_dom = max(set(crs_list), key=crs_list.count)
+    # Most common CRS; a tie goes to the first in WKT order. Taking max()
+    # over a bare set let the winner depend on the hash seed, so tiles
+    # split evenly across a UTM zone boundary came out in a different
+    # projection from one run to the next.
+    # (An ungeoreferenced input has no CRS at all; it sorts first.)
+    crs_dom = max(
+        sorted(set(crs_list), key=lambda crs: crs.to_wkt() if crs else ""),
+        key=crs_list.count,
+    )
 
     merge_inputs = list(tif_paths)
     tmp_dir = None
@@ -3085,6 +3319,9 @@ def merge_products(tif_paths, output_path, method="first"):
             count = ref.count
             dtype = ref.dtypes[0]
 
+        if priority_value is not None:
+            method = _first_with_priority_value(priority_value)
+
         array, transform = merge(
             merge_inputs,
             method=method,
@@ -3142,6 +3379,356 @@ def water_extent_merge_method(merged_data, new_data, merged_mask, new_mask, **kw
     np.copyto(merged_data, new_data, where=fill, casting="unsafe")
     cloud = ~new_mask & (new_data == WATER_EXTENT_CLOUD_CLASS)
     np.copyto(merged_data, new_data, where=cloud, casting="unsafe")
+
+
+
+# ---------------------------------------------------------------------
+# Cloud-mask preservation across a merge (indices and composites)
+#
+# For these products a cloud pixel is written as plain nodata, which is
+# indistinguishable from off-swath nodata, so merge(method="first") fills
+# one tile's cloud holes with another tile's valid pixels. To keep every
+# tile's cloud mask, each tile's boolean mask is saved as a sidecar
+# raster, the sidecars are mosaicked with "max" (cloud in ANY tile = 1),
+# and that union is stamped onto the merged product as nodata. True
+# off-swath nodata is untouched, so it is still backfilled by other tiles.
+# Water extent does not need this: its cloud is a real class (5) handled
+# by merge_products(priority_value=5).
+# ---------------------------------------------------------------------
+
+_CLOUD_MASK_DIRNAME = "_cloud_masks"
+
+
+def cloud_mask_sidecar_path(outfile):
+    """Sidecar path for a per-tile product GeoTIFF."""
+    return os.path.join(
+        os.path.dirname(outfile),
+        _CLOUD_MASK_DIRNAME,
+        os.path.basename(outfile),
+    )
+
+
+def write_cloud_mask_sidecar(outfile, mask, profile):
+    """
+    Save a tile's boolean cloud mask on the same grid as `outfile`.
+    Only the georeferencing is taken from `profile`.
+    """
+    path = cloud_mask_sidecar_path(outfile)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    sidecar_profile = {
+        key: profile[key] for key in ("crs", "transform", "width", "height")
+    }
+    sidecar_profile.update(
+        driver="GTiff", count=1, dtype="uint8", compress="ZSTD"
+    )
+
+    with rio.open(path, "w", **sidecar_profile) as dst:
+        dst.write(np.asarray(mask, dtype=np.uint8), 1)
+
+    return path
+
+
+def apply_cloud_union(merged_path, mask_paths):
+    """
+    Set every pixel that is cloud in ANY input tile to the mosaic's
+    nodata value. Call after merge_products() with the same tiles'
+    sidecar paths.
+    """
+    union_path = merged_path + ".cloudunion.tmp.tif"
+
+    try:
+        merge_products(mask_paths, union_path, method="max")
+
+        with rio.open(union_path) as m:
+            cloud = m.read(1) == 1
+
+        with rio.open(merged_path, "r+") as dst:
+
+            if dst.nodata is None:
+                raise ValueError(
+                    "Merged product has no nodata value to stamp the "
+                    "cloud mask with."
+                )
+
+            if (dst.height, dst.width) != cloud.shape:
+                raise RuntimeError(
+                    f"Cloud-mask mosaic {cloud.shape} does not match the "
+                    f"merged product ({dst.height}, {dst.width})."
+                )
+
+            for band_index in range(1, dst.count + 1):
+                band = dst.read(band_index)
+                band[cloud] = dst.nodata
+                dst.write(band, band_index)
+
+    finally:
+        if os.path.exists(union_path):
+            os.remove(union_path)
+
+    return merged_path
+
+
+# ---------------------------------------------------------------------
+# Cloud-mask product
+#
+# The cloud / cloud-shadow / thin-cirrus mask on its own, from the L2A
+# Scene Classification Layer, at the SCL's native 20 m. Strictly binary:
+#
+#   1 = cloud, cloud shadow or thin cirrus (SCL 3, 8, 9, 10 -- the same
+#       classes get_cloud_mask uses)
+#   0 = everything else, which is also the file's nodata value
+#
+# Because 0 is nodata, clear sky and the off-swath fill are BOTH
+# transparent in any viewer, and only cloud is drawn. (A GeoTIFF colour
+# table cannot carry transparency, so nodata is what makes the "else"
+# transparent; the two cannot be told apart in this product.)
+# finalize_cloud_mask() attaches the gray colour for class 1.
+# ---------------------------------------------------------------------
+
+CLOUD_MASK_NODATA = 0
+
+# Gray (R=G=B) the cloud class renders in. Used for both the cloud-mask
+# colour table and the cloud pixels in RGBA composites.
+CLOUD_GRAY = 128
+
+
+def generate_cloud_mask(
+    item,
+    output_dir="./s3_temp",
+    cloud_classes=(3, 8, 9, 10),
+):
+    """
+    Generate the binary cloud-mask product for one Sentinel-2 L2A scene.
+
+    Parameters
+    ----------
+    item : pystac.Item
+        Sentinel-2 L2A STAC item. Raises if it has no 'scl' asset.
+
+    output_dir : str
+        Local directory to write the output GeoTIFF.
+
+    cloud_classes : iterable of int
+        SCL classes counted as cloud. Defaults match get_cloud_mask.
+
+    Returns
+    -------
+    str
+        Path to the generated GeoTIFF (uint8: 1 cloud, 0 otherwise and
+        nodata).
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if "scl" not in item.assets:
+        raise KeyError(
+            f"Asset 'scl' not found in STAC item '{item.id}'. "
+            "The cloud-mask product requires the Sentinel-2 L2A Scene "
+            "Classification Layer, which does not exist for L1C products."
+        )
+
+    href, _, _, _, _ = get_asset_metadata(item.assets["scl"])
+
+    print(f"Reading SCL asset: {href}")
+
+    with rio.Env(_session()):
+        with rio.open(href) as src:
+            scl = src.read(1)
+            src_profile = src.profile
+
+    mask = np.zeros(scl.shape, dtype=np.uint8)
+
+    mask[np.isin(scl, cloud_classes)] = 1
+
+    profile = {
+        key: src_profile[key] for key in ("crs", "transform", "width", "height")
+    }
+
+    profile.update(
+        driver="GTiff",
+        count=1,
+        dtype="uint8",
+        nodata=CLOUD_MASK_NODATA,
+        compress="ZSTD",
+        tiled=True,
+        blockxsize=512,
+        blockysize=512,
+    )
+
+    outfile = os.path.join(
+        output_dir,
+        _build_output_filename(item, "cloud_mask"),
+    )
+
+    print()
+    print("Cloud mask classes:")
+    print(f"  1: Cloud:               {np.count_nonzero(mask == 1):,} pixels")
+    print(f"  0: Not cloud / no data: {np.count_nonzero(mask == 0):,} pixels")
+
+    print(f"Writing GeoTIFF: {outfile}")
+
+    with rio.open(outfile, "w", **profile) as dst:
+        dst.write(mask, 1)
+
+    print(f"Generation completed: {outfile}")
+
+    return outfile
+
+
+def finalize_cloud_mask(path, gray=CLOUD_GRAY):
+    """
+    Attach the display colour table to a cloud-mask GeoTIFF (per-tile or
+    merged): cloud (1) is gray. Everything else is value 0, which is the
+    file's nodata and therefore transparent. Rewrites the file in place.
+    Needed after the merge, which does not carry a colour table through.
+    """
+
+    with rio.open(path) as src:
+        data = src.read(1)
+        profile = src.profile.copy()
+
+    colormap = {i: (0, 0, 0, 0) for i in range(256)}
+    colormap[1] = (gray, gray, gray, 255)
+
+    tmp_path = path + ".colormap.tmp.tif"
+
+    try:
+        with rio.open(tmp_path, "w", **profile) as dst:
+            dst.write(data, 1)
+            dst.write_colormap(1, colormap)
+
+        os.replace(tmp_path, path)
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return path
+
+
+# ---------------------------------------------------------------------
+# RGBA composites: gray clouds, transparent no data
+#
+# generate_composite writes cloud and off-swath pixels both as 0, i.e.
+# black, and the COG carries no nodata tag. This converts a finished
+# composite (per-tile or merged) to 4-band RGBA instead:
+#
+#   cloud            -> gray RGB, opaque
+#   other no data    -> transparent (alpha 0)
+#   everything else  -> unchanged, opaque
+#
+# It runs AFTER the merge because "first" merging cannot be trusted with
+# an alpha band: alpha is always valid inside a tile's footprint, so a
+# tile's transparent edge would block later tiles from filling it.
+# ---------------------------------------------------------------------
+
+def finalize_composite_rgba(path, mask_paths=None, gray=CLOUD_GRAY):
+    """
+    Convert a 3-band uint8 composite to RGBA in place.
+
+    Parameters
+    ----------
+    path : str
+        The composite GeoTIFF (3 bands, 0 = cloud/no data).
+
+    mask_paths : list of str or None
+        Cloud-mask sidecars (see write_cloud_mask_sidecar) for the
+        tile(s) in `path`. Cloud in ANY of them is painted gray. None
+        when no cloud mask was applied: no-data is still made
+        transparent, nothing is painted gray.
+
+    gray : int
+        Gray level for cloud pixels.
+
+    Notes
+    -----
+    A pixel is no-data when all three bands are 0 and it is not cloud.
+    """
+
+    cloud = None
+    union_path = None
+
+    try:
+
+        if mask_paths:
+
+            if len(mask_paths) == 1:
+                cloud_source = mask_paths[0]
+            else:
+                union_path = path + ".cloudunion.tmp.tif"
+                merge_products(list(mask_paths), union_path, method="max")
+                cloud_source = union_path
+
+            with rio.open(cloud_source) as m:
+                cloud = m.read(1) == 1
+
+        with rio.open(path) as src:
+            rgb = src.read()
+            src_profile = src.profile
+
+        if rgb.shape[0] != 3:
+            raise ValueError(
+                f"{path} has {rgb.shape[0]} bands; RGBA conversion "
+                f"expects a 3-band composite."
+            )
+
+        if cloud is not None and cloud.shape != rgb.shape[1:]:
+            raise RuntimeError(
+                f"Cloud mask {cloud.shape} does not match the composite "
+                f"{rgb.shape[1:]}."
+            )
+
+        no_data = (rgb == 0).all(axis=0)
+
+        if cloud is not None:
+            no_data &= ~cloud
+
+        alpha = np.where(no_data, 0, 255).astype(np.uint8)
+
+        if cloud is not None:
+            rgb[:, cloud] = gray
+            alpha[cloud] = 255
+
+        profile = {
+            key: src_profile[key]
+            for key in ("crs", "transform", "width", "height")
+        }
+
+        profile.update(
+            driver="GTiff",
+            count=4,
+            dtype="uint8",
+            compress="ZSTD",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+        )
+
+        tmp_path = path + ".rgba.tmp.tif"
+
+        try:
+            with rio.open(tmp_path, "w", **profile) as dst:
+                dst.write(rgb, [1, 2, 3])
+                dst.write(alpha, 4)
+                dst.colorinterp = (
+                    ColorInterp.red,
+                    ColorInterp.green,
+                    ColorInterp.blue,
+                    ColorInterp.alpha,
+                )
+
+            os.replace(tmp_path, path)
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    finally:
+        if union_path is not None and os.path.exists(union_path):
+            os.remove(union_path)
+
+    return path
 
 
 # The high-level process_index / process_composite / process_items

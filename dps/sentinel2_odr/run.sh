@@ -129,16 +129,31 @@ require_nonempty products "${PRODUCTS}" \
 # would otherwise only surface after the STAC search has already run.
 # shellcheck disable=SC2086  # intentional word-split of the space-separated list
 for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" \
-  "ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir"; done
+  "ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir cloud_mask"; done
 
+# Positive numbers only. The CLI rejects 0 or less too, but not until the `we`
+# call, after every product listed before it has been processed.
 # shellcheck disable=SC2086
-[[ -n "${WE_NSTD}" ]] && for n in ${WE_NSTD}; do validate_number we_nstd "$n"; done
+for n in ${WE_NSTD}; do
+  validate_number we_nstd "$n"
+  awk -v v="$n" 'BEGIN { exit !(v > 0) }' || die "we_nstd '$n' must be greater than 0."
+done
 
 # --cloud-mask needs the L2A Scene Classification Layer, which L1C has no
 # equivalent of. The CLI rejects the combination too, but catching it here saves
 # a STAC round-trip and gives the operator the reason up front.
 if [[ "${MASK}" == "true" && "${LEVEL}" == "1" ]]; then
   die "mask=true requires level=2 (L2A): cloud masking uses the Scene Classification Layer, which does not exist for L1C."
+fi
+
+# The cloud_mask PRODUCT is read from that same layer, whatever `mask` says.
+if [[ "${LEVEL}" == "1" ]]; then
+  # shellcheck disable=SC2086  # intentional word-split of the space-separated list
+  for t in ${PRODUCTS}; do
+    if [[ "$(normalize_token "$t" lower)" == "cloud_mask" ]]; then
+      die "the cloud_mask product requires level=2 (L2A): it is read from the Scene Classification Layer, which does not exist for L1C."
+    fi
+  done
 fi
 
 OUT_HOME="${HOME}/drcs_outputs/${ACTIVATION_EVENT}"
@@ -190,8 +205,11 @@ for product in ${PRODUCTS}; do
 
   [[ "${MERGE}" == "true" ]] && args+=( --merge )
   [[ "${MASK}"  == "true" ]] && args+=( --cloud-mask )
+  # Water extent only. The CLI rejects --we-nstd on any other product unless
+  # it is the default, so forwarding it to every call made a job such as
+  # products="ndvi we" we_nstd="1 1.5" die on ndvi before reaching `we`.
   # shellcheck disable=SC2206
-  [[ -n "${WE_NSTD}" ]]      && args+=( --we-nstd ${WE_NSTD} )
+  [[ "${prod}" == "we" && -n "${WE_NSTD}" ]] && args+=( --we-nstd ${WE_NSTD} )
 
   conda run --live-stream --name disasters_dps process_sentinel2_odr "${args[@]}"
 

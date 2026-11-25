@@ -9,11 +9,20 @@ least one `process_*.py`. For each such dir, we assert:
   1. `<sensor>*` appears in [tool.setuptools.packages.find].include
   2. `process_<sensor>` is registered in [project.scripts]
   3. The script entry resolves to `<sensor>.cli:process_<sensor>_cli`
-  4. notebooks/<sensor>_workflow.ipynb exists
+  4. the sensor has a CURRENT operator workflow at the top of notebooks/:
+     notebooks/<sensor>_workflow.ipynb, or -- when that one has been retired
+     to notebooks/legacy/ -- a successor notebooks/<sensor>_<variant>_workflow.ipynb
+     (e.g. landsat_odr_workflow.ipynb). A sensor is never left with only a
+     retired notebook.
   5. notebooks/testing-notebooks/<sensor>_workflow.ipynb exists
   6. cell 0 of each notebook mentions THIS sensor name (case-insensitive)
   7. cell 0 of each notebook does NOT mention any OTHER sensor's name
      (catches the Capella "Sentinel-2"/"Umbra" copy-paste leftover bug)
+  8. no workflow notebook exists BOTH at the top level and under
+     notebooks/legacy/ -- an operator could not tell which one is live
+
+Rules 6-7 run over every notebook the sensor owns: the current workflow(s), a
+retired one under notebooks/legacy/, and the testing twin.
 
 Catches the silent-failure modes from the capella rollout:
   - Bug #1: console script registered, package missing from include
@@ -40,6 +49,9 @@ SRC_DIR = REPO_ROOT / "src"          # packages live under src/ (src layout)
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 NOTEBOOKS_DIR = REPO_ROOT / "notebooks"
 TESTING_NOTEBOOKS_DIR = REPO_ROOT / "notebooks" / "testing-notebooks"
+# Retired workflows: superseded by a newer pipeline for the same sensor, kept
+# runnable as a fallback rather than deleted. See notebooks/legacy/README.md.
+LEGACY_NOTEBOOKS_DIR = REPO_ROOT / "notebooks" / "legacy"
 
 # Some sensors use a hyphenated canonical name in titles even though their
 # package dir is alphanumeric. Map sensor-dir name -> list of substrings
@@ -73,15 +85,35 @@ def read_cell0_source(nb_path: Path) -> str:
     return src
 
 
-def check_notebook_conformance(
-    sensor_name: str,
-    all_sensor_names: list[str],
-) -> list[str]:
-    """Return a list of failure strings for this sensor's two notebooks."""
-    failures: list[str] = []
+def owner_of(notebook_name: str, all_sensor_names: list[str]) -> str | None:
+    """The sensor a workflow notebook belongs to, or None.
 
-    main_nb = NOTEBOOKS_DIR / f"{sensor_name}_workflow.ipynb"
-    test_nb = TESTING_NOTEBOOKS_DIR / f"{sensor_name}_workflow.ipynb"
+    `<sensor>_workflow.ipynb` and `<sensor>_<variant>_workflow.ipynb` both belong
+    to `<sensor>`. The LONGEST matching sensor name wins, so a future package
+    whose name extends another's (`landsat` / `landsat_tm`) keeps its own
+    notebook instead of being read as a variant of the shorter one.
+    """
+    if not notebook_name.endswith("_workflow.ipynb"):
+        return None
+    owners = [s for s in all_sensor_names if notebook_name.startswith(f"{s}_")]
+    return max(owners, key=len) if owners else None
+
+
+def workflow_notebooks(directory: Path, sensor_name: str,
+                       all_sensor_names: list[str]) -> list[Path]:
+    """Every workflow notebook in `directory` that belongs to `sensor_name`."""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        p for p in directory.glob("*_workflow.ipynb")
+        if owner_of(p.name, all_sensor_names) == sensor_name
+    )
+
+
+def check_cell0(nb_path: Path, sensor_name: str,
+                all_sensor_names: list[str]) -> list[str]:
+    """Rules 6-7: cell 0 names this sensor and no other."""
+    failures: list[str] = []
 
     self_aliases = [a.lower() for a in aliases_for(sensor_name)]
     other_aliases: list[tuple[str, str]] = [
@@ -91,41 +123,85 @@ def check_notebook_conformance(
         for a in aliases_for(other)
     ]
 
-    for nb_path, role in [(main_nb, "notebook"), (test_nb, "testing notebook")]:
-        if not nb_path.exists():
+    cell0 = read_cell0_source(nb_path).lower()
+    if not cell0:
+        return [f"{nb_path.relative_to(REPO_ROOT)} cell 0 is empty / unreadable."]
+
+    if not any(alias in cell0 for alias in self_aliases):
+        failures.append(
+            f"{nb_path.relative_to(REPO_ROOT)} cell 0 does not mention "
+            f"the sensor name '{sensor_name}'. Add a title / heading."
+        )
+
+    leaked = sorted({
+        f"'{alias}' (from {other}/)"
+        for other, alias in other_aliases
+        if alias in cell0
+    })
+    if leaked:
+        failures.append(
+            f"{nb_path.relative_to(REPO_ROOT)} cell 0 mentions another "
+            f"sensor: {', '.join(leaked)}. This is the classic "
+            f"copy-paste leftover bug — relabel the frontmatter to "
+            f"refer to '{sensor_name}' throughout."
+        )
+
+    return failures
+
+
+def check_notebook_conformance(
+    sensor_name: str,
+    all_sensor_names: list[str],
+) -> list[str]:
+    """Return a list of failure strings for this sensor's notebooks."""
+    failures: list[str] = []
+
+    current = workflow_notebooks(NOTEBOOKS_DIR, sensor_name, all_sensor_names)
+    legacy = workflow_notebooks(LEGACY_NOTEBOOKS_DIR, sensor_name, all_sensor_names)
+    test_nb = TESTING_NOTEBOOKS_DIR / f"{sensor_name}_workflow.ipynb"
+
+    # 4. A current operator workflow at the top level.
+    if not current:
+        main_nb = NOTEBOOKS_DIR / f"{sensor_name}_workflow.ipynb"
+        if legacy:
             failures.append(
-                f"{sensor_name}/ has no matching {role} at "
-                f"{nb_path.relative_to(REPO_ROOT)}. "
-                f"Every sensor must ship a {role} pair — copy from "
+                f"{sensor_name}/ has only retired notebooks "
+                f"({', '.join(str(p.relative_to(REPO_ROOT)) for p in legacy)}) and "
+                f"no current workflow at the top of notebooks/. Retiring a "
+                f"workflow to notebooks/legacy/ requires a successor such as "
+                f"notebooks/{sensor_name}_<variant>_workflow.ipynb."
+            )
+        else:
+            failures.append(
+                f"{sensor_name}/ has no matching notebook at "
+                f"{main_nb.relative_to(REPO_ROOT)}. "
+                f"Every sensor must ship a notebook pair — copy from "
                 f"capella's or use tools/new_sensor.py to scaffold."
             )
-            continue
 
-        cell0 = read_cell0_source(nb_path).lower()
-        if not cell0:
-            failures.append(
-                f"{nb_path.relative_to(REPO_ROOT)} cell 0 is empty / unreadable."
-            )
-            continue
+    # 5. The import-based testing twin.
+    if not test_nb.exists():
+        failures.append(
+            f"{sensor_name}/ has no matching testing notebook at "
+            f"{test_nb.relative_to(REPO_ROOT)}. "
+            f"Every sensor must ship a testing notebook pair — copy from "
+            f"capella's or use tools/new_sensor.py to scaffold."
+        )
 
-        if not any(alias in cell0 for alias in self_aliases):
+    # 8. Retired means moved, not copied.
+    for nb_path in legacy:
+        twin = NOTEBOOKS_DIR / nb_path.name
+        if twin.exists():
             failures.append(
-                f"{nb_path.relative_to(REPO_ROOT)} cell 0 does not mention "
-                f"the sensor name '{sensor_name}'. Add a title / heading."
+                f"{nb_path.name} exists both at {twin.relative_to(REPO_ROOT)} and "
+                f"at {nb_path.relative_to(REPO_ROOT)}. A retired workflow is "
+                f"MOVED to notebooks/legacy/ — delete one of them."
             )
 
-        leaked = sorted({
-            f"'{alias}' (from {other}/)"
-            for other, alias in other_aliases
-            if alias in cell0
-        })
-        if leaked:
-            failures.append(
-                f"{nb_path.relative_to(REPO_ROOT)} cell 0 mentions another "
-                f"sensor: {', '.join(leaked)}. This is the classic "
-                f"copy-paste leftover bug — relabel the frontmatter to "
-                f"refer to '{sensor_name}' throughout."
-            )
+    # 6-7. Cell 0 of every notebook this sensor owns.
+    owned = list(current) + list(legacy) + ([test_nb] if test_nb.exists() else [])
+    for nb_path in owned:
+        failures.extend(check_cell0(nb_path, sensor_name, all_sensor_names))
 
     return failures
 

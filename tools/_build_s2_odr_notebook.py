@@ -1,9 +1,14 @@
-"""One-shot generator for notebooks/sentinel2_odr_workflow.ipynb.
+"""Generator for notebooks/sentinel2_odr_workflow.ipynb.
 
-Kept in tools/ so the notebook can be regenerated deterministically rather
-than hand-edited as JSON. Run:
+The notebook is GENERATED from the CELLS list below. To change it, edit this
+file and re-run:
 
     python tools/_build_s2_odr_notebook.py
+
+Never edit the notebook itself, in Jupyter or as JSON: the next regeneration
+discards the edit, and until then the two disagree about what the notebook
+does. tests/unit/test_notebook_layout.py::TestOdrGeneratorStaysInSync compares
+every cell of the committed notebook with CELLS and fails on any difference.
 """
 import json
 import os
@@ -33,7 +38,7 @@ title: Sentinel-2 STAC Processing Workflow
 description: Generate Sentinel-2 disaster-response COGs by querying a STAC API (Earth Search) over a bounding box and date range, reading the cloud-optimized assets directly from S3 — no scene download and no Copernicus credentials.
 author:
   - Ethan Kerr (Editor, UAH)
-date: August 31, 2026
+date: November 23, 2026
 execute:
    freeze: true
 ---
@@ -46,12 +51,13 @@ pipeline. It queries [Earth Search](https://earth-search.aws.element84.com/v1)
 for scenes intersecting a bounding box and reads the assets straight from AWS
 Open Data.
 
-> **There are two Sentinel-2 pipelines right now**, on purpose.
-> `sentinel2_workflow.ipynb` drives the older `process_sentinel2`, which
-> downloads `.SAFE` archives from the Copernicus Data Space and needs
-> `COP_USER` / `COP_PASS` credentials. **This** notebook needs no credentials
-> and no download step. Both are live until the migration finishes — see
-> [issue #144](https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/issues/144).
+> **This is the current Sentinel-2 workflow.** It needs no credentials and no
+> download step. The older `process_sentinel2` pipeline, which downloads
+> `.SAFE` archives from the Copernicus Data Space and needs `COP_USER` /
+> `COP_PASS`, is retired to
+> [`legacy/sentinel2_workflow.ipynb`](legacy/sentinel2_workflow.ipynb). It
+> still runs, as a fallback while the two are compared on real activations —
+> see [issue #144](https://github.com/Disasters-Learning-Portal/disasters-product-algorithms/issues/144).
 
 ## Steps
 
@@ -121,6 +127,9 @@ PRODUCTS = {
     "nbr": False,
     "evi": False,
     "we": False,
+    # The cloud / cloud-shadow / thin-cirrus mask as a product of its own
+    # (1 = cloud, drawn gray; everything else transparent). L2A only.
+    "cloud_mask": False,
 }
 
 # Water-extent NIR threshold(s), in standard deviations above the mean NIR of
@@ -134,10 +143,15 @@ WE_NSTD = [1]
 # ------------------------------------------------------------------------------
 
 # Mask cloud / cloud-shadow / thin-cirrus using the L2A Scene Classification
-# Layer. Requires LEVEL = "2" -- L1C has no SCL asset.
+# Layer. Requires LEVEL = "2" -- L1C has no SCL asset. Indices get the masked
+# pixels as nodata, water extent marks them class 5, and colour composites
+# show them as opaque gray. (The "cloud_mask" PRODUCT above is separate: it
+# writes the mask itself, whatever this toggle says.)
 CLOUD_MASK = True
 
-# Mosaic all matched tiles into a single product instead of one file per tile.
+# Mosaic the tiles of each satellite pass into one product per pass, instead
+# of one file per tile. A date range covering several passes gives several
+# mosaics -- passes are never mixed.
 MERGE = False
 
 # ------------------------------------------------------------------------------
@@ -195,6 +209,13 @@ if CLOUD_MASK and LEVEL == "1":
         "CLOUD_MASK requires Sentinel-2 L2A (LEVEL = '2'); the Scene "
         "Classification Layer needed for cloud masking does not exist "
         "for L1C products."
+    )
+
+if PRODUCTS.get("cloud_mask") and LEVEL == "1":
+    raise ValueError(
+        "The cloud_mask product requires Sentinel-2 L2A (LEVEL = '2'); it is "
+        "read from the Scene Classification Layer, which does not exist for "
+        "L1C products."
     )
 
 if not any(PRODUCTS.values()):
@@ -305,14 +326,27 @@ single `--product` per invocation.
 # ==============================================================================
 import subprocess
 
-# Record what existed BEFORE this run, so the review and upload cells below can
-# scope themselves to what THIS run produced. Globbing the whole output dir
-# would sweep up leftovers from a previous activation and publish them under
-# the current event's prefix.
+# NEW_COGS is what the review and upload cells below work on: the files THIS
+# run produced, and only those from a product that FINISHED. Globbing the whole
+# output dir instead would sweep up leftovers from a previous activation and
+# publish them under the current event's prefix.
+#
+# OUTPUT_DIR is snapshotted around each product's CLI call. The snapshot holds
+# each file's modification time, not just its name: the CLI writes
+# deterministic names, so re-running this cell REWRITES the same files, and a
+# comparison of names alone called a re-run "0 COGs produced".
 import glob
 
-_pre_existing = set(glob.glob(os.path.join(OUTPUT_DIR, "*.tif")))
 
+def _output_snapshot():
+    """{path: mtime_ns} for the top-level GeoTIFFs in OUTPUT_DIR."""
+    return {
+        f: os.stat(f).st_mtime_ns
+        for f in glob.glob(os.path.join(OUTPUT_DIR, "*.tif"))
+    }
+
+
+NEW_COGS = []
 failures = []
 
 for product, enabled in PRODUCTS.items():
@@ -348,34 +382,57 @@ for product, enabled in PRODUCTS.items():
 
     print(f"Command: {' '.join(process_cmd)}\\n")
 
+    _before = _output_snapshot()
+
+    # Unbuffered, so each line appears as the CLI prints it. Through a pipe
+    # Python would otherwise hold the output back in blocks.
     process = subprocess.Popen(
         process_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         bufsize=1,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     for line in process.stdout:
         print(line, end="")
 
     return_code = process.wait()
 
+    # New files, and files this call rewrote.
+    _written = [
+        f for f, mtime in _output_snapshot().items() if _before.get(f) != mtime
+    ]
+
     if return_code == 0:
+        NEW_COGS += _written
         print(f"\\n[ok] {product} completed")
     else:
+        # The CLI moves its COGs into OUTPUT_DIR only once all of them
+        # exist, so a failed product should have left nothing. Whatever it
+        # did leave stays out of NEW_COGS: nothing below reviews or
+        # publishes it.
         failures.append((product, return_code))
-        print(f"\\n[FAILED] {product} exited {return_code}")
+        print(
+            f"\\n[FAILED] {product} exited {return_code}; "
+            f"{len(_written)} unfinished file(s) left out of NEW_COGS"
+        )
 
-# Products written by THIS run.
-NEW_COGS = sorted(set(glob.glob(os.path.join(OUTPUT_DIR, "*.tif"))) - _pre_existing)
+NEW_COGS = sorted(set(NEW_COGS))
 
 print()
 print("=" * 70)
 print(f"{len(NEW_COGS)} COG(s) produced by this run:")
 for f in NEW_COGS:
     print(f"  {os.path.basename(f)}")
+
+# Stop here, so "Run All" cannot carry on into the upload with part of what was
+# asked for missing.
 if failures:
-    print(f"\\n{len(failures)} product(s) FAILED: {failures}")
+    raise RuntimeError(
+        f"{len(failures)} product(s) FAILED: {failures}. Review the output "
+        f"above before uploading anything from this run."
+    )
 '''),
     md("""
 ## 4. Review the results
@@ -428,14 +485,18 @@ Merged:    <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<ORBIT>_merged[_masked]_<YYYY-MM-D
 ```
 
 e.g. `S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif` (one tile) and
-`S2C_MSIL2A_ndvi_R112_merged_2025-08-13_day.tif` (one pass, mosaicked). A
+`S2C_MSIL2A_ndvi_R069_merged_2025-08-13_day.tif` (one pass, mosaicked). A
 merged file is ONE satellite pass: a date range gives one merged file per pass,
-never a mosaic across dates. `R112` is ESA's relative orbit.
+never a mosaic across dates. `R069` is ESA's relative orbit.
 
-**The activation event is NOT in the filename.** It lives in the GeoTIFF tags
-and the S3 prefix — the same convention `bake_event_metadata.ipynb` and
-`simple_disaster_staging.ipynb` use. (The older `.SAFE` pipeline prefixes the
-event onto filenames instead, so names differ between the two.)
+`<product>` is the camelCase product token (`trueColor`, `colorInfrared`,
+`waterExtent`, `cloudMask`, ...). The cloud-mask product never carries
+`_masked`: it is the mask.
+
+**The activation event is NOT in the filename.** It is recorded only in the
+GeoTIFF tags: the S3 key, `ProgramData/Sentinel-2/<Product>/<filename>`, has no
+event level either. (The legacy `.SAFE` names carry no event too; their merged
+names differ by having no orbit token.)
 """),
     md("""
 ## 5. Upload to S3 — opt-in
@@ -456,7 +517,7 @@ from shared_utils.product_paths import prefix_for_product_dir, product_dir
 
 # Filename product token -> the product key in shared_utils.product_paths. Keys
 # must match the camelCase token _build_output_filename writes, and every
-# product in PRODUCTS needs an entry or its COGs are silently skipped. The
+# product in PRODUCTS needs an entry or the cell raises for its COGs. The
 # directory itself is NOT written here: product_dir() resolves it, so this
 # notebook cannot drift from the published layout the way the old hard-coded
 # folder map did (it had colorIR, SWIR, MNDWI and waterExtent, none of which
@@ -472,6 +533,7 @@ _PRODUCT_KEYS = {
     "nbr": "NBR",
     "evi": "EVI",
     "waterExtent": "waterExtent",
+    "cloudMask": "cloudMask",
 }
 PRODUCT_FOLDERS = {
     token: product_dir(PRODUCT_SENSOR, key) for token, key in _PRODUCT_KEYS.items()
@@ -482,7 +544,7 @@ _unmapped = {
     p for p, on in PRODUCTS.items() if on
 } - {
     "true_color", "natural_color", "color_infrared", "swir", "ndvi",
-    "ndwi", "mndwi", "nbr", "evi", "we",
+    "ndwi", "mndwi", "nbr", "evi", "we", "cloud_mask",
 }
 if _unmapped:
     raise ValueError(f"products with no folder mapping: {sorted(_unmapped)}")
@@ -530,15 +592,21 @@ else:
     if skipped:
         raise RuntimeError(
             f"{len(skipped)} COG(s) had no product folder and were NOT "
-            f"uploaded: {skipped}. Add the token to PRODUCT_FOLDERS -- a "
+            f"uploaded: {skipped}. Add the token to _PRODUCT_KEYS -- a "
             f"silent skip is how a whole product goes missing."
         )
 '''),
 ]
 
 
-def main():
-    nb = {
+def build():
+    """The notebook as a dict -- what main() writes and what the sync test reads."""
+    # nbformat 4.5 requires a cell id. Without one, Jupyter mints a random id
+    # per cell the first time the notebook is saved, which shows up as a diff
+    # in every cell.
+    for n, cell in enumerate(CELLS, start=1):
+        cell["id"] = f"s2-odr-{n:02d}"
+    return {
         "cells": CELLS,
         "metadata": {
             "kernelspec": {
@@ -551,8 +619,11 @@ def main():
         "nbformat": 4,
         "nbformat_minor": 5,
     }
+
+
+def main():
     with open(OUT, "w") as fh:
-        json.dump(nb, fh, indent=1)
+        json.dump(build(), fh, indent=1)
         fh.write("\n")
     print(f"wrote {OUT} ({len(CELLS)} cells)")
 

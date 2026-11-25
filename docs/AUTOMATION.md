@@ -346,16 +346,25 @@ template. See `.github/RULESETS.md` for the full migration rationale.
 
 ## What `tools/check_sensor_consistency.py` does
 
-Quick reference (full source is ~115 lines, stdlib + `tomllib` only):
+Quick reference (stdlib + `tomllib` only):
 
-- **Sensor-directory detection** (lines 32-45): dirs under `src/` (sorted,
+- **Sensor-directory detection**: dirs under `src/` (sorted,
   non-hidden) containing both `cli.py` and at least one `process_*.py`.
   Skips `.`-prefixed and `_`-prefixed dirs.
-- **Per-sensor validation** (lines 76-108):
+- **Per-sensor validation**:
   - `<sensor>*` glob in `[tool.setuptools.packages.find].include`.
   - For every `process_*.py` and `download_*.py` in the sensor dir, expect
     a matching console script in `[project.scripts]` with target shape
     `<sensor>.cli:<verb>_cli`.
+- **Per-sensor notebooks**:
+  - A current workflow notebook at the top of `notebooks/`: `<sensor>_workflow.ipynb`,
+    or, when that one has been retired to `notebooks/legacy/`, a successor named
+    `<sensor>_<variant>_workflow.ipynb` (for example `landsat_odr_workflow.ipynb`). A
+    sensor left with only a retired notebook fails.
+  - The import-based twin `notebooks/testing-notebooks/<sensor>_workflow.ipynb`.
+  - No notebook present both at the top level and under `legacy/`.
+  - Cell 0 of every notebook the sensor owns (current, retired, testing) names that
+    sensor and no other.
 - **Output**: stderr-listed failures with remediation suggestions; stdout
   "OK" with sensor count on success.
 - **Exit codes**: 0 OK, 1 failure.
@@ -448,9 +457,11 @@ Implementation:
   jupytext runtime dep, but `jupytext` is in `dev-conda-deps.txt` for
   contributors who want to round-trip the templates).
 - `tools/check_sensor_consistency.py` extended with notebook conformance:
-  asserts both `notebooks/<sensor>_workflow.ipynb` and the testing variant
-  exist, the sensor name appears in cell 0, and no other sensor name
-  appears in cell 0 (catches the Capella "Sentinel-2"/"Umbra" copy-paste
+  asserts a current top-level workflow (`<sensor>_workflow.ipynb`, or a
+  `<sensor>_<variant>_workflow.ipynb` successor once that one is retired to
+  `notebooks/legacy/`) and the testing variant exist, no notebook is in both tiers,
+  the sensor name appears in cell 0 of every notebook the sensor owns, and no other
+  sensor name appears there (catches the Capella "Sentinel-2"/"Umbra" copy-paste
   leftover — see [Post-mortems](#post-mortems)).
 
 Error paths covered (all exit 1 with no partial writes):

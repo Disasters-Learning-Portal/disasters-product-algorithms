@@ -367,14 +367,32 @@ class TestSweep:
 
 
 # ---------------------------------------------------------------------------
-# The static check of the eight workflow notebooks
+# The static check of the workflow notebooks, current and retired
 # ---------------------------------------------------------------------------
 
 class TestWorkflowNotebookCheck:
     def test_all_workflow_notebooks_pass(self, tmp_path):
         ns = _exec(_configured(tmp_path), NB_CHECK)
         assert ns["problems"] == []
-        assert len(ns["nb_paths"]) == 8, ns["nb_paths"]
+        # 7 current (notebooks/) + 2 retired (notebooks/legacy/). A hard count on
+        # purpose: a glob that matched nothing would otherwise pass over zero
+        # files. Adding or retiring a workflow is a deliberate edit here and in
+        # tests/unit/test_notebook_layout.py.
+        assert len(ns["nb_paths"]) == 9, ns["nb_paths"]
+
+    def test_retired_workflows_are_checked_too(self, tmp_path):
+        """A retired notebook still publishes to the live bucket when an operator
+        falls back to it, so moving to notebooks/legacy/ must not take it out of
+        the check."""
+        ns = _exec(_configured(tmp_path), NB_CHECK)
+        checked = {
+            os.path.basename(path) for path in ns["nb_paths"]
+            if os.path.basename(os.path.dirname(path)) == "legacy"
+        }
+        legacy_dir = os.path.join(REPO_ROOT, "notebooks", "legacy")
+        retired = {f for f in os.listdir(legacy_dir) if f.endswith(".ipynb")}
+        assert retired, "notebooks/legacy/ holds no notebooks"
+        assert checked == retired
 
     def test_a_hardcoded_program_data_path_is_caught(self, tmp_path):
         """The check must actually fire -- a regex this specific is easy to write

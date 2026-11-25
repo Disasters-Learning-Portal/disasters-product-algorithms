@@ -21,7 +21,7 @@ base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap
 # Resource requirements (OGC/CWL schema; replaces the old queue + disk_space).
 # Matches disasters-sentinel2-process: same tile sizes, same product set. The
 # STAC path needs no room for .SAFE archives, but the water-extent product may
-# cache a national CDL (~1.6 GB) plus its extracted GeoTIFF, so outdir_max stays.
+# cache a national CDL (1.6-1.9 GB) plus its extracted GeoTIFF, so outdir_max stays.
 ram_min: 64
 cores_min: 8
 outdir_max: 20
@@ -72,7 +72,7 @@ inputs:
     default: "2"
   - name: products
     label: Products
-    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir. One COG per product per scene."
+    doc: "Space-separated list: ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir cloud_mask. One COG per product per scene. cloud_mask (the cloud / cloud-shadow / thin-cirrus mask as its own product) needs level 2."
     type: string
     default: "true_color ndvi"
   - name: cloud_cover

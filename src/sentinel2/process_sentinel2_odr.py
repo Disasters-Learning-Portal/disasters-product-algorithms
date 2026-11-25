@@ -11,6 +11,7 @@ This script handles:
     - Index generation
     - Composite generation
     - Water-extent generation
+    - Cloud-mask product generation
     - Tile merging (optional)
     - COG creation
 
@@ -29,6 +30,8 @@ side-by-side on real activations.
 
 import argparse
 import os
+import shutil
+import tempfile
 
 from sentinel2.sentinel2_odr_functions import (
     search_sentinel2,
@@ -40,6 +43,12 @@ from sentinel2.sentinel2_odr_functions import (
     acquisition_key,
     drop_superseded_baselines,
     water_extent_merge_method,
+    apply_cloud_union,
+    cloud_mask_sidecar_path,
+    generate_cloud_mask,
+    finalize_cloud_mask,
+    finalize_composite_rgba,
+    CLOUD_MASK_NODATA,
     _build_output_filename,
     _nstd_variant_token,
 )
@@ -47,6 +56,7 @@ from sentinel2.sentinel2_odr_functions import (
 from shared_utils.cog_utils import convert_to_cog
 from shared_utils.landcover import pooled_water_statistics
 from shared_utils.cog_metadata import load_metadata_json
+from shared_utils.version import PROCESSOR_STRING
 
 
 # ---------------------------------------------------------------------
@@ -86,6 +96,9 @@ INDEX_NODATA = -9999
 WATER_NODATA = 0
 COMPOSITE_NODATA = False
 
+# Scratch directory a run builds its products in, inside --output.
+WORK_DIR_PREFIX = "_work_"
+
 
 # ---------------------------------------------------------------------
 # Sentinel-2 product categories
@@ -109,6 +122,12 @@ COMPOSITE_PRODUCTS = {
     "natural_color",
     "color_infrared",
     "swir",
+}
+
+# The cloud / cloud-shadow / thin-cirrus mask on its own, from the L2A
+# Scene Classification Layer: 1 cloud, 0 otherwise (also its nodata).
+CLOUD_MASK_PRODUCTS = {
+    "cloud_mask",
 }
 
 
@@ -136,6 +155,7 @@ def main():
             "natural_color",
             "color_infrared",
             "swir",
+            "cloud_mask",
         ],
         help="Sentinel-2 product to generate",
     )
@@ -267,8 +287,10 @@ def main():
         "--output",
         default="/tmp/s3_temp",
         help=(
-            "Local directory for intermediate GeoTIFFs "
-            "and COGs (default: /tmp/s3_temp)"
+            "Local directory the finished COGs are written to "
+            "(default: /tmp/s3_temp). Intermediates are built in a "
+            "scratch subdirectory and removed; the water-extent "
+            "land-cover cache is kept in water_extent_reference/."
         ),
     )
 
@@ -304,6 +326,13 @@ def main():
             "--cloud-mask requires Sentinel-2 L2A (--level 2); the Scene "
             "Classification Layer (SCL) needed for cloud masking does not "
             "exist for L1C products."
+        )
+
+    if args.product == "cloud_mask" and args.level == "1":
+        raise ValueError(
+            "--product cloud_mask requires Sentinel-2 L2A (--level 2); the "
+            "Scene Classification Layer (SCL) does not exist for L1C "
+            "products."
         )
 
     # -----------------------------------------------------------------
@@ -364,6 +393,10 @@ def main():
         algorithm_type = "composite"
         nodata = COMPOSITE_NODATA
 
+    elif args.product in CLOUD_MASK_PRODUCTS:
+        algorithm_type = "cloud_mask"
+        nodata = CLOUD_MASK_NODATA
+
     else:
         raise ValueError(
             f"Unsupported Sentinel-2 product: {args.product}"
@@ -376,6 +409,11 @@ def main():
     metadata = load_metadata_json(
         args.metadata_json
     )
+
+    # The DPS job passes only ACTIVATION_EVENT and SOURCE. A value the
+    # caller did set (the notebooks do) is kept.
+    if metadata is not None:
+        metadata.setdefault("PROCESSOR", PROCESSOR_STRING)
 
     # -----------------------------------------------------------------
     # Print configuration
@@ -412,17 +450,27 @@ def main():
     # Load algorithm
     # -----------------------------------------------------------------
 
-    print("Loading Sentinel-2 algorithm...")
+    if algorithm_type == "cloud_mask":
 
-    algorithm = get_algorithm(
-        algorithm_type=algorithm_type,
-        algorithm_name=args.product,
-        algorithm_file=args.algorithm_file,
-    )
+        # The cloud mask is just the SCL classes; there is nothing to
+        # configure, so it has no algorithm catalog entry.
+        algorithm = {}
 
-    print(
-        f"Algorithm '{args.product}' loaded successfully."
-    )
+        print("Cloud-mask product: no algorithm catalog entry needed.")
+
+    else:
+
+        print("Loading Sentinel-2 algorithm...")
+
+        algorithm = get_algorithm(
+            algorithm_type=algorithm_type,
+            algorithm_name=args.product,
+            algorithm_file=args.algorithm_file,
+        )
+
+        print(
+            f"Algorithm '{args.product}' loaded successfully."
+        )
 
     # -----------------------------------------------------------------
     # Search Sentinel-2
@@ -455,6 +503,73 @@ def main():
     # each other's per-tile output.
     items = drop_superseded_baselines(items)
 
+    # Everything is built in a scratch directory inside --output, and the
+    # COGs are moved out of it under their product names only once the
+    # whole run has succeeded. A file in --output under a product name is
+    # therefore always a finished, tagged COG -- after an exception, a
+    # SIGTERM or an OOM kill alike -- which matters because the caller (a
+    # notebook upload cell, a DPS job) publishes by filename. A failed
+    # re-run also leaves an earlier run's COGs as they were.
+    os.makedirs(args.output, exist_ok=True)
+    work_dir = tempfile.mkdtemp(prefix=WORK_DIR_PREFIX, dir=args.output)
+
+    try:
+        cog_paths = _produce_cogs(
+            args,
+            items,
+            algorithm,
+            algorithm_type,
+            nodata,
+            metadata,
+            work_dir,
+        )
+
+    finally:
+        # Takes the per-tile cloud-mask sidecars with it (they live in
+        # work_dir/_cloud_masks). A run that is killed outright leaves
+        # this directory behind; it is safe to delete.
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    # -----------------------------------------------------------------
+    # Summary
+    # -----------------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("Sentinel-2 processing complete")
+    print("=" * 70)
+
+    print(
+        f"Created {len(cog_paths)} COG(s)."
+    )
+
+    for cog_path in cog_paths:
+        print(f"  {cog_path}")
+
+    print()
+
+
+def _produce_cogs(
+    args,
+    items,
+    algorithm,
+    algorithm_type,
+    nodata,
+    metadata,
+    work_dir,
+):
+    """
+    Generate one product GeoTIFF per scene, mosaic per acquisition if
+    requested, convert the results to COGs, and move them into --output.
+    Returns the COG paths.
+
+    Everything is written in `work_dir` until the last COG is finished;
+    see the note in main(). The one exception is the water-extent
+    land-cover cache, which is large and shared between runs.
+    """
+
+    reference_dir = os.path.join(args.output, "water_extent_reference")
+
     # -----------------------------------------------------------------
     # Generate product GeoTIFF(s), one per scene
     # -----------------------------------------------------------------
@@ -485,9 +600,10 @@ def main():
                     item=item,
                     algorithm=algorithm,
                     algorithm_name=args.product,
-                    output_dir=args.output,
+                    output_dir=work_dir,
                     cloud_mask=args.cloud_mask,
                     sample_only=True,
+                    reference_dir=reference_dir,
                 )
             )
 
@@ -522,7 +638,8 @@ def main():
                             item=item,
                             algorithm=algorithm,
                             algorithm_name=args.product,
-                            output_dir=args.output,
+                            output_dir=work_dir,
+                            reference_dir=reference_dir,
                             cloud_mask=args.cloud_mask,
                             nstd=nstd,
                             water_stats=water_stats[
@@ -541,9 +658,21 @@ def main():
                         item=item,
                         algorithm=algorithm,
                         algorithm_name=args.product,
-                        output_dir=args.output,
+                        output_dir=work_dir,
                         nodata=nodata,
                         cloud_mask=args.cloud_mask,
+                    ),
+                )
+            ]
+
+        elif algorithm_type == "cloud_mask":
+
+            produced = [
+                (
+                    None,
+                    generate_cloud_mask(
+                        item=item,
+                        output_dir=work_dir,
                     ),
                 )
             ]
@@ -557,7 +686,7 @@ def main():
                         item=item,
                         algorithm=algorithm,
                         algorithm_name=args.product,
-                        output_dir=args.output,
+                        output_dir=work_dir,
                         cloud_mask=args.cloud_mask,
                     ),
                 )
@@ -625,24 +754,43 @@ def main():
             merged_name = _build_output_filename(
                 items_sorted[0],
                 args.product,
-                masked=args.cloud_mask,
+                masked=args.cloud_mask and algorithm_type != "cloud_mask",
                 merged=True,
                 variant=variant,
             )
-            merged_path = os.path.join(args.output, merged_name)
+            merged_path = os.path.join(work_dir, merged_name)
 
-            # Water extent: a cloud flag from ANY tile of the pass wins
-            # over a valid class (water_extent_merge_method); everything
-            # else keeps rasterio's first-valid-pixel rule.
+            # Water extent: cloud in ANY tile wins over a valid class.
+            # Cloud mask: "max", so cloud in any tile survives.
+            # Everything else: first valid pixel.
+            if algorithm_type == "water_extent":
+                merge_method = water_extent_merge_method
+            elif algorithm_type == "cloud_mask":
+                merge_method = "max"
+            else:
+                merge_method = "first"
+
             merge_products(
                 list(paths_sorted),
                 merged_path,
-                method=(
-                    water_extent_merge_method
-                    if algorithm_type == "water_extent"
-                    else "first"
-                ),
+                method=merge_method,
             )
+
+            if args.cloud_mask and algorithm_type == "index":
+                apply_cloud_union(
+                    merged_path,
+                    [cloud_mask_sidecar_path(p) for p in paths_sorted],
+                )
+
+            elif algorithm_type == "composite":
+                finalize_composite_rgba(
+                    merged_path,
+                    (
+                        [cloud_mask_sidecar_path(p) for p in paths_sorted]
+                        if args.cloud_mask
+                        else None
+                    ),
+                )
 
             print(f"Merged product created: {merged_path}")
 
@@ -658,11 +806,27 @@ def main():
     else:
         files_to_cog = [path for _, _, path in local_paths]
 
+        if algorithm_type == "composite":
+            for path in files_to_cog:
+                finalize_composite_rgba(
+                    path,
+                    (
+                        [cloud_mask_sidecar_path(path)]
+                        if args.cloud_mask
+                        else None
+                    ),
+                )
+
+    # Cloud-mask product: attach the gray / transparent colour table.
+    if algorithm_type == "cloud_mask":
+        for path in files_to_cog:
+            finalize_cloud_mask(path)
+
     # -----------------------------------------------------------------
     # Convert to COG(s)
     # -----------------------------------------------------------------
 
-    cog_paths = []
+    finished = []
 
     for outfile in files_to_cog:
 
@@ -682,41 +846,19 @@ def main():
                 f"COG conversion failed for {outfile}"
             )
 
-        print(f"COG created: {cog_path}")
+        print(f"COG created: {os.path.basename(cog_path)}")
 
-        cog_paths.append(cog_path)
+        finished.append(cog_path)
 
-        # ---------------------------------------------------------
-        # Cleanup intermediate GeoTIFF
-        # ---------------------------------------------------------
+    # Every COG of this run exists: hand them over under their names.
+    cog_paths = []
 
-        if (
-            os.path.exists(outfile)
-            and outfile != cog_path
-        ):
-            os.remove(outfile)
+    for cog_path in finished:
+        final_path = os.path.join(args.output, os.path.basename(cog_path))
+        os.replace(cog_path, final_path)
+        cog_paths.append(final_path)
 
-            print(
-                f"Removed source GeoTIFF: {outfile}"
-            )
-
-    # -----------------------------------------------------------------
-    # Summary
-    # -----------------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("Sentinel-2 processing complete")
-    print("=" * 70)
-
-    print(
-        f"Created {len(cog_paths)} COG(s)."
-    )
-
-    for cog_path in cog_paths:
-        print(f"  {cog_path}")
-
-    print()
+    return cog_paths
 
 
 if __name__ == "__main__":

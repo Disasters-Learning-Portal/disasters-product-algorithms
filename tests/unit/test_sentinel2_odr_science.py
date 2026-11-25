@@ -42,13 +42,50 @@ class TestNormalizedDifference:
         assert values[0, 0] == pytest.approx((0.40 - 0.05) / (0.40 + 0.05))
 
     def test_zero_denominator_is_invalid_not_inf(self):
-        a = np.array([[0.2]], dtype=np.float32)
-        b = np.array([[-0.2]], dtype=np.float32)
+        # Both bands at or below zero clamp to 0: 0/0 has no value.
+        a = np.array([[-0.002]], dtype=np.float32)
+        b = np.array([[-0.005]], dtype=np.float32)
 
         values, valid = s2.calculate_normalized_difference([a, b])
 
         assert not valid[0, 0]
         assert np.isfinite(values[0, 0])
+
+    def test_clear_water_is_one_not_out_of_range(self):
+        """Issue #176. Green 0.02, NIR -0.005 after ESA's offset: unclamped
+        that is NDWI = 1.67, which generate_index then dropped as out of range
+        -- a nodata hole over the clearest water. 84% of clear Lake Tahoe on a
+        real PB 05.11 scene."""
+        green = np.array([[0.02]], dtype=np.float32)
+        nir = np.array([[-0.005]], dtype=np.float32)
+
+        values, valid = s2.calculate_normalized_difference([green, nir])
+
+        assert valid[0, 0]
+        assert values[0, 0] == 1.0
+
+    def test_result_never_leaves_minus_one_to_one(self):
+        rng = np.random.default_rng(0)
+        a = rng.uniform(-0.2, 1.5, 5000).astype(np.float32)
+        b = rng.uniform(-0.2, 1.5, 5000).astype(np.float32)
+
+        values, valid = s2.calculate_normalized_difference([a, b])
+
+        assert np.abs(values[valid]).max() <= 1.0
+
+    def test_agrees_with_the_safe_pipeline(self):
+        """One sensor, two pipelines: the same reflectances must give the same
+        index, pixel for pixel (.clinerules.md rule 63)."""
+        from sentinel2 import sentinel2_functions as safe
+
+        rng = np.random.default_rng(1)
+        a = rng.uniform(-0.1, 1.2, 5000).astype(np.float32)
+        b = rng.uniform(-0.1, 1.2, 5000).astype(np.float32)
+        a[:50] = np.nan
+
+        values, valid = s2.calculate_normalized_difference([a, b])
+        ours = np.where(valid, values, -9999.0)
+        np.testing.assert_allclose(ours, safe.normalized_difference(a, b), rtol=0, atol=1e-6)
 
     def test_nan_input_is_invalid(self):
         a = np.array([[np.nan]], dtype=np.float32)

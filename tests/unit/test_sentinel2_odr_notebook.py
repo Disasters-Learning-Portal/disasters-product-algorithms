@@ -37,6 +37,7 @@ style of tests/unit/test_simple_disaster_naming.py.
 import ast
 import json
 import os
+import re
 
 import pytest
 
@@ -80,6 +81,36 @@ def upload_src(cells):
 @pytest.fixture(scope="module")
 def process_src(cells):
     return cell_containing(cells, "PROCESS SELECTED PRODUCTS")
+
+
+# Where each product the notebook offers must be published, spelled out here on
+# purpose: an expectation read from the notebook's own mapping agrees with
+# whatever that mapping says, including a product sent to another's folder.
+PUBLISHED_FOLDERS = {
+    "true_color": "TrueColor",
+    "natural_color": "NaturalColor",
+    "color_infrared": "ColorIR",
+    "swir": "ShortwaveIR",
+    "ndvi": "NDVI",
+    "ndwi": "NDWI",
+    "mndwi": "mNDWI",
+    "nbr": "NBR",
+    "evi": "EVI",
+    "we": "WaterExtent",
+    "cloud_mask": "CloudMask",
+}
+
+
+def cli_product_choices(monkeypatch, capsys):
+    """What argparse really accepts for --product, read off --help."""
+    pytest.importorskip("rasterio")
+    from sentinel2 import process_sentinel2_odr as cli
+
+    monkeypatch.setattr("sys.argv", ["process_sentinel2_odr", "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    listed = re.search(r"--product \{([^}]+)\}", capsys.readouterr().out).group(1)
+    return set(listed.split(","))
 
 
 def exec_config(config_src, **overrides):
@@ -151,16 +182,12 @@ class TestConfigDefaults:
         assert "MERGE" in ns
         assert "ENABLE_MERGE" not in ns
 
-    def test_every_cli_product_is_offered(self, config_src):
+    def test_every_cli_product_is_offered(self, config_src, monkeypatch, capsys):
         """The notebook is the operator's only route to a product, so PRODUCTS
         must list everything `process_sentinel2_odr --product` accepts. PR #190
         added `cloud_mask` and, in the same edit, dropped `we`."""
-        pytest.importorskip("rasterio")
-        from sentinel2 import process_sentinel2_odr as cli
-
-        offered = (cli.INDEX_PRODUCTS | cli.COMPOSITE_PRODUCTS
-                   | cli.WATER_EXTENT_PRODUCTS | cli.CLOUD_MASK_PRODUCTS)
-        assert set(exec_config(config_src)["PRODUCTS"]) == offered
+        assert set(exec_config(config_src)["PRODUCTS"]) == cli_product_choices(
+            monkeypatch, capsys)
 
     def test_water_extent_thresholds_are_configurable(self, config_src, process_src):
         assert exec_config(config_src)["WE_NSTD"] == [1]
@@ -411,6 +438,50 @@ class TestProcessCellScopesToThisRun:
         ns["os"] = os
         return ns, out
 
+    def test_the_command_for_each_product_is_one_the_cli_accepts(
+        self, config_src, process_src, tmp_path, monkeypatch, capsys
+    ):
+        """A flag the CLI does not define is an argparse error on every run, and
+        --we-nstd on any product but `we` is rejected unless it is the
+        default."""
+        pytest.importorskip("rasterio")
+        from sentinel2 import process_sentinel2_odr as cli
+
+        commands, environments = [], []
+
+        class _Recording(_FakePopen):
+            def __init__(self, cmd, **kwargs):
+                commands.append(list(cmd))
+                environments.append(kwargs.get("env"))
+                super().__init__(cmd, **kwargs)
+
+        import subprocess
+
+        ns, _ = self._namespace(config_src, tmp_path, monkeypatch)
+        ns.update(PRODUCTS={p: True for p in ns["PRODUCTS"]}, CLOUD_MASK=True, MERGE=True,
+                  WE_NSTD=[1, 1.5])
+        monkeypatch.setattr(subprocess, "Popen", _Recording)
+        _FakePopen.runs = 1
+        exec(compile(process_src, "process_cell", "exec"), ns)
+
+        monkeypatch.setattr("sys.argv", ["process_sentinel2_odr", "--help"])
+        with pytest.raises(SystemExit):
+            cli.main()
+        accepted = set(re.findall(r"--[a-z][a-z0-9-]+", capsys.readouterr().out))
+
+        assert len(commands) == len(ns["PRODUCTS"])
+        for cmd, env in zip(commands, environments):
+            assert cmd[0] == "process_sentinel2_odr"
+            passed = {arg for arg in cmd if arg.startswith("--")}
+            assert passed <= accepted, f"not accepted: {sorted(passed - accepted)}"
+            assert {"--level", "--cloud-mask", "--merge", "--metadata-json"} <= passed
+            if cmd[cmd.index("--product") + 1] == "we":
+                assert cmd[cmd.index("--we-nstd") + 1:][:2] == ["1", "1.5"]
+            else:
+                assert "--we-nstd" not in cmd
+            # Output streams as the CLI prints it, not in blocks.
+            assert env["PYTHONUNBUFFERED"] == "1" and env["PATH"] == os.environ["PATH"]
+
     def test_a_first_run_reports_what_it_wrote(self, config_src, process_src, tmp_path, monkeypatch):
         ns, out = self._namespace(config_src, tmp_path, monkeypatch)
         (out / "leftover_from_another_activation.tif").write_text("old")
@@ -461,11 +532,11 @@ class TestProcessCellScopesToThisRun:
         assert list(out.glob("*.tif")), "the failed products' files are on disk..."
 
     def test_only_finished_products_are_listed(self, config_src, process_src, tmp_path, monkeypatch):
-        """...and must never reach the upload. A product that dies part-way
-        leaves GeoTIFFs under product names that are not COGs and carry no
-        activation tags; raising is not enough, because an operator can run
-        the upload cell by hand afterwards. NEW_COGS, which is all the upload
-        cell reads, holds only what a successful product wrote."""
+        """...and must never reach the upload. The CLI delivers nothing for a
+        run that fails, but the cell does not rely on that, and raising is not
+        enough: an operator can run the upload cell by hand afterwards.
+        NEW_COGS, which is all the upload cell reads, holds only what a
+        successful product wrote."""
         class _NdviFails(_FakePopen):
             def __init__(self, cmd, **kwargs):
                 super().__init__(cmd, **kwargs)
@@ -521,12 +592,12 @@ class TestUploadCellRuns:
         self, config_src, upload_src, monkeypatch
     ):
         """One real filename per product the notebook offers, per tile and
-        merged, against the canonical key from the shared table."""
+        merged, against PUBLISHED_FOLDERS."""
         pytest.importorskip("rasterio")
         import datetime as dt
 
         from sentinel2.sentinel2_odr_functions import _build_output_filename
-        from shared_utils.product_paths import STAGING_BUCKET, product_dir
+        from shared_utils.product_paths import STAGING_BUCKET
 
         class _Item:
             id = "S2C_T15TVG_20250813T170704_L2A"
@@ -536,19 +607,16 @@ class TestUploadCellRuns:
                 "s2:product_uri": "S2C_MSIL2A_20250813T170704_N0511_R069_T15TVG_X.SAFE",
             }
 
-        keys = TestUploadMapping._folders(upload_src)
         products = list(exec_config(config_src)["PRODUCTS"])
+        assert set(products) == set(PUBLISHED_FOLDERS)
         for merged in (False, True):
-            names = [_build_output_filename(_Item(), p, merged=merged) for p in products]
+            names = {p: _build_output_filename(_Item(), p, merged=merged) for p in products}
             sent = self._run(config_src, upload_src, monkeypatch,
-                             [f"/tmp/x/{n}" for n in names], MERGE=merged)
-            assert len(sent) == len(products)
-            for (local, uri), name in zip(sent, names):
-                token = next(t for t in sorted(keys, key=len, reverse=True) if f"_{t}_" in name)
-                assert uri == (
-                    f"s3://{STAGING_BUCKET}/ProgramData/Sentinel-2/{keys[token]}/{name}"
-                )
-        assert product_dir("sentinel2", "cloudMask") == keys["cloudMask"]
+                             [f"/tmp/x/{n}" for n in names.values()], MERGE=merged)
+            assert [uri for _, uri in sent] == [
+                f"s3://{STAGING_BUCKET}/ProgramData/Sentinel-2/{PUBLISHED_FOLDERS[p]}/{n}"
+                for p, n in names.items()
+            ]
 
     def test_with_merge_on_only_the_mosaics_are_published(self, config_src, upload_src, monkeypatch):
         cogs = [

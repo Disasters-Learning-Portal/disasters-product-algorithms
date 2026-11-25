@@ -384,12 +384,15 @@ for product, enabled in PRODUCTS.items():
 
     _before = _output_snapshot()
 
+    # Unbuffered, so each line appears as the CLI prints it. Through a pipe
+    # Python would otherwise hold the output back in blocks.
     process = subprocess.Popen(
         process_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         bufsize=1,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     for line in process.stdout:
         print(line, end="")
@@ -405,9 +408,10 @@ for product, enabled in PRODUCTS.items():
         NEW_COGS += _written
         print(f"\\n[ok] {product} completed")
     else:
-        # A product that died part-way leaves GeoTIFFs under product names
-        # that are not COGs and carry no activation tags. They stay out of
-        # NEW_COGS, so nothing below can review or publish them as finished.
+        # The CLI moves its COGs into OUTPUT_DIR only once all of them
+        # exist, so a failed product should have left nothing. Whatever it
+        # did leave stays out of NEW_COGS: nothing below reviews or
+        # publishes it.
         failures.append((product, return_code))
         print(
             f"\\n[FAILED] {product} exited {return_code}; "
@@ -481,18 +485,18 @@ Merged:    <SAT>_<LEVEL>_<product>[_NSTD_<n>]_<ORBIT>_merged[_masked]_<YYYY-MM-D
 ```
 
 e.g. `S2C_MSIL2A_ndvi_T15TVG_2025-08-13T17:12:26Z.tif` (one tile) and
-`S2C_MSIL2A_ndvi_R112_merged_2025-08-13_day.tif` (one pass, mosaicked). A
+`S2C_MSIL2A_ndvi_R069_merged_2025-08-13_day.tif` (one pass, mosaicked). A
 merged file is ONE satellite pass: a date range gives one merged file per pass,
-never a mosaic across dates. `R112` is ESA's relative orbit.
+never a mosaic across dates. `R069` is ESA's relative orbit.
 
 `<product>` is the camelCase product token (`trueColor`, `colorInfrared`,
 `waterExtent`, `cloudMask`, ...). The cloud-mask product never carries
 `_masked`: it is the mask.
 
-**The activation event is NOT in the filename.** It lives in the GeoTIFF tags
-and the S3 prefix — the same convention `bake_event_metadata.ipynb` and
-`simple_disaster_staging.ipynb` use. (The older `.SAFE` pipeline prefixes the
-event onto filenames instead, so names differ between the two.)
+**The activation event is NOT in the filename.** It is recorded only in the
+GeoTIFF tags: the S3 key, `ProgramData/Sentinel-2/<Product>/<filename>`, has no
+event level either. (The legacy `.SAFE` names carry no event too; their merged
+names differ by having no orbit token.)
 """),
     md("""
 ## 5. Upload to S3 — opt-in
@@ -513,7 +517,7 @@ from shared_utils.product_paths import prefix_for_product_dir, product_dir
 
 # Filename product token -> the product key in shared_utils.product_paths. Keys
 # must match the camelCase token _build_output_filename writes, and every
-# product in PRODUCTS needs an entry or its COGs are silently skipped. The
+# product in PRODUCTS needs an entry or the cell raises for its COGs. The
 # directory itself is NOT written here: product_dir() resolves it, so this
 # notebook cannot drift from the published layout the way the old hard-coded
 # folder map did (it had colorIR, SWIR, MNDWI and waterExtent, none of which
@@ -588,7 +592,7 @@ else:
     if skipped:
         raise RuntimeError(
             f"{len(skipped)} COG(s) had no product folder and were NOT "
-            f"uploaded: {skipped}. Add the token to PRODUCT_FOLDERS -- a "
+            f"uploaded: {skipped}. Add the token to _PRODUCT_KEYS -- a "
             f"silent skip is how a whole product goes missing."
         )
 '''),

@@ -274,18 +274,36 @@ def _run_sh_products():
     return set(match.group(1).split())
 
 
-def test_run_sh_accepts_exactly_the_products_the_cli_offers():
-    """The CWL schema has no enum, so run.sh validates product tokens against
-    a hand-copied list. A product added to the CLI but not to the copy cannot
-    be requested through DPS; one left in the copy after the CLI drops it
-    fails only after the job has started."""
+def _cli_choices(monkeypatch, capsys):
+    """What argparse really accepts for --product, read off --help."""
+    import re
+
     pytest.importorskip("rasterio")
     pytest.importorskip("pystac_client")
     from sentinel2 import process_sentinel2_odr as cli
 
-    offered = (cli.INDEX_PRODUCTS | cli.COMPOSITE_PRODUCTS
-               | cli.WATER_EXTENT_PRODUCTS | cli.CLOUD_MASK_PRODUCTS)
-    assert _run_sh_products() == offered
+    monkeypatch.setattr(sys, "argv", ["process_sentinel2_odr", "--help"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    listed = re.search(r"--product \{([^}]+)\}", capsys.readouterr().out).group(1)
+    return cli, set(listed.split(","))
+
+
+def test_run_sh_accepts_exactly_the_products_the_cli_offers(monkeypatch, capsys):
+    """The CWL schema has no enum, so run.sh validates product tokens against
+    a hand-copied list. A product added to the CLI but not to the copy cannot
+    be requested through DPS; one left in the copy after the CLI drops it
+    fails only after the job has started."""
+    _, choices = _cli_choices(monkeypatch, capsys)
+    assert _run_sh_products() == choices
+
+
+def test_every_cli_choice_has_a_product_category(monkeypatch, capsys):
+    """The category sets drive nodata and dispatch; a choice in none of them
+    ends in "Unsupported product" after the job has started."""
+    cli, choices = _cli_choices(monkeypatch, capsys)
+    assert choices == (cli.INDEX_PRODUCTS | cli.COMPOSITE_PRODUCTS
+                       | cli.WATER_EXTENT_PRODUCTS | cli.CLOUD_MASK_PRODUCTS)
 
 
 @pytest.mark.parametrize("config", [
@@ -445,6 +463,18 @@ class TestValidationFailsFast:
         self._assert_rejected(
             run_job(**defaults(products="we", we_nstd="high")), "we_nstd"
         )
+
+    @pytest.mark.parametrize("we_nstd", ["0", "-1", "0.0", "1 0"])
+    def test_a_we_nstd_of_zero_or_less_is_rejected_before_any_product_runs(
+            self, run_job, we_nstd):
+        """The CLI refuses it too, but only on the `we` call: every product
+        listed before `we` was processed first and then thrown away."""
+        self._assert_rejected(
+            run_job(**defaults(products="ndvi we", we_nstd=we_nstd)), "greater than 0")
+
+    def test_a_fractional_we_nstd_is_accepted(self, run_job):
+        result = run_job(**defaults(products="we", we_nstd="0.5 1.5"))
+        assert result.ok, result.output
 
     def test_cloud_mask_on_l1c_is_rejected_with_the_reason(self, run_job):
         """L1C has no Scene Classification Layer. The CLI rejects it too, but

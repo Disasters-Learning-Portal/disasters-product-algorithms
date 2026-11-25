@@ -36,6 +36,21 @@ NB_PATH = os.path.join(REPO_ROOT, "notebooks", "landsat_odr_workflow.ipynb")
 
 PLACEHOLDER = "202601_Flood_ExampleCity"
 
+# Where each product the notebook offers must be published, spelled out here on
+# purpose: an expectation read from the notebook's own mapping agrees with
+# whatever that mapping says, including a product sent to another's folder.
+PUBLISHED_FOLDERS = {
+    "true_color": "TrueColor",
+    "natural_color": "NaturalColor",
+    "color_infrared": "ColorIR",
+    "swir": "ShortwaveIR",
+    "ndvi": "NDVI",
+    "ndwi": "NDWI",
+    "mndwi": "mNDWI",
+    "nbr": "NBR",
+    "evi": "EVI",
+}
+
 
 @pytest.fixture(scope="module")
 def nb():
@@ -254,9 +269,11 @@ class _FakePopen:
 
     runs = 0
     commands = []
+    environments = []
 
-    def __init__(self, cmd, **_):
+    def __init__(self, cmd, **kwargs):
         _FakePopen.commands.append(list(cmd))
+        _FakePopen.environments.append(kwargs.get("env"))
         out_dir = cmd[cmd.index("--output") + 1]
         product = cmd[cmd.index("--product") + 1]
         path = os.path.join(out_dir, f"LC08_L2SP_{product}_021035_2026-10-12T16:24:22Z.tif")
@@ -278,6 +295,7 @@ class TestProcessCell:
 
         monkeypatch.setattr(subprocess, "Popen", _FakePopen)
         _FakePopen.commands = []
+        _FakePopen.environments = []
         _FakePopen.runs = 1
         out = tmp_path / "out"
         out.mkdir()
@@ -310,6 +328,17 @@ class TestProcessCell:
             passed = {arg for arg in cmd if arg.startswith("--")}
             assert passed <= accepted, f"flags the CLI does not accept: {sorted(passed - accepted)}"
             assert {"--cloud-mask", "--merge", "--metadata-json"} <= passed
+
+    def test_the_cli_output_streams_into_the_cell(
+        self, config_src, process_src, tmp_path, monkeypatch
+    ):
+        """The markdown promises it. Through a pipe Python holds output back in
+        blocks, so a stalled read looked the same as progress."""
+        ns, _ = self._namespace(config_src, tmp_path, monkeypatch)
+        exec(compile(process_src, "process_cell", "exec"), ns)
+        assert _FakePopen.environments
+        for env in _FakePopen.environments:
+            assert env["PYTHONUNBUFFERED"] == "1" and env["PATH"] == os.environ["PATH"]
 
     def test_the_toggles_are_honoured(self, config_src, process_src, tmp_path, monkeypatch):
         ns, _ = self._namespace(
@@ -365,11 +394,11 @@ class TestProcessCell:
     def test_only_finished_products_are_listed(
         self, config_src, process_src, tmp_path, monkeypatch
     ):
-        """...and must never reach the upload. The CLI deletes what it had not
-        finished when it fails, but a process killed outright (out of memory on
-        a full-scene composite) cannot. Raising is not enough either: the
-        upload cell can be run by hand afterwards. NEW_COGS, which is all the
-        upload cell reads, holds only what a successful product wrote."""
+        """...and must never reach the upload. The CLI delivers nothing for a
+        run that fails or is killed, but the cell does not rely on that, and
+        raising is not enough: the upload cell can be run by hand afterwards.
+        NEW_COGS, which is all the upload cell reads, holds only what a
+        successful product wrote."""
         class _NdviFails(_FakePopen):
             def __init__(self, cmd, **kwargs):
                 super().__init__(cmd, **kwargs)
@@ -493,20 +522,22 @@ class TestUploadCellRuns:
     def test_each_product_lands_in_its_own_program_data_folder(
         self, config_src, upload_src, monkeypatch
     ):
+        """One real filename per product the notebook offers, per scene and
+        merged, against PUBLISHED_FOLDERS."""
+        pytest.importorskip("rasterio")
+        from landsat.landsat_odr_functions import _build_output_filename
         from shared_utils.product_paths import STAGING_BUCKET
 
-        cogs = [
-            "/tmp/x/LC08_L2SP_trueColor_P021_merged_masked_2026-10-12_day.tif",
-            "/tmp/x/LC08_L2SP_ndvi_P021_merged_masked_2026-10-12_day.tif",
-            "/tmp/x/LC08_L2SP_swir_P021_merged_2026-10-12_day.tif",
-        ]
-        sent, _ = self._run(config_src, upload_src, monkeypatch, cogs, ENABLE_MERGE=True)
-        base = f"s3://{STAGING_BUCKET}/ProgramData/Landsat"
-        assert [uri for _, uri in sent] == [
-            f"{base}/TrueColor/{os.path.basename(cogs[0])}",
-            f"{base}/NDVI/{os.path.basename(cogs[1])}",
-            f"{base}/ShortwaveIR/{os.path.basename(cogs[2])}",
-        ]
+        products = list(exec_config(config_src)["PRODUCTS"])
+        assert set(products) == set(PUBLISHED_FOLDERS)
+        for merged in (False, True):
+            names = {p: _build_output_filename(_Item(), p, merged=merged) for p in products}
+            sent, _ = self._run(config_src, upload_src, monkeypatch,
+                                [f"/tmp/x/{n}" for n in names.values()], ENABLE_MERGE=merged)
+            assert [uri for _, uri in sent] == [
+                f"s3://{STAGING_BUCKET}/ProgramData/Landsat/{PUBLISHED_FOLDERS[p]}/{n}"
+                for p, n in names.items()
+            ]
 
     def test_with_merge_on_only_the_mosaics_are_published(
         self, config_src, upload_src, monkeypatch

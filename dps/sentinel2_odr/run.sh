@@ -131,8 +131,13 @@ require_nonempty products "${PRODUCTS}" \
 for t in ${PRODUCTS}; do validate_in_set products "$(normalize_token "$t" lower)" \
   "ndvi ndwi mndwi nbr evi we true_color natural_color color_infrared swir cloud_mask"; done
 
+# Positive numbers only. The CLI rejects 0 or less too, but not until the `we`
+# call, after every product listed before it has been processed.
 # shellcheck disable=SC2086
-[[ -n "${WE_NSTD}" ]] && for n in ${WE_NSTD}; do validate_number we_nstd "$n"; done
+for n in ${WE_NSTD}; do
+  validate_number we_nstd "$n"
+  awk -v v="$n" 'BEGIN { exit !(v > 0) }' || die "we_nstd '$n' must be greater than 0."
+done
 
 # --cloud-mask needs the L2A Scene Classification Layer, which L1C has no
 # equivalent of. The CLI rejects the combination too, but catching it here saves

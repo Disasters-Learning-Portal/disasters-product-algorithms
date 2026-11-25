@@ -77,7 +77,8 @@ def write_raster(path, array, dtype, crs="EPSG:32615", transform=TRANSFORM, noda
 # Colour composites
 # ---------------------------------------------------------------------------
 
-def run_composite(tmp_path, monkeypatch, dn_by_band, cloud=None, source_driver="GTiff"):
+def run_composite(tmp_path, monkeypatch, dn_by_band, cloud=None, source_driver="GTiff",
+                  item_id="S2C_T15TVG_20250813T170704_L2A"):
     """The real generate_composite + finalize_composite_rgba on given raw DN.
 
     `dn_by_band` maps asset name -> one row of raw DN. `source_driver` is the
@@ -96,7 +97,7 @@ def run_composite(tmp_path, monkeypatch, dn_by_band, cloud=None, source_driver="
             odr, "get_cloud_mask",
             lambda item, out_shape, **kw: np.asarray([cloud], dtype=bool))
 
-    item = FakeItem({name: name for name in dn_by_band})
+    item = FakeItem({name: name for name in dn_by_band}, item_id=item_id)
     algorithm = odr.get_algorithm("composite", "true_color", CATALOG)
     out_dir = tmp_path / "out"
     out = odr.generate_composite(item=item, algorithm=algorithm, algorithm_name="true_color",
@@ -152,6 +153,19 @@ class TestComposite:
             tmp_path, monkeypatch, {"red": dark, "green": dark, "blue": dark})
         assert rgba[3].tolist() == [255, 255]
         assert rgba[:3].min() == 1 and rgba[:3].max() == 1
+
+    def test_a_dark_l1c_pixel_stays_opaque_after_the_rayleigh_correction(
+            self, tmp_path, monkeypatch):
+        """L1C subtracts an atmospheric correction before the stretch, which
+        takes dark water to zero or below. What was observed must be read off
+        the raw band, before that subtraction."""
+        monkeypatch.setattr(odr, "get_rayleigh_correction", lambda item, name: 0.08)
+        dn = [600, 0]                              # 600 - 800 < 0; 0 is fill
+        rgba, _, _, _ = run_composite(
+            tmp_path, monkeypatch, {"red": dn, "green": dn, "blue": dn},
+            item_id="S2C_T15TVG_20250813T170704_L1C")
+        assert rgba[:, 0].tolist() == [1, 1, 1, 255]
+        assert rgba[:, 1].tolist() == [0, 0, 0, 0]
 
     def test_a_single_dark_band_is_not_a_hole_for_the_merge(self, tmp_path, monkeypatch):
         """The mosaic merges per band with nodata 0, so one band at 0 was
@@ -306,14 +320,40 @@ class TestMergeProducts:
                          nodata=-9999)
         return a, b
 
-    def test_dominant_crs_does_not_depend_on_input_order(self, tmp_path):
-        """A re-run of the same job must not publish the same filename on a
-        different grid."""
-        a, b = self._two_zone_tiles(tmp_path)
-        with rio.open(odr.merge_products([a, b], str(tmp_path / "ab.tif"))) as ab, \
-                rio.open(odr.merge_products([b, a], str(tmp_path / "ba.tif"))) as ba:
-            assert ab.crs == ba.crs
-            assert (ab.width, ab.height) == (ba.width, ba.height)
+    def test_a_crs_tie_is_not_settled_by_set_order(self, tmp_path):
+        """`max(set(crs_list), key=crs_list.count)` returned whichever CRS the
+        set yielded first, and set order follows the hash seed: the same job
+        came out in one UTM zone or the other from run to run. A tie now goes
+        to the first CRS in WKT order. Two input orders inside one process see
+        the same set order, so the pair of zones used here is chosen as one the
+        old rule gets wrong in THIS process, whatever its seed."""
+        for zone in range(1, 60):
+            a = write_raster(tmp_path / f"a{zone}.tif", np.ones((20, 20)), "float32",
+                             crs=f"EPSG:{32600 + zone}", nodata=-9999,
+                             transform=from_origin(760000, 4700000, 10, 10))
+            b = write_raster(tmp_path / f"b{zone}.tif", np.ones((20, 20)), "float32",
+                             crs=f"EPSG:{32601 + zone}", nodata=-9999,
+                             transform=from_origin(240000, 4700000, 10, 10))
+            crs_list = []
+            for path in (a, b):
+                with rio.open(path) as src:
+                    crs_list.append(src.crs)
+            expected = min(crs_list, key=lambda crs: crs.to_wkt())
+            if max(set(crs_list), key=crs_list.count) != expected:
+                break
+        else:
+            pytest.skip("set order matched WKT order for every zone pair in this process")
+
+        for order in ([a, b], [b, a]):
+            with rio.open(odr.merge_products(order, str(tmp_path / "merged.tif"))) as merged:
+                assert merged.crs == expected
+
+    def test_inputs_without_a_crs_still_merge(self, tmp_path):
+        a = write_raster(tmp_path / "a.tif", np.ones((4, 4)), "float32", crs=None, nodata=-9999)
+        b = write_raster(tmp_path / "b.tif", np.ones((4, 4)), "float32", crs=None, nodata=-9999,
+                         transform=from_origin(500040, 4700000, 10, 10))
+        with rio.open(odr.merge_products([a, b], str(tmp_path / "merged.tif"))) as merged:
+            assert merged.crs is None and merged.width == 8
 
     def test_priority_value_matches_the_water_extent_merge_method(self, tmp_path):
         def tif(name, row):
@@ -374,9 +414,11 @@ class TestCloudMaskCli:
             assert src.colormap(1)[1] == (odr.CLOUD_GRAY,) * 3 + (255,)
 
     def test_merge_keeps_cloud_from_every_tile_and_never_says_masked(self, tmp_path, monkeypatch):
-        """Both tiles cover the same four pixels here. First-wins would keep
-        only the first tile's cloud; "max" keeps both. And `--cloud-mask` on
-        the mask itself must not add `_masked` to its name."""
+        """Both tiles cover the same four pixels here, each with one cloudy
+        pixel, and the mosaic keeps both. (0 is the product's nodata, so on
+        this 0/1 mask a first-valid merge would do the same.) And
+        `--cloud-mask` on the mask itself must not add `_masked` to its
+        name."""
         out = self._run(tmp_path, monkeypatch, "--merge", "--cloud-mask")
         names = sorted(p.name for p in out.glob("*.tif"))
         assert names == ["S2C_MSIL2A_cloudMask_R069_merged_2025-08-13_day.tif"]

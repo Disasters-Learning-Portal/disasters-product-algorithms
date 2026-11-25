@@ -554,8 +554,9 @@ def merge_products(tif_paths, output_path, method="first", priority_value=None):
     # over a bare set let the winner depend on the hash seed, so an area
     # straddling a UTM zone boundary with equal scene counts per zone came
     # out in a different projection from one run to the next.
+    # (An ungeoreferenced input has no CRS at all; it sorts first.)
     crs_dom = max(
-        sorted(set(crs_list), key=lambda crs: crs.to_wkt()),
+        sorted(set(crs_list), key=lambda crs: crs.to_wkt() if crs else ""),
         key=crs_list.count,
     )
 
@@ -1002,8 +1003,12 @@ def _build_output_filename(
     DATE only, then `_day` -- it spans several scene times, so no single
     time is true of it. PATH is the WRS-2 path (`P022`). With the time
     gone it is what keeps two passes on one day -- Landsat 8 and 9, or
-    two paths at high latitude -- from writing the same file; the row is
-    dropped because a mosaic spans several.
+    two neighbouring paths -- from writing the same file; the row is
+    dropped because a mosaic spans several. One case is left: near the
+    poles a satellite flies the same path number twice on a UTC day (its
+    low rows, then its rows 24x-248 one orbit later), and those two passes
+    get the same name. process_landsat_odr refuses such a --merge rather
+    than let one mosaic overwrite the other.
 
     `variant` (e.g. "NSTD_1_5") goes directly after the product so
     several parameterisations of one product on one scene cannot
@@ -1040,10 +1045,11 @@ def _build_output_filename(
 # ---------------------------------------------------------------------
 
 # The scenes of one Landsat pass are consecutive WRS-2 rows about 24 s
-# apart, and a satellite does not return to the same path for 16 days.
-# Any gap between a few minutes and a few days therefore separates "the
-# same pass" from "the next one"; 20 minutes is ~50 rows of track, far
-# longer than any area of interest.
+# apart. The same satellite is next on that path 16 days later -- or,
+# near the poles, one orbit (~97 minutes) later, when the high rows of a
+# path follow its low rows. Either way the gap between two passes is
+# over an hour and the gap inside one is seconds; 20 minutes is ~50 rows
+# of track, far longer than any area of interest.
 PASS_GAP_SECONDS = 20 * 60
 
 

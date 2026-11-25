@@ -27,6 +27,7 @@ the QA_PIXEL band that ships with every scene).
 import argparse
 import os
 import shutil
+import tempfile
 
 from landsat.landsat_odr_functions import (
     apply_cloud_union,
@@ -66,6 +67,9 @@ DST_CRS = None
 # No data setting
 INDEX_NODATA = -9999
 COMPOSITE_NODATA = False
+
+# Scratch directory a run builds its products in, inside --output.
+WORK_DIR_PREFIX = "_work_"
 
 
 # ---------------------------------------------------------------------
@@ -213,8 +217,9 @@ def main():
         "--output",
         default="/tmp/s3_temp",
         help=(
-            "Local directory for intermediate GeoTIFFs "
-            "and COGs (default: /tmp/s3_temp)"
+            "Local directory the finished COGs are written to "
+            "(default: /tmp/s3_temp). Intermediates are built in a "
+            "scratch subdirectory and removed."
         ),
     )
 
@@ -359,16 +364,24 @@ def main():
         f"Found {len(items)} Landsat scene(s)."
     )
 
+    # Two passes that would share one mosaic name: refuse before any work.
+    if args.merge:
+        _refuse_ambiguous_mosaics(items, args.product, args.cloud_mask)
+
     # -----------------------------------------------------------------
     # Generate, merge, convert
     # -----------------------------------------------------------------
 
-    # GeoTIFFs written under a product name that are not finished COGs
-    # yet. If the run fails they are deleted: whatever is left in --output
-    # under a product name must be a tagged COG, because the caller (a
-    # notebook upload cell, a DPS finalize step) publishes by filename and
-    # cannot tell a half-made intermediate from a product.
-    unfinished = set()
+    # Everything is built in a scratch directory inside --output, and the
+    # COGs are moved out of it under their product names only once the
+    # whole run has succeeded. A file in --output under a product name is
+    # therefore always a finished, tagged COG -- after an exception, a
+    # SIGTERM or an OOM kill alike. That matters because the caller (a
+    # notebook upload cell, a DPS finalize step) publishes by filename
+    # and cannot tell a half-made intermediate from a product. It also
+    # means a failed re-run leaves an earlier run's COGs as they were.
+    os.makedirs(args.output, exist_ok=True)
+    work_dir = tempfile.mkdtemp(prefix=WORK_DIR_PREFIX, dir=args.output)
 
     try:
         cog_paths = _produce_cogs(
@@ -378,22 +391,14 @@ def main():
             algorithm_type,
             nodata,
             metadata,
-            unfinished,
+            work_dir,
         )
-
-    except BaseException:
-        for path in sorted(unfinished):
-            if os.path.exists(path):
-                os.remove(path)
-                print(f"Removed unfinished output: {path}")
-        raise
 
     finally:
-        # Per-scene cloud-mask sidecars are only needed during the run.
-        shutil.rmtree(
-            os.path.join(args.output, "_cloud_masks"),
-            ignore_errors=True,
-        )
+        # Takes the per-scene cloud-mask sidecars with it (they live in
+        # work_dir/_cloud_masks). A run that is killed outright leaves
+        # this directory behind; it is safe to delete.
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     # -----------------------------------------------------------------
     # Summary
@@ -414,6 +419,44 @@ def main():
     print()
 
 
+def _refuse_ambiguous_mosaics(items, product, masked):
+    """
+    Stop if --merge would write two satellite passes to one file.
+
+    A merged name holds the satellite, the WRS-2 path and the date. That
+    is unique everywhere except near the poles, where one path number is
+    flown twice on a UTC day, one orbit apart (seen on real searches over
+    Svalbard and northern Greenland). The second mosaic would replace the
+    first without a word, so the run is refused instead.
+    """
+
+    by_name = {}
+
+    for scenes in group_by_acquisition(items):
+        name = _build_output_filename(
+            scenes[0], product, masked=masked, merged=True
+        )
+        by_name.setdefault(name, []).append(scenes)
+
+    clashes = [
+        f"  {name}: {len(passes)} passes, starting "
+        + ", ".join(
+            scenes[0].datetime.strftime("%H:%M:%SZ") for scenes in passes
+        )
+        for name, passes in sorted(by_name.items())
+        if len(passes) > 1
+    ]
+
+    if clashes:
+        raise ValueError(
+            "--merge would write more than one satellite pass to the "
+            "same file:\n" + "\n".join(clashes) + "\n"
+            "A merged name holds the satellite, WRS-2 path and date, and "
+            "near the poles one path is flown twice on a UTC day. Run "
+            "without --merge, or narrow --bbox or the dates to one pass."
+        )
+
+
 def _produce_cogs(
     args,
     items,
@@ -421,16 +464,15 @@ def _produce_cogs(
     algorithm_type,
     nodata,
     metadata,
-    unfinished,
+    work_dir,
 ):
     """
     Generate one product GeoTIFF per scene, mosaic per pass if requested,
-    and convert the results to COGs. Returns the COG paths.
+    convert the results to COGs, and move them into --output. Returns the
+    COG paths.
 
-    `unfinished` is the caller's set of files written under a product name
-    that are not COGs yet: paths are added as they are written and removed
-    as they are converted (or merged away), so that after a failure it
-    holds exactly what has to be deleted.
+    Everything is written in `work_dir` until the last COG is finished;
+    see the note in main().
     """
 
     # -----------------------------------------------------------------
@@ -452,17 +494,6 @@ def _produce_cogs(
         )
         print("=" * 70)
 
-        # The name the generator is about to write. Registered BEFORE the
-        # call so a scene that dies half-written is cleaned up too.
-        unfinished.add(
-            os.path.join(
-                args.output,
-                _build_output_filename(
-                    item, args.product, masked=args.cloud_mask
-                ),
-            )
-        )
-
         if algorithm_type == "index":
 
             produced = [
@@ -472,7 +503,7 @@ def _produce_cogs(
                         item=item,
                         algorithm=algorithm,
                         algorithm_name=args.product,
-                        output_dir=args.output,
+                        output_dir=work_dir,
                         nodata=nodata,
                         cloud_mask=args.cloud_mask,
                     ),
@@ -488,7 +519,7 @@ def _produce_cogs(
                         item=item,
                         algorithm=algorithm,
                         algorithm_name=args.product,
-                        output_dir=args.output,
+                        output_dir=work_dir,
                         cloud_mask=args.cloud_mask,
                     ),
                 )
@@ -546,8 +577,7 @@ def _produce_cogs(
                     merged=True,
                     variant=variant,
                 )
-                merged_path = os.path.join(args.output, merged_name)
-                unfinished.add(merged_path)
+                merged_path = os.path.join(work_dir, merged_name)
 
                 print()
                 print("=" * 70)
@@ -595,7 +625,6 @@ def _produce_cogs(
                 for path in paths:
                     if path != merged_path and os.path.exists(path):
                         os.remove(path)
-                    unfinished.discard(path)
 
                 files_to_cog.append(merged_path)
 
@@ -619,7 +648,7 @@ def _produce_cogs(
     # Convert to COG(s)
     # ---------------------------------------------------------------------
 
-    cog_paths = []
+    finished = []
 
     for outfile in files_to_cog:
 
@@ -639,13 +668,17 @@ def _produce_cogs(
                 f"COG conversion failed for {outfile}"
             )
 
-        print(f"COG created: {cog_path}")
+        print(f"COG created: {os.path.basename(cog_path)}")
 
-        cog_paths.append(cog_path)
+        finished.append(cog_path)
 
-        # convert_to_cog converts in place (cog_path == outfile), so the
-        # file under this name is now the finished product.
-        unfinished.discard(outfile)
+    # Every COG of this run exists: hand them over under their names.
+    cog_paths = []
+
+    for cog_path in finished:
+        final_path = os.path.join(args.output, os.path.basename(cog_path))
+        os.replace(cog_path, final_path)
+        cog_paths.append(final_path)
 
     return cog_paths
 

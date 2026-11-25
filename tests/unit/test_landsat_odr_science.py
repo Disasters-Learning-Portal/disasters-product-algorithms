@@ -112,11 +112,20 @@ def run_index(tmp_path, product, item, cloud_mask=False):
 # The catalog
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="module")
+def catalog():
+    return odr.load_algorithms(proc.DEFAULT_ALGORITHM_FILE)
+
+
 class TestCatalog:
 
-    @pytest.fixture(scope="class")
-    def catalog(self):
-        return odr.load_algorithms(proc.DEFAULT_ALGORITHM_FILE)
+    def test_the_default_does_not_depend_on_the_working_directory(self, tmp_path, monkeypatch,
+                                                                    catalog):
+        """The library default was "algorithms-landsat.json", relative to
+        wherever the caller happened to be."""
+        monkeypatch.chdir(tmp_path)
+        assert odr.load_algorithms() == catalog
+        assert odr.get_algorithm("index", "ndvi") == catalog["index"][0]["ndvi"]
 
     def test_index_ranges_are_validity_ranges(self, catalog):
         """`generate_index` drops whatever falls outside min..max, so the range
@@ -293,6 +302,15 @@ class TestGenerateIndex:
         assert (index == NODATA).tolist() == [False, False, False, False, True]
         assert np.abs(index[:4]).max() <= 1.0
 
+    def test_evi_above_one_is_clipped_not_dropped(self, tmp_path):
+        """EVI really does exceed 1 over dense canopy. Dropping those pixels
+        would punch holes in the healthiest vegetation, so EVI is the one
+        index that clips (as landsat89_functions.genEvi does)."""
+        nir, red, blue = 0.90, 0.05, 0.10
+        assert 2.5 * (nir - red) / (nir + 6 * red - 7.5 * blue + 1) > 1.4
+        item = scene(tmp_path, nir08=[nir], red=[red], blue=[blue])
+        assert run_index(tmp_path, "evi", item).tolist() == [1.0]
+
     def test_zero_over_zero_is_nodata(self, tmp_path, landscape):
         """NBR over clear water: NIR and SWIR2 are both below zero, both clamp
         to 0, and 0/0 has no value. The only non-fill case that is nodata --
@@ -401,12 +419,43 @@ class TestMergeProducts:
                        crs="EPSG:32616", x0=240000)
         return a, b
 
-    def test_dominant_crs_does_not_depend_on_input_order(self, tmp_path):
-        a, b = self._two_zone_inputs(tmp_path)
-        with rio.open(odr.merge_products([a, b], str(tmp_path / "ab.tif"))) as ab, \
-                rio.open(odr.merge_products([b, a], str(tmp_path / "ba.tif"))) as ba:
-            assert ab.crs == ba.crs
-            assert (ab.width, ab.height) == (ba.width, ba.height)
+    def test_a_crs_tie_is_not_settled_by_set_order(self, tmp_path):
+        """The dominant CRS was `max(set(crs_list), key=crs_list.count)`. On
+        a tie that returns whichever CRS the set yields first, and set order
+        follows the hash seed: the same job came out in one UTM zone or the
+        other from run to run. A tie now goes to the first CRS in WKT order.
+
+        Comparing two input orders inside one process cannot show this (both
+        see the same set order), so the pair of zones used here is chosen as
+        one the old rule gets wrong in THIS process, whatever its seed."""
+        for zone in range(1, 60):
+            a = write_band(tmp_path / f"a{zone}.tif", np.full((20, 20), 1.0), dtype="float32",
+                           crs=f"EPSG:{32600 + zone}", x0=760000)
+            b = write_band(tmp_path / f"b{zone}.tif", np.full((20, 20), 2.0), dtype="float32",
+                           crs=f"EPSG:{32601 + zone}", x0=240000)
+            crs_list = []
+            for path in (a, b):
+                with rio.open(path) as src:
+                    crs_list.append(src.crs)
+            expected = min(crs_list, key=lambda crs: crs.to_wkt())
+            if max(set(crs_list), key=crs_list.count) != expected:
+                break
+        else:
+            pytest.skip("set order matched WKT order for every zone pair in this process")
+
+        for order in ([a, b], [b, a]):
+            with rio.open(odr.merge_products(order, str(tmp_path / "merged.tif"))) as merged:
+                assert merged.crs == expected
+
+    def test_inputs_without_a_crs_still_merge(self, tmp_path):
+        """The tie-break sorts by WKT, and an ungeoreferenced raster has no
+        CRS object to ask for one."""
+        a = write_band(tmp_path / "a.tif", np.full((4, 4), 1.0), dtype="float32", crs=None)
+        b = write_band(tmp_path / "b.tif", np.full((4, 4), 2.0), dtype="float32", crs=None,
+                       x0=400120)
+        out = odr.merge_products([a, b], str(tmp_path / "merged.tif"))
+        with rio.open(out) as merged:
+            assert merged.crs is None and merged.width == 8
 
     def test_sources_are_never_modified(self, tmp_path):
         """Rules 18 / 26: a mismatched-CRS input is reprojected into a temp

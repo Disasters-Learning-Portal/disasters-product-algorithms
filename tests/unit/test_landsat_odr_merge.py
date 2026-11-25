@@ -268,6 +268,14 @@ def test_without_merge_every_scene_is_its_own_file(tmp_path, monkeypatch):
     assert not any("_merged_" in name for name in out)
 
 
+def test_a_mosaic_is_dated_by_the_first_scene_of_its_pass(tmp_path, monkeypatch):
+    """A pass that runs past 00:00 UTC belongs to the day it started on."""
+    items = [FakeItem("LC09_L2SP_022035_20250906_02_T1", _t("2025-09-06T23:59:50")),
+             FakeItem("LC09_L2SP_022036_20250907_02_T1", _t("2025-09-07T00:00:14"))]
+    out = _run(tmp_path, monkeypatch, list(reversed(items)), {item.id: 1.0 for item in items})
+    assert list(out) == ["LC09_L2SP_ndvi_P022_merged_2025-09-06_day.tif"]
+
+
 def test_each_mosaic_keeps_only_its_own_passes_cloud_mask(tmp_path, monkeypatch):
     """The cloud union is per pass. Unioning every scene's mask produced a
     raster the size of the whole search, which no single mosaic matches."""
@@ -416,11 +424,15 @@ def test_a_pass_that_changes_utm_zone_merges_with_its_cloud_mask(tmp_path, monke
 # A failed run leaves nothing that looks like a product
 # ---------------------------------------------------------------------------
 
-class TestFailedRunCleansUp:
+class TestOnlyFinishedCogsReachTheOutput:
     """`--output` is published by filename: a notebook upload cell or a DPS
     finalize step cannot tell a half-made GeoTIFF from a finished COG. A run
     that died used to leave its intermediates there under product names --
-    not COGs, no activation tags -- for the next upload to pick up."""
+    not COGs, no activation tags -- for the next upload to pick up.
+
+    So a run builds everything in a scratch subdirectory and moves its COGs
+    out only when all of them exist. Nothing is under a product name before
+    that, which also covers a run that is killed rather than failing."""
 
     def _main(self, tmp_path, monkeypatch, items, generate, convert, merge=False,
               cloud_mask=False):
@@ -435,18 +447,21 @@ class TestFailedRunCleansUp:
         proc.main()
 
     @staticmethod
-    def _write(item, algorithm_name, output_dir, cloud_mask=False):
+    def _write(item, algorithm_name, output_dir, cloud_mask=False, value=1.0):
         tile = odr._get_sat_level_tile(item)[2]
         path = f"{output_dir}/{odr._build_output_filename(item, algorithm_name, masked=cloud_mask)}"
         profile = dict(driver="GTiff", count=1, dtype="float32", height=24, width=60,
                        nodata=-9999, crs="EPSG:32616",
-                       transform=from_origin(400000 + X0[tile] * 30, 4000000 - Y0[tile[3:]] * 30,
-                                             30, 30))
+                       transform=from_origin(400000 + X0.get(tile, 0) * 30,
+                                             4000000 - Y0.get(tile[3:], 0) * 30, 30, 30))
         with rio.open(path, "w", **profile) as dst:
-            dst.write(np.ones((24, 60), np.float32), 1)
+            dst.write(np.full((24, 60), value, np.float32), 1)
         if cloud_mask:
             odr.write_cloud_mask_sidecar(path, np.zeros((24, 60), bool), profile)
         return path
+
+    def _generate(self, item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
+        return self._write(item, algorithm_name, output_dir, cloud_mask)
 
     def test_a_scene_that_fails_takes_the_earlier_scenes_with_it(self, tmp_path, monkeypatch):
         items = live_items()[:4]
@@ -463,12 +478,10 @@ class TestFailedRunCleansUp:
                        lambda outfile, **kw: outfile, cloud_mask=True)
         assert sorted(p.name for p in tmp_path.iterdir()) == []
 
-    def test_a_failed_conversion_keeps_only_the_finished_cogs(self, tmp_path, monkeypatch):
-        items = live_items()[:3]
+    def test_a_failed_conversion_delivers_nothing(self, tmp_path, monkeypatch):
+        """All or nothing: the first COG was finished, but a run that failed
+        must not leave part of a product set behind."""
         done = []
-
-        def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
-            return self._write(item, algorithm_name, output_dir)
 
         def convert(outfile, **kw):
             if len(done) == 1:
@@ -477,16 +490,11 @@ class TestFailedRunCleansUp:
             return outfile
 
         with pytest.raises(RuntimeError, match="simulated"):
-            self._main(tmp_path, monkeypatch, items, generate, convert)
-        assert sorted(str(p) for p in tmp_path.glob("*.tif")) == sorted(done)
+            self._main(tmp_path, monkeypatch, live_items()[:3], self._generate, convert)
         assert len(done) == 1
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
 
     def test_a_failed_merge_leaves_no_partial_mosaic(self, tmp_path, monkeypatch):
-        items = live_items()[:4]                      # two passes
-
-        def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
-            return self._write(item, algorithm_name, output_dir)
-
         real_merge = proc.merge_products
         calls = []
 
@@ -499,17 +507,202 @@ class TestFailedRunCleansUp:
 
         monkeypatch.setattr(proc, "merge_products", failing_merge)
         with pytest.raises(RuntimeError, match="simulated"):
-            self._main(tmp_path, monkeypatch, items, generate,
+            self._main(tmp_path, monkeypatch, live_items()[:4], self._generate,   # two passes
                        lambda outfile, **kw: outfile, merge=True)
-        assert list(tmp_path.glob("*.tif")) == []
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
 
-    def test_a_successful_run_keeps_everything(self, tmp_path, monkeypatch):
-        items = live_items()[:2]
+    @pytest.mark.parametrize("merge", [False, True])
+    def test_nothing_is_under_a_product_name_while_the_run_is_in_progress(
+            self, tmp_path, monkeypatch, merge):
+        """What a SIGTERM or an OOM kill would leave behind. No handler runs
+        for those, so the only protection is that nothing is there yet."""
+        seen = []
+
+        def convert(outfile, **kw):
+            seen.append(sorted(p.name for p in tmp_path.glob("*.tif")))
+            return outfile
+
+        self._main(tmp_path, monkeypatch, live_items()[:4], self._generate, convert,
+                   merge=merge, cloud_mask=True)
+        assert seen and all(names == [] for names in seen)
+        assert len(list(tmp_path.glob("*.tif"))) == (2 if merge else 4)
+
+    def test_a_failed_rerun_leaves_the_earlier_runs_cogs_alone(self, tmp_path, monkeypatch):
+        """The cleanup used to delete by name, before anything was written:
+        a re-run that died on its first read removed the previous run's
+        finished product for that scene."""
+        items = live_items()[:3]
+        self._main(tmp_path, monkeypatch, items, self._generate, lambda outfile, **kw: outfile)
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        assert len(before) == 3
 
         def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
-            return self._write(item, algorithm_name, output_dir, cloud_mask)
+            raise OSError("simulated read failure")
 
-        self._main(tmp_path, monkeypatch, items, generate,
+        with pytest.raises(OSError, match="simulated"):
+            self._main(tmp_path, monkeypatch, items, generate, lambda outfile, **kw: outfile)
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    def test_a_rerun_replaces_the_earlier_runs_cogs(self, tmp_path, monkeypatch):
+        items = live_items()[:2]
+        self._main(tmp_path, monkeypatch, items, self._generate, lambda outfile, **kw: outfile)
+
+        def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
+            return self._write(item, algorithm_name, output_dir, value=7.0)
+
+        self._main(tmp_path, monkeypatch, items, generate, lambda outfile, **kw: outfile)
+        paths = sorted(tmp_path.iterdir())
+        assert len(paths) == 2
+        for path in paths:
+            with rio.open(path) as src:
+                assert (src.read(1) == 7.0).all()
+
+    def test_a_successful_run_leaves_only_its_cogs(self, tmp_path, monkeypatch, capsys):
+        self._main(tmp_path, monkeypatch, live_items()[:2], self._generate,
                    lambda outfile, **kw: outfile, cloud_mask=True)
-        assert len(list(tmp_path.glob("*.tif"))) == 2
-        assert not (tmp_path / "_cloud_masks").exists()
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert names == ["LC09_L2SP_ndvi_022035_masked_2025-09-06T16:30:42Z.tif",
+                         "LC09_L2SP_ndvi_022036_masked_2025-09-06T16:31:06Z.tif"]
+        # The summary lists where the COGs ARE, not where they were built.
+        summary = capsys.readouterr().out.split("Landsat processing complete")[1]
+        for name in names:
+            assert f"  {tmp_path / name}\n" in summary
+
+
+# One WRS-2 path flown twice on a UTC day, one orbit apart. Copied from a live
+# search (Earth Search `landsat-c2-l2`, bbox 10,76,35,81 -- Svalbard --
+# 2025-07-01): 25 scenes, 8 passes, 7 distinct merged names. This only happens
+# near the poles, where a path's rows 24x-248 follow its low rows.
+POLAR = [
+    ("LC09_L2SP_001001_20250701_02_T2", "2025-07-01T14:06:54"),
+    ("LC09_L2SP_001243_20250701_02_T2", "2025-07-01T15:43:24"),
+    ("LC09_L2SP_001244_20250701_02_T2", "2025-07-01T15:43:48"),
+    ("LC09_L2SP_001245_20250701_02_T2", "2025-07-01T15:44:12"),
+]
+
+
+class TestTwoPassesOneMosaicName:
+    """A merged name holds satellite + path + date. Near the poles that is not
+    unique, and the second mosaic silently replaced the first while the summary
+    still counted both."""
+
+    def _items(self):
+        return [FakeItem(item_id, _t(when)) for item_id, when in POLAR]
+
+    def _main(self, tmp_path, monkeypatch, *flags):
+        generated = []
+
+        def generate(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
+            generated.append(item.id)
+            return TestOnlyFinishedCogsReachTheOutput._write(
+                item, algorithm_name, output_dir, cloud_mask)
+
+        monkeypatch.setattr(proc, "search_landsat", lambda **kw: self._items())
+        monkeypatch.setattr(proc, "generate_index", generate)
+        monkeypatch.setattr(proc, "convert_to_cog", lambda outfile, **kw: outfile)
+        monkeypatch.setattr(sys, "argv", [
+            "process_landsat_odr", "--product", "ndvi",
+            "--start-date", "2025-07-01", "--end-date", "2025-07-01",
+            "--bbox", "10", "76", "35", "81", "--output", str(tmp_path), *flags])
+        proc.main()
+        return generated
+
+    def test_they_are_two_passes_with_one_name(self):
+        passes = odr.group_by_acquisition(self._items())
+        assert [len(scenes) for scenes in passes] == [1, 3]
+        assert len({odr._build_output_filename(scenes[0], "ndvi", merged=True)
+                    for scenes in passes}) == 1
+
+    def test_merge_is_refused_before_any_work(self, tmp_path, monkeypatch):
+        with pytest.raises(ValueError, match="more than one satellite pass") as err:
+            self._main(tmp_path, monkeypatch, "--merge")
+        message = str(err.value)
+        assert "LC09_L2SP_ndvi_P001_merged_2025-07-01_day.tif: 2 passes" in message
+        assert "14:06:54Z, 15:43:24Z" in message
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    def test_nothing_was_generated_first(self, tmp_path, monkeypatch):
+        generated = []
+        monkeypatch.setattr(proc, "generate_index",
+                            lambda **kw: generated.append(kw["item"].id))
+        monkeypatch.setattr(proc, "search_landsat", lambda **kw: self._items())
+        monkeypatch.setattr(sys, "argv", [
+            "process_landsat_odr", "--product", "ndvi", "--start-date", "2025-07-01",
+            "--end-date", "2025-07-01", "--bbox", "10", "76", "35", "81",
+            "--output", str(tmp_path), "--merge"])
+        with pytest.raises(ValueError, match="more than one satellite pass"):
+            proc.main()
+        assert generated == []
+
+    def test_without_merge_the_same_search_runs(self, tmp_path, monkeypatch):
+        assert len(self._main(tmp_path, monkeypatch)) == 4
+        assert len(list(tmp_path.glob("*.tif"))) == 4
+
+    def test_an_ordinary_search_is_not_refused(self):
+        proc._refuse_ambiguous_mosaics(live_items(), "ndvi", False)
+
+
+
+# ---------------------------------------------------------------------------
+# What main() hands to convert_to_cog
+# ---------------------------------------------------------------------------
+
+class TestCogHandOff:
+    """Every other test here replaces convert_to_cog with a pass-through, so
+    nothing else notices what it is called with."""
+
+    def _main(self, tmp_path, monkeypatch, product, *flags):
+        import json
+
+        calls = []
+
+        def generate_index(item, algorithm, algorithm_name, output_dir, nodata, cloud_mask):
+            return TestOnlyFinishedCogsReachTheOutput._write(item, algorithm_name, output_dir)
+
+        def generate_composite(item, algorithm, algorithm_name, output_dir, cloud_mask):
+            path = f"{output_dir}/{odr._build_output_filename(item, algorithm_name)}"
+            with rio.open(path, "w", driver="GTiff", count=3, dtype="uint8", height=2, width=3,
+                          crs="EPSG:32616", transform=from_origin(400000, 4000000, 30, 30)) as dst:
+                dst.write(np.array([[[9, 9, 0], [9, 9, 0]]] * 3, np.uint8))
+            return path
+
+        def convert(outfile, **kwargs):
+            with rio.open(outfile) as src:
+                calls.append(dict(kwargs, bands=src.count, interp=src.colorinterp[-1].name))
+            return outfile
+
+        tags = tmp_path / "meta.json"
+        tags.write_text(json.dumps({"ACTIVATION_EVENT": "202509_Flood_TN", "SOURCE": "USGS"}))
+        monkeypatch.setattr(proc, "search_landsat", lambda **kw: live_items()[:2])
+        monkeypatch.setattr(proc, "generate_index", generate_index)
+        monkeypatch.setattr(proc, "generate_composite", generate_composite)
+        monkeypatch.setattr(proc, "convert_to_cog", convert)
+        monkeypatch.setattr(sys, "argv", [
+            "process_landsat_odr", "--product", product,
+            "--start-date", "2025-09-06", "--end-date", "2025-09-06",
+            "--bbox", "-88", "35", "-86", "36", "--output", str(tmp_path / "out"),
+            "--metadata-json", str(tags), *flags])
+        proc.main()
+        return calls
+
+    def test_an_index_declares_its_nodata_and_carries_the_event(self, tmp_path, monkeypatch):
+        calls = self._main(tmp_path, monkeypatch, "ndvi")
+        assert len(calls) == 2
+        for call in calls:
+            assert call["nodata"] == -9999 and call["nodata"] is not False
+            assert call["metadata"]["ACTIVATION_EVENT"] == "202509_Flood_TN"
+            assert call["dst_crs"] is None                     # native projection, no warp
+            assert (call["compression"], call["compression_level"]) == ("ZSTD", 9)
+
+    @pytest.mark.parametrize("flags", [(), ("--merge",)])
+    def test_a_composite_is_rgba_with_no_nodata(self, tmp_path, monkeypatch, flags):
+        """`nodata=False`, not 0: a scalar nodata beside an alpha band shadows
+        the alpha and masks every legitimately black pixel. And the alpha
+        band has to be there per scene as well as on a mosaic."""
+        calls = self._main(tmp_path, monkeypatch, "true_color", *flags)
+        assert len(calls) == (1 if flags else 2)
+        for call in calls:
+            assert call["nodata"] is False
+            assert (call["bands"], call["interp"]) == (4, "alpha")
+            assert call["metadata"]["SOURCE"] == "USGS"
+
